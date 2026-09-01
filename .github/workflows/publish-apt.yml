@@ -1,0 +1,131 @@
+name: Publish signed APT repository to Pages
+
+# Reusable workflow. Collects the .deb artifacts a caller's build jobs uploaded,
+# indexes and signs one flat repository per suite, and deploys the result to
+# GitHub Pages.
+#
+# Callers upload one artifact per (suite, arch) named `debs-<suite>-<arch>`;
+# this workflow regroups them into apt-repo/<suite>/ before indexing. Suite and
+# architecture names contain no dashes, so the split is unambiguous.
+#
+# Usage:
+#   jobs:
+#     publish:
+#       needs: build
+#       uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
+#       with:
+#         suites: "bookworm trixie sid"
+#         architectures: "amd64 arm64 armhf riscv64"
+#         keyring-name: mithro-tmux.gpg
+#       secrets:
+#         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+
+on:
+  workflow_call:
+    inputs:
+      suites:
+        description: Space-separated suites (e.g. "bookworm trixie sid").
+        required: true
+        type: string
+      architectures:
+        description: >-
+          Space-separated architectures to advertise in Release. Use "all" for
+          arch-independent packages. riscv64 is only official from trixie on.
+        required: false
+        default: all
+        type: string
+      origin:
+        description: Origin/Label for Release. Defaults to the repository name.
+        required: false
+        default: ""
+        type: string
+      description:
+        description: Human-readable description for Release.
+        required: false
+        default: ""
+        type: string
+      keyring-name:
+        description: Filename for the exported public key at the repo root.
+        required: true
+        type: string
+      artifact-pattern:
+        description: Pattern matching the caller's deb artifacts.
+        required: false
+        default: "debs-*"
+        type: string
+    secrets:
+      gpg-private-key:
+        description: ASCII-armoured private signing key for this repository.
+        required: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.artifact-pattern }}
+          path: staging/
+
+      - name: Regroup artifacts into apt-repo/<suite>/
+        shell: bash
+        env:
+          SUITES: ${{ inputs.suites }}
+        run: |
+          set -eux
+          for suite in $SUITES; do mkdir -p "apt-repo/$suite"; done
+          shopt -s nullglob
+          for d in staging/*/; do
+            name="$(basename "$d")"          # debs-<suite>-<arch>
+            rest="${name#debs-}"
+            suite="${rest%%-*}"
+            if [ ! -d "apt-repo/$suite" ]; then
+              echo "::warning::artifact $name names suite '$suite' which is not in '$SUITES'; skipping"
+              continue
+            fi
+            find "$d" -name '*.deb' -exec cp -v {} "apt-repo/$suite/" \;
+          done
+          ls -lR apt-repo/
+
+      - name: Use the caller's index page if it has one
+        shell: bash
+        run: |
+          set -eu
+          for cand in packaging/apt-index.html docs/apt-index.html apt-index.html; do
+            if [ -f "$cand" ]; then
+              cp "$cand" apt-repo/index.html
+              echo "using $cand"
+              break
+            fi
+          done
+
+      - name: Index and sign
+        uses: mithro/apt-repo-action@main
+        with:
+          apt-root: apt-repo
+          suites: ${{ inputs.suites }}
+          architectures: ${{ inputs.architectures }}
+          origin: ${{ inputs.origin }}
+          description: ${{ inputs.description }}
+          keyring-name: ${{ inputs.keyring-name }}
+          gpg-private-key: ${{ secrets.gpg-private-key }}
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-repo/
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

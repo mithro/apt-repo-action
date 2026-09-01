@@ -1,0 +1,93 @@
+name: Build a .deb for one suite and architecture
+description: >-
+  Run dpkg-buildpackage inside debian:<suite> for one architecture, after
+  stamping the version from packaging/deb-version.py. Emits the .debs into a
+  directory ready to upload as a debs-<suite>-<arch> artifact.
+
+# Covers the dpkg-buildpackage family only. Repositories that build with nfpm
+# (Go projects) or produce arch-independent wheels keep their own build step and
+# use only the publish half -- see README.md.
+
+inputs:
+  suite:
+    description: Debian suite to build in (bookworm, trixie, sid).
+    required: true
+  arch:
+    description: Target architecture (amd64, arm64, armhf, riscv64).
+    required: true
+  build-deps:
+    description: Extra apt packages required to build, space-separated.
+    required: false
+    default: ""
+  out-dir:
+    description: Directory the built .debs are collected into.
+    required: false
+    default: built-debs
+  version-script:
+    description: >-
+      Script that stamps debian/changelog with the rolling version. Set empty to
+      skip (the repository then supplies its own changelog version).
+    required: false
+    default: packaging/deb-version.py
+
+runs:
+  using: composite
+  steps:
+    # riscv64 only became an official Debian architecture in trixie; there is no
+    # bookworm riscv64 archive to install build-deps from. Fail with a clear
+    # message rather than a confusing apt error deep inside the container.
+    - name: Reject impossible suite/arch combinations
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        ARCH: ${{ inputs.arch }}
+      run: |
+        set -eu
+        if [ "$ARCH" = "riscv64" ] && [ "$SUITE" = "bookworm" ]; then
+          echo "::error::riscv64 is not an official Debian architecture in bookworm"
+          exit 1
+        fi
+
+    - name: Enable binfmt for cross-architecture containers
+      shell: bash
+      run: docker run --privileged --rm tonistiigi/binfmt --install all
+
+    - name: Build
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        ARCH: ${{ inputs.arch }}
+        BUILD_DEPS: ${{ inputs.build-deps }}
+        OUT_DIR: ${{ inputs.out-dir }}
+        VERSION_SCRIPT: ${{ inputs.version-script }}
+      run: |
+        set -eux
+        mkdir -p "$OUT_DIR"
+        case "$ARCH" in
+          amd64)   platform=linux/amd64 ;;
+          arm64)   platform=linux/arm64 ;;
+          armhf)   platform=linux/arm/v7 ;;
+          riscv64) platform=linux/riscv64 ;;
+          *) echo "::error::unknown arch $ARCH"; exit 1 ;;
+        esac
+        docker run --rm --platform "$platform" \
+          -v "$GITHUB_WORKSPACE:/work/src" \
+          -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
+          -w /work/src \
+          -e VERSION_SCRIPT="$VERSION_SCRIPT" \
+          -e BUILD_DEPS="$BUILD_DEPS" \
+          "debian:$SUITE" bash -ec '
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              build-essential debhelper fakeroot git python3 $BUILD_DEPS
+            # dpkg-buildpackage refuses to work in a tree git considers unsafe.
+            git config --global --add safe.directory /work/src || true
+            if [ -n "$VERSION_SCRIPT" ] && [ -f "$VERSION_SCRIPT" ]; then
+              python3 "$VERSION_SCRIPT" --write-changelog
+            fi
+            dpkg-parsechangelog -S Version
+            dpkg-buildpackage -us -uc -b
+            # dpkg-buildpackage writes to the parent directory.
+            cp /work/*.deb /work/out/
+            ls -lh /work/out/
+          '
