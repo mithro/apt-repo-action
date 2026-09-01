@@ -1,0 +1,132 @@
+name: Sign and index a multi-distribution APT repository
+description: >-
+  Turn a tree of per-suite .deb directories into a signed, flat APT repository
+  ready to serve from GitHub Pages. One flat repository per suite, so the same
+  package version can exist for bookworm, trixie and sid without colliding.
+
+inputs:
+  apt-root:
+    description: >-
+      Directory holding one subdirectory per suite, each containing the .deb
+      files for that suite (e.g. apt-repo/trixie/*.deb).
+    required: false
+    default: apt-repo
+  suites:
+    description: Space-separated suites to index (e.g. "bookworm trixie sid").
+    required: true
+  architectures:
+    description: >-
+      Space-separated architectures to advertise in each Release file
+      (e.g. "amd64 arm64 armhf riscv64"). Use "all" for arch-independent
+      packages. Note riscv64 is only an official Debian architecture from
+      trixie onwards -- do not advertise it for bookworm.
+    required: false
+    default: all
+  origin:
+    description: Origin/Label for the Release file. Defaults to the repository name.
+    required: false
+    default: ""
+  description:
+    description: Human-readable description for the Release file.
+    required: false
+    default: ""
+  keyring-name:
+    description: >-
+      Filename the exported ASCII-armoured public key is written to at the root
+      of the repository (e.g. mithro-tmux.gpg). Consumers point signed-by at it.
+    required: true
+  gpg-private-key:
+    description: ASCII-armoured private signing key. Pass the repository secret.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install indexing tools
+      shell: bash
+      run: |
+        set -eux
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg
+
+    - name: Generate per-suite metadata
+      shell: bash
+      env:
+        APT_ROOT: ${{ inputs.apt-root }}
+        SUITES: ${{ inputs.suites }}
+        ARCHES: ${{ inputs.architectures }}
+        ORIGIN: ${{ inputs.origin }}
+        DESCRIPTION: ${{ inputs.description }}
+      run: |
+        set -eux
+        origin="${ORIGIN:-${GITHUB_REPOSITORY##*/}}"
+        desc="${DESCRIPTION:-${origin} apt repository}"
+        for suite in $SUITES; do
+          dir="$APT_ROOT/$suite"
+          # A suite with no .deb is a caller bug: it would publish an empty
+          # index and silently uninstall nothing. Fail loudly instead.
+          if ! compgen -G "$dir/*.deb" > /dev/null; then
+            echo "::error::no .deb files in $dir for suite $suite"
+            exit 1
+          fi
+          (
+            cd "$dir"
+            dpkg-scanpackages --multiversion . > Packages
+            gzip -k -f Packages
+            {
+              echo "Origin: $origin"
+              echo "Label: $origin"
+              echo "Suite: stable"
+              echo "Codename: $suite"
+              echo "Architectures: $ARCHES"
+              echo "Components: main"
+              echo "Description: $desc ($suite)"
+            } > Release
+            apt-ftparchive release . >> Release
+          )
+        done
+
+    - name: Sign the repository
+      shell: bash
+      env:
+        APT_ROOT: ${{ inputs.apt-root }}
+        SUITES: ${{ inputs.suites }}
+        KEYRING_NAME: ${{ inputs.keyring-name }}
+        GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
+      run: |
+        set -eu
+        if [ -z "$GPG_PRIVATE_KEY" ]; then
+          # Unsigned repositories can only be consumed with [trusted=yes], which
+          # is not an acceptable default. Refuse rather than publish one.
+          echo "::error::gpg-private-key is empty; refusing to publish an unsigned repository"
+          exit 1
+        fi
+        export GNUPGHOME="$(mktemp -d)"
+        chmod 700 "$GNUPGHOME"
+        printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+        gpg --batch --yes --armor --export > "$APT_ROOT/$KEYRING_NAME"
+        for suite in $SUITES; do
+          cd "$APT_ROOT/$suite"
+          gpg --batch --yes --armor --detach-sign --output Release.gpg Release
+          gpg --batch --yes --clearsign --output InRelease Release
+          cd - > /dev/null
+        done
+        rm -rf "$GNUPGHOME"
+
+    - name: Write an index page if the caller did not supply one
+      shell: bash
+      env:
+        APT_ROOT: ${{ inputs.apt-root }}
+        SUITES: ${{ inputs.suites }}
+        KEYRING_NAME: ${{ inputs.keyring-name }}
+      run: |
+        set -eu
+        if [ -f "$APT_ROOT/index.html" ]; then
+          echo "caller supplied index.html; leaving it alone"
+          exit 0
+        fi
+        python3 "$GITHUB_ACTION_PATH/scripts/make-index.py" \
+          --apt-root "$APT_ROOT" \
+          --suites "$SUITES" \
+          --keyring-name "$KEYRING_NAME" \
+          --repo "$GITHUB_REPOSITORY"
