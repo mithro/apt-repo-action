@@ -26,6 +26,12 @@ name: Debian packages
 on:
   push:
     branches: [main]
+  pull_request:
+
+# Least privilege by default. Only the publish job raises this, and only for
+# itself -- see "Permissions" below.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -54,7 +60,15 @@ jobs:
           path: built-debs/*.deb
 
   publish:
+    # Never publish from a pull request: that would overwrite the live
+    # repository with packages built from unreviewed code.
+    if: github.event_name != 'pull_request'
     needs: build
+    # Scoped to this job alone, NOT to the workflow.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
       suites: "bookworm trixie sid"
@@ -63,6 +77,21 @@ jobs:
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 ```
+
+## Permissions
+
+Put the Pages permissions on the **publish job**, not at workflow level.
+
+A job that calls a reusable workflow carries its own `permissions` block, and
+that becomes the maximum available to the called workflow. Granting
+`pages: write` and `id-token: write` at workflow level instead hands those
+scopes to every job — including build jobs that run Docker, clone third-party
+sources, and on pull requests compile unreviewed code. None of those should
+hold a token that can write to Pages.
+
+The failure mode if you grant too little is loud rather than subtle: the run
+ends in `startup_failure` before any job begins, because the called workflow
+cannot escalate beyond its caller.
 
 The artifact name **must** be `debs-<suite>-<arch>`; the publish workflow splits
 on that to regroup artifacts per suite. Suite and architecture names contain no
