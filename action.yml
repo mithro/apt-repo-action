@@ -104,7 +104,23 @@ runs:
         export GNUPGHOME="$(mktemp -d)"
         chmod 700 "$GNUPGHOME"
         printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
-        gpg --batch --yes --armor --export > "$APT_ROOT/$KEYRING_NAME"
+        # apt ties a keyring file's EXTENSION to its FORMAT: a .gpg keyring must
+        # be a binary OpenPGP keyring and a .asc keyring must be ASCII-armoured.
+        # Hand apt an armoured .gpg and gpgv cannot parse it -- apt reports "the
+        # file has an unsupported filetype" and then "the repository is not
+        # signed", which is a hard failure, not a warning. Publish BOTH formats,
+        # each under the extension apt expects, so a signed-by= pointing at
+        # either one works and no consumer has to change anything.
+        case "$KEYRING_NAME" in
+          *.asc) keyring_armored="$KEYRING_NAME"; keyring_binary="${KEYRING_NAME%.asc}.gpg" ;;
+          *.gpg) keyring_binary="$KEYRING_NAME"; keyring_armored="${KEYRING_NAME%.gpg}.asc" ;;
+          *)     keyring_binary="$KEYRING_NAME"; keyring_armored="$KEYRING_NAME.asc" ;;
+        esac
+        gpg --batch --yes --export         > "$APT_ROOT/$keyring_binary"
+        gpg --batch --yes --armor --export > "$APT_ROOT/$keyring_armored"
+        # Later steps (verification, index page) need the resolved names.
+        echo "KEYRING_BINARY=$keyring_binary"   >> "$GITHUB_ENV"
+        echo "KEYRING_ARMORED=$keyring_armored" >> "$GITHUB_ENV"
         for suite in $SUITES; do
           cd "$APT_ROOT/$suite"
           gpg --batch --yes --armor --detach-sign --output Release.gpg Release
