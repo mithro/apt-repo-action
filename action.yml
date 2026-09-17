@@ -129,6 +129,18 @@ runs:
         done
         rm -rf "$GNUPGHOME"
 
+    - name: Verify each keyring matches the format its extension promises
+      shell: bash
+      env:
+        APT_ROOT: ${{ inputs.apt-root }}
+      run: |
+        set -eu
+        # The export above is the only thing standing between consumers and a
+        # repository apt calls "not signed". Check it before it ships.
+        python3 "$GITHUB_ACTION_PATH/scripts/check-keyrings.py" \
+          --binary "$APT_ROOT/$KEYRING_BINARY" \
+          --armored "$APT_ROOT/$KEYRING_ARMORED"
+
     - name: Write an index page if the caller did not supply one
       shell: bash
       env:
