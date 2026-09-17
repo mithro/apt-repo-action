@@ -146,7 +146,6 @@ runs:
       env:
         APT_ROOT: ${{ inputs.apt-root }}
         SUITES: ${{ inputs.suites }}
-        KEYRING_NAME: ${{ inputs.keyring-name }}
       run: |
         set -eu
         if [ -f "$APT_ROOT/index.html" ]; then
@@ -156,5 +155,6 @@ runs:
         python3 "$GITHUB_ACTION_PATH/scripts/make-index.py" \
           --apt-root "$APT_ROOT" \
           --suites "$SUITES" \
-          --keyring-name "$KEYRING_NAME" \
+          --keyring-name "$KEYRING_BINARY" \
+          --keyring-asc "$KEYRING_ARMORED" \
           --repo "$GITHUB_REPOSITORY"
