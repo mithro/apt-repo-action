@@ -32,8 +32,14 @@ inputs:
     default: ""
   keyring-name:
     description: >-
-      Filename the exported ASCII-armoured public key is written to at the root
-      of the repository (e.g. mithro-tmux.gpg). Consumers point signed-by at it.
+      Filename for the exported public key at the root of the repository
+      (e.g. mithro-tmux.gpg). Consumers point signed-by at it. The key is
+      published in BOTH formats apt understands, because apt reads a keyring's
+      format from its extension: <stem>.gpg is the binary keyring and
+      <stem>.asc the ASCII-armoured one. Pass either extension -- the stem is
+      what matters, and both files are written either way. A name with no
+      recognised extension is written verbatim as the binary keyring, with a
+      "<name>.asc" sibling.
     required: true
   gpg-private-key:
     description: ASCII-armoured private signing key. Pass the repository secret.

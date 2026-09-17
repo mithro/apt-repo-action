@@ -45,7 +45,9 @@ on:
         default: ""
         type: string
       keyring-name:
-        description: Filename for the exported public key at the repo root.
+        description: >-
+          Filename for the exported public key at the repo root. Published in
+          both formats apt accepts: <stem>.gpg binary, <stem>.asc armoured.
         required: true
         type: string
       artifact-pattern:
