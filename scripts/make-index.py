@@ -5,6 +5,11 @@ Generated only when the caller has not supplied its own apt-index.html. Lists
 every suite actually present, with copy-pasteable setup instructions and the
 package list read back out of each suite's Packages file, so the page cannot
 claim to ship something the repository does not contain.
+
+The setup instructions use the binary <name>.gpg keyring, which is what every
+existing signed-by= already points at; the armoured <name>.asc sibling is
+offered alongside it. apt decides how to parse a keyring from its extension,
+so the two cannot be swapped.
 """
 
 from __future__ import annotations
@@ -42,9 +47,17 @@ TEMPLATE = """<!doctype html>
 <h2>Setup</h2>
 {setup}
 
-<p class="muted">Signed with the repository's own key
-   (<a href="{keyring}">{keyring}</a>). Each suite is a separate flat
-   repository, so the same version can ship for several Debian releases.</p>
+<p class="muted">Signed with the repository's own key. apt reads a keyring's
+   format from its file extension, so the key is published in both encodings:
+   <a href="{keyring}">{keyring}</a> is the binary keyring and
+   <a href="{keyring_asc}">{keyring_asc}</a> the ASCII-armoured one. The
+   commands above use the binary form. To use the armoured key instead,
+   download <code>{keyring_asc}</code> and give <code>signed-by=</code> a path
+   ending in <code>.asc</code> to match &mdash; apt ignores a keyring whose
+   extension disagrees with its contents.</p>
+
+<p class="muted">Each suite is a separate flat repository, so the same version
+   can ship for several Debian releases.</p>
 """
 
 SETUP = """<h3>{suite}</h3>
@@ -83,9 +96,26 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apt-root", required=True)
     ap.add_argument("--suites", required=True)
-    ap.add_argument("--keyring-name", required=True)
+    ap.add_argument("--keyring-name", required=True,
+                    help="keyring filename at the repository root, e.g. my-project.gpg")
+    ap.add_argument("--keyring-asc",
+                    help="ASCII-armoured sibling; derived from --keyring-name if omitted")
     ap.add_argument("--repo", required=True, help="owner/name")
     args = ap.parse_args()
+
+    # The same extension rule action.yml applies when exporting the key: apt
+    # reads a .gpg keyring as binary and a .asc keyring as ASCII-armoured, and
+    # both are published. The instructions lead with the binary one, which is
+    # what every existing signed-by= already points at.
+    given = args.keyring_name
+    if given.endswith(".asc"):
+        keyring, keyring_asc = given[:-len(".asc")] + ".gpg", given
+    elif given.endswith(".gpg"):
+        keyring, keyring_asc = given, given[:-len(".gpg")] + ".asc"
+    else:
+        keyring, keyring_asc = given, given + ".asc"
+    if args.keyring_asc:
+        keyring_asc = args.keyring_asc
 
     root = pathlib.Path(args.apt_root)
     repo_name = args.repo.split("/")[-1]
@@ -109,15 +139,15 @@ def main() -> None:
     )
 
     setup = "".join(
-        SETUP.format(suite=suite, base=base, keyring=args.keyring_name,
-                     stem=pathlib.Path(args.keyring_name).stem)
+        SETUP.format(suite=suite, base=base, keyring=keyring,
+                     stem=pathlib.Path(keyring).stem)
         for suite in args.suites.split()
         if (root / suite).is_dir()
     )
 
     (root / "index.html").write_text(
         TEMPLATE.format(repo=args.repo, repo_name=repo_name, packages=packages,
-                        setup=setup, keyring=args.keyring_name)
+                        setup=setup, keyring=keyring, keyring_asc=keyring_asc)
     )
     print(f"wrote {root / 'index.html'}")
 

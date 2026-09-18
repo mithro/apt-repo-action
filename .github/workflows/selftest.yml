@@ -1,0 +1,126 @@
+name: Self-test
+
+# Publish a throwaway repository with THIS checkout of the action, then prove
+# real apt clients can install from it. The action had no test at all, which
+# is how every consuming repository came to serve a keyring apt refuses under
+# gpgv. The client matrix covers both verifiers apt can use: bookworm, jammy
+# and noble fall back to gpgv; trixie uses Sequoia's sqv.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build a fixture package and a throwaway signing key
+        id: fixture
+        run: |
+          set -eu
+          tests/make-fixture.sh apt-repo "bookworm trixie" "$RUNNER_TEMP/private.asc"
+          {
+            echo "private-key<<END_OF_KEY"
+            cat "$RUNNER_TEMP/private.asc"
+            echo "END_OF_KEY"
+          } >> "$GITHUB_OUTPUT"
+          cp -r apt-repo apt-repo-badname
+
+      - name: Index and sign with this checkout of the action
+        uses: ./
+        with:
+          apt-root: apt-repo
+          suites: bookworm trixie
+          keyring-name: selftest.gpg
+          gpg-private-key: ${{ steps.fixture.outputs.private-key }}
+
+      - name: The index page links both keyrings
+        run: |
+          set -eu
+          grep -q 'href="selftest.gpg"' apt-repo/index.html
+          grep -q 'href="selftest.asc"' apt-repo/index.html
+
+      - name: A keyring-name apt cannot type is refused
+        id: badname
+        continue-on-error: true
+        uses: ./
+        with:
+          apt-root: apt-repo-badname
+          suites: bookworm trixie
+          keyring-name: selftest.key
+          gpg-private-key: ${{ steps.fixture.outputs.private-key }}
+
+      - name: Check the untyped keyring-name failed the publish
+        env:
+          OUTCOME: ${{ steps.badname.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::keyring-name selftest.key was accepted (outcome: $OUTCOME)"
+            exit 1
+          fi
+
+      - name: No private key material published or left on the runner
+        run: |
+          set -u
+          fail=0
+          # Published tree: no armoured private block, and the keyrings hold
+          # public packets only.
+          if grep -rl 'PRIVATE KEY' apt-repo/; then
+            echo "::error::a published file contains a private key block"
+            fail=1
+          fi
+          for k in apt-repo/selftest.gpg apt-repo/selftest.asc; do
+            if gpg --homedir "$(mktemp -d)" --list-packets "$k" | grep -q '^:secret'; then
+              echo "::error::$k contains a secret key packet"
+              fail=1
+            fi
+          done
+          # The sign step must remove its gpg home on every exit path, the
+          # refused keyring-name above included.
+          left=$(find /tmp "$RUNNER_TEMP" -path '*/private-keys-v1.d/*' -type f || true)
+          if [ -n "$left" ]; then
+            echo "::error::imported private key left on the runner:"
+            echo "$left"
+            fail=1
+          fi
+          exit "$fail"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selftest-apt-repo
+          path: apt-repo/
+
+  apt-client:
+    needs: publish
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: "debian:bookworm", suite: bookworm}  # apt 2.6, gpgv
+          - {image: "debian:trixie", suite: trixie}      # apt 3.0, sqv
+          - {image: "ubuntu:jammy", suite: bookworm}     # apt 2.4, gpgv
+          - {image: "ubuntu:noble", suite: bookworm}     # apt 2.8, gpgv
+    name: apt-client (${{ matrix.image }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: selftest-apt-repo
+          path: apt-repo/
+
+      - name: Install from the published repository with each keyring
+        env:
+          IMAGE: ${{ matrix.image }}
+          SUITE: ${{ matrix.suite }}
+        run: |
+          docker run --rm \
+            -v "$PWD/apt-repo:/repo:ro" -v "$PWD/tests:/tests:ro" \
+            "$IMAGE" bash /tests/apt-client-check.sh /repo "$SUITE" selftest

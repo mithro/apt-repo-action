@@ -32,8 +32,13 @@ inputs:
     default: ""
   keyring-name:
     description: >-
-      Filename the exported ASCII-armoured public key is written to at the root
-      of the repository (e.g. mithro-tmux.gpg). Consumers point signed-by at it.
+      Filename for the exported public key at the root of the repository
+      (e.g. mithro-tmux.gpg). Consumers point signed-by at it. The key is
+      published in BOTH formats apt understands, because apt reads a keyring's
+      format from its extension: <stem>.gpg is the binary keyring and
+      <stem>.asc the ASCII-armoured one. Pass either extension -- the stem is
+      what matters, and both files are written either way. Any other
+      extension is rejected: apt ignores a signed-by keyring it cannot type.
     required: true
   gpg-private-key:
     description: ASCII-armoured private signing key. Pass the repository secret.
@@ -87,6 +92,7 @@ runs:
         done
 
     - name: Sign the repository
+      id: sign
       shell: bash
       env:
         APT_ROOT: ${{ inputs.apt-root }}
@@ -101,24 +107,62 @@ runs:
           echo "::error::gpg-private-key is empty; refusing to publish an unsigned repository"
           exit 1
         fi
+        # apt ties a keyring file's EXTENSION to its FORMAT: a .gpg keyring must
+        # be a binary OpenPGP keyring and a .asc keyring must be ASCII-armoured.
+        # Hand apt an armoured .gpg and gpgv cannot parse it -- apt reports "the
+        # file has an unsupported filetype" and then "the repository is not
+        # signed", which is a hard failure, not a warning. Publish BOTH formats,
+        # each under the extension apt expects, so a signed-by= pointing at
+        # either one works and no consumer has to change anything. Validated
+        # before the private key is imported, so a bad name never touches it.
+        case "$KEYRING_NAME" in
+          *.asc) keyring_armored="$KEYRING_NAME"; keyring_binary="${KEYRING_NAME%.asc}.gpg" ;;
+          *.gpg) keyring_binary="$KEYRING_NAME"; keyring_armored="${KEYRING_NAME%.gpg}.asc" ;;
+          *)
+            echo "::error::keyring-name '$KEYRING_NAME' must end in .gpg or .asc; apt ignores a signed-by keyring with any other extension"
+            exit 1
+            ;;
+        esac
         export GNUPGHOME="$(mktemp -d)"
         chmod 700 "$GNUPGHOME"
+        # The private key must not outlive this step on ANY exit path, failures
+        # included: a self-hosted runner keeps /tmp between jobs.
+        trap 'gpgconf --kill gpg-agent || true; rm -rf "$GNUPGHOME"' EXIT
         printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
-        gpg --batch --yes --armor --export > "$APT_ROOT/$KEYRING_NAME"
+        gpg --batch --yes --export         > "$APT_ROOT/$keyring_binary"
+        gpg --batch --yes --armor --export > "$APT_ROOT/$keyring_armored"
+        # Later steps (verification, index page) need the resolved names. Step
+        # outputs, not $GITHUB_ENV: that would leak into the caller's job.
+        echo "binary=$keyring_binary"   >> "$GITHUB_OUTPUT"
+        echo "armored=$keyring_armored" >> "$GITHUB_OUTPUT"
         for suite in $SUITES; do
           cd "$APT_ROOT/$suite"
           gpg --batch --yes --armor --detach-sign --output Release.gpg Release
           gpg --batch --yes --clearsign --output InRelease Release
           cd - > /dev/null
         done
-        rm -rf "$GNUPGHOME"
+
+    - name: Verify each keyring matches the format its extension promises
+      shell: bash
+      env:
+        APT_ROOT: ${{ inputs.apt-root }}
+        KEYRING_BINARY: ${{ steps.sign.outputs.binary }}
+        KEYRING_ARMORED: ${{ steps.sign.outputs.armored }}
+      run: |
+        set -eu
+        # The export above is the only thing standing between consumers and a
+        # repository apt calls "not signed". Check it before it ships.
+        python3 "$GITHUB_ACTION_PATH/scripts/check-keyrings.py" \
+          --binary "$APT_ROOT/$KEYRING_BINARY" \
+          --armored "$APT_ROOT/$KEYRING_ARMORED"
 
     - name: Write an index page if the caller did not supply one
       shell: bash
       env:
         APT_ROOT: ${{ inputs.apt-root }}
         SUITES: ${{ inputs.suites }}
-        KEYRING_NAME: ${{ inputs.keyring-name }}
+        KEYRING_BINARY: ${{ steps.sign.outputs.binary }}
+        KEYRING_ARMORED: ${{ steps.sign.outputs.armored }}
       run: |
         set -eu
         if [ -f "$APT_ROOT/index.html" ]; then
@@ -128,5 +172,6 @@ runs:
         python3 "$GITHUB_ACTION_PATH/scripts/make-index.py" \
           --apt-root "$APT_ROOT" \
           --suites "$SUITES" \
-          --keyring-name "$KEYRING_NAME" \
+          --keyring-name "$KEYRING_BINARY" \
+          --keyring-asc "$KEYRING_ARMORED" \
           --repo "$GITHUB_REPOSITORY"
