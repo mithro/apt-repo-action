@@ -37,9 +37,8 @@ inputs:
       published in BOTH formats apt understands, because apt reads a keyring's
       format from its extension: <stem>.gpg is the binary keyring and
       <stem>.asc the ASCII-armoured one. Pass either extension -- the stem is
-      what matters, and both files are written either way. A name with no
-      recognised extension is written verbatim as the binary keyring, with a
-      "<name>.asc" sibling.
+      what matters, and both files are written either way. Any other
+      extension is rejected: apt ignores a signed-by keyring it cannot type.
     required: true
   gpg-private-key:
     description: ASCII-armoured private signing key. Pass the repository secret.
@@ -93,6 +92,7 @@ runs:
         done
 
     - name: Sign the repository
+      id: sign
       shell: bash
       env:
         APT_ROOT: ${{ inputs.apt-root }}
@@ -120,13 +120,17 @@ runs:
         case "$KEYRING_NAME" in
           *.asc) keyring_armored="$KEYRING_NAME"; keyring_binary="${KEYRING_NAME%.asc}.gpg" ;;
           *.gpg) keyring_binary="$KEYRING_NAME"; keyring_armored="${KEYRING_NAME%.gpg}.asc" ;;
-          *)     keyring_binary="$KEYRING_NAME"; keyring_armored="$KEYRING_NAME.asc" ;;
+          *)
+            echo "::error::keyring-name '$KEYRING_NAME' must end in .gpg or .asc; apt ignores a signed-by keyring with any other extension"
+            exit 1
+            ;;
         esac
         gpg --batch --yes --export         > "$APT_ROOT/$keyring_binary"
         gpg --batch --yes --armor --export > "$APT_ROOT/$keyring_armored"
-        # Later steps (verification, index page) need the resolved names.
-        echo "KEYRING_BINARY=$keyring_binary"   >> "$GITHUB_ENV"
-        echo "KEYRING_ARMORED=$keyring_armored" >> "$GITHUB_ENV"
+        # Later steps (verification, index page) need the resolved names. Step
+        # outputs, not $GITHUB_ENV: that would leak into the caller's job.
+        echo "binary=$keyring_binary"   >> "$GITHUB_OUTPUT"
+        echo "armored=$keyring_armored" >> "$GITHUB_OUTPUT"
         for suite in $SUITES; do
           cd "$APT_ROOT/$suite"
           gpg --batch --yes --armor --detach-sign --output Release.gpg Release
@@ -139,6 +143,8 @@ runs:
       shell: bash
       env:
         APT_ROOT: ${{ inputs.apt-root }}
+        KEYRING_BINARY: ${{ steps.sign.outputs.binary }}
+        KEYRING_ARMORED: ${{ steps.sign.outputs.armored }}
       run: |
         set -eu
         # The export above is the only thing standing between consumers and a
@@ -152,6 +158,8 @@ runs:
       env:
         APT_ROOT: ${{ inputs.apt-root }}
         SUITES: ${{ inputs.suites }}
+        KEYRING_BINARY: ${{ steps.sign.outputs.binary }}
+        KEYRING_ARMORED: ${{ steps.sign.outputs.armored }}
       run: |
         set -eu
         if [ -f "$APT_ROOT/index.html" ]; then
