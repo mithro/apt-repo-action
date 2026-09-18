@@ -65,6 +65,32 @@ jobs:
             exit 1
           fi
 
+      - name: No private key material published or left on the runner
+        run: |
+          set -u
+          fail=0
+          # Published tree: no armoured private block, and the keyrings hold
+          # public packets only.
+          if grep -rl 'PRIVATE KEY' apt-repo/; then
+            echo "::error::a published file contains a private key block"
+            fail=1
+          fi
+          for k in apt-repo/selftest.gpg apt-repo/selftest.asc; do
+            if gpg --homedir "$(mktemp -d)" --list-packets "$k" | grep -q '^:secret'; then
+              echo "::error::$k contains a secret key packet"
+              fail=1
+            fi
+          done
+          # The sign step must remove its gpg home on every exit path, the
+          # refused keyring-name above included.
+          left=$(find /tmp "$RUNNER_TEMP" -path '*/private-keys-v1.d/*' -type f || true)
+          if [ -n "$left" ]; then
+            echo "::error::imported private key left on the runner:"
+            echo "$left"
+            fail=1
+          fi
+          exit "$fail"
+
       - uses: actions/upload-artifact@v4
         with:
           name: selftest-apt-repo
