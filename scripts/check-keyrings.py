@@ -19,6 +19,7 @@ import argparse
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 ARMOUR_HEADER = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 
@@ -30,17 +31,20 @@ RULE = (
 )
 
 
-def fingerprints(path: pathlib.Path) -> list[str]:
-    """Fingerprints gpg can actually read out of the file, or [] if it cannot."""
-    proc = subprocess.run(
-        ["gpg", "--batch", "--no-options", "--with-colons", "--show-keys", str(path)],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return []
-    return [line.split(":")[9] for line in proc.stdout.splitlines()
+def fingerprints(path: pathlib.Path) -> tuple[list[str], str]:
+    """Fingerprints gpg can read out of the file, and gpg's stderr."""
+    # A throwaway homedir: with --no-options gpg will not create ~/.gnupg, and
+    # a fresh runner has none, so without one every file looks unreadable.
+    with tempfile.TemporaryDirectory() as home:
+        proc = subprocess.run(
+            ["gpg", "--homedir", home, "--batch", "--no-options", "--with-colons",
+             "--show-keys", str(path)],
+            capture_output=True,
+            text=True,
+        )
+    fprs = [line.split(":")[9] for line in proc.stdout.splitlines()
             if line.startswith("fpr:")]
+    return (fprs if proc.returncode == 0 else []), proc.stderr.strip()
 
 
 def check(path: pathlib.Path, want_armoured: bool, problems: list[str]) -> list[str]:
@@ -58,9 +62,10 @@ def check(path: pathlib.Path, want_armoured: bool, problems: list[str]) -> list[
             f"{kind}, but its contents are {found} (first bytes: {head!r})"
         )
 
-    fprs = fingerprints(path)
+    fprs, stderr = fingerprints(path)
     if not fprs:
-        problems.append(f"{path}: gpg --show-keys cannot read any key out of this file")
+        problems.append(f"{path}: gpg --show-keys cannot read any key out of this "
+                        f"file\n      gpg said: {stderr or '(nothing)'}")
     return fprs
 
 
