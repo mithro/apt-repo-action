@@ -153,72 +153,8 @@ Each repository has **its own** signing key, referenced by consumers with
 `action.yml` **refuses to publish an unsigned repository**. An unsigned repo can
 only be consumed with `[trusted=yes]`, which is not an acceptable default.
 
-### The public key is published twice, and the extension matters
-
-apt decides how to parse a keyring from its **file extension**, not from its
-contents:
-
-| file | format apt expects |
-|---|---|
-| `<stem>.gpg` | binary OpenPGP keyring |
-| `<stem>.asc` | ASCII-armoured public key block |
-
-Both are published at the repository root, derived from the stem of
-`keyring-name`, so `signed-by=` can point at either as long as the path you
-install the key to keeps the extension that matches what you downloaded. Pass
-`keyring-name: my-project.gpg` and you get `my-project.gpg` (binary) and
-`my-project.asc` (armoured).
-
-Getting this wrong is not a warning, it is a broken repository. gpgv reads the
-armour header as an OpenPGP packet, fails, and apt gives up:
-
-```
-W: The key(s) in the keyring /etc/apt/keyrings/my-project.gpg are ignored as
-   the file has an unsupported filetype.
-E: The repository 'https://... trixie ./ InRelease' is not signed.
-```
-
-It hides easily: apt prefers Sequoia's `sqv` when that is installed (Debian 13),
-and `sqv` accepts either encoding. Everywhere `sqv` is absent — bookworm, Ubuntu
-jammy/noble, any apt 2.x — apt falls back to `gpgv` and the repository cannot be
-used at all. So the publish runs `scripts/check-keyrings.py`, which fails the
-build if either file's contents contradict its extension.
-
-The generated landing page leads with the binary `.gpg` keyring and offers the
-`.asc` alongside it.
-
-### Hosts that already installed the key
-
-Until this was fixed, `<stem>.gpg` held armoured bytes. apt never re-downloads
-a keyring, so a host that saved that file straight to a `.gpg` path keeps the
-unreadable copy after the publisher is fixed. Hosts using `sqv` do not notice;
-elsewhere, fetch it again:
-
-```sh
-curl -fsSL https://<owner>.github.io/<repo>/<stem>.gpg \
-  | sudo tee /etc/apt/keyrings/<stem>.gpg > /dev/null
-```
-
-Hosts that piped the key through `gpg --dearmor` are fine either way:
-`--dearmor` of binary input is a byte-for-byte no-op (checked on GnuPG 2.2.40
-and 2.4.7).
-
-## Testing
-
-`.github/workflows/selftest.yml` runs this checkout of the action against a
-throwaway package and key, then `tests/apt-client-check.sh` installs from the
-result in `debian:bookworm`, `debian:trixie`, `ubuntu:jammy` and
-`ubuntu:noble`. That covers both verifiers apt uses: `gpgv` on the first three
-and `sqv` on trixie. Each run also installs the armoured bytes under the `.gpg`
-name and expects that to fail under `gpgv`, so a green run shows the check can
-still catch the original bug.
-
-Run one client locally, after building a repository into `apt-repo/`:
-
-```sh
-docker run --rm -v "$PWD/apt-repo:/repo:ro" -v "$PWD/tests:/tests:ro" \
-  debian:bookworm bash /tests/apt-client-check.sh /repo bookworm <stem>
-```
+The key is published as `<stem>.gpg` (binary) and `<stem>.asc` (armoured). See
+[docs/signing.md](docs/signing.md) for why both, and for the self-test.
 
 ## Limitations
 
