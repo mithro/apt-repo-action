@@ -55,6 +55,21 @@ on:
         required: false
         default: "debs-*"
         type: string
+      extra-artifact:
+        description: >-
+          Name of one caller artifact whose files are published as they are,
+          next to the repository, under extra-dir/ (ie static binaries and
+          their checksums). Empty: nothing extra is published.
+        required: false
+        default: ""
+        type: string
+      extra-dir:
+        description: >-
+          Directory under the Pages root for extra-artifact. A single path
+          component that is not a suite name.
+        required: false
+        default: "extra"
+        type: string
     secrets:
       gpg-private-key:
         description: ASCII-armoured private signing key for this repository.
@@ -122,6 +137,45 @@ jobs:
           description: ${{ inputs.description }}
           keyring-name: ${{ inputs.keyring-name }}
           gpg-private-key: ${{ secrets.gpg-private-key }}
+
+      # After indexing: the extra files are not part of any suite, and the
+      # indexer never sees them.
+      - name: Download the extra artifact
+        if: inputs.extra-artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.extra-artifact }}
+          path: extra-staging/
+
+      - name: Place the extra artifact under extra-dir/
+        if: inputs.extra-artifact != ''
+        shell: bash
+        env:
+          EXTRA_DIR: ${{ inputs.extra-dir }}
+          SUITES: ${{ inputs.suites }}
+        run: |
+          set -eu
+          if ! [[ "$EXTRA_DIR" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::extra-dir '$EXTRA_DIR' must be a single path component"
+            exit 1
+          fi
+          for suite in $SUITES; do
+            if [ "$suite" = "$EXTRA_DIR" ]; then
+              echo "::error::extra-dir '$EXTRA_DIR' is also a suite name"
+              exit 1
+            fi
+          done
+          if [ -e "apt-repo/$EXTRA_DIR" ]; then
+            echo "::error::apt-repo/$EXTRA_DIR already exists"
+            exit 1
+          fi
+          if [ -z "$(ls -A extra-staging)" ]; then
+            echo "::error::extra artifact is empty"
+            exit 1
+          fi
+          mkdir "apt-repo/$EXTRA_DIR"
+          cp -a extra-staging/. "apt-repo/$EXTRA_DIR/"
+          ls -lR "apt-repo/$EXTRA_DIR"
 
       - uses: actions/configure-pages@v5
 

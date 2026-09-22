@@ -95,6 +95,12 @@ The failure mode if you grant too little is loud rather than subtle: the run
 ends in `startup_failure` before any job begins, because the called workflow
 cannot escalate beyond its caller.
 
+To publish other files on the same Pages site (ie static binaries and their
+checksums next to the apt repository), upload them as one artifact and pass
+`extra-artifact: <name>` and `extra-dir: <dir>`: its files are published under
+`<pages root>/<dir>/` as they are, after indexing. `<dir>` is a single path
+component and must not be a suite name.
+
 The artifact name **must** be `debs-<suite>-<arch>`; the publish workflow splits
 on that to regroup artifacts per suite. Suite and architecture names contain no
 dashes, so the split is unambiguous.
