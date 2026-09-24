@@ -23,7 +23,10 @@ inputs:
     required: false
     default: all
   origin:
-    description: Origin/Label for the Release file. Defaults to the repository name.
+    description: >-
+      Deprecated: Origin and Label are the repository name (see
+      docs/conventions.md). A different value is still honoured, with a
+      warning, until its caller is migrated.
     required: false
     default: ""
   description:
@@ -32,14 +35,28 @@ inputs:
     default: ""
   keyring-name:
     description: >-
-      Filename for the exported public key at the root of the repository
-      (e.g. mithro-tmux.gpg). Consumers point signed-by at it. The key is
+      Deprecated: the key is published as <repo>.gpg and <repo>.asc, <repo>
+      being the repository name (see docs/conventions.md). A different stem is
+      still honoured, with a warning, until its caller is migrated. The key is
       published in BOTH formats apt understands, because apt reads a keyring's
       format from its extension: <stem>.gpg is the binary keyring and
-      <stem>.asc the ASCII-armoured one. Pass either extension -- the stem is
-      what matters, and both files are written either way. Any other
-      extension is rejected: apt ignores a signed-by keyring it cannot type.
-    required: true
+      <stem>.asc the ASCII-armoured one. Any other extension is rejected: apt
+      ignores a signed-by keyring it cannot type.
+    required: false
+    default: ""
+  site-url:
+    description: >-
+      The repository's GitHub Pages URL, used in the generated setup
+      instructions. The reusable workflow passes actions/configure-pages'
+      base_url; defaults to https://<owner>.github.io/<repo>.
+    required: false
+    default: ""
+  intro-html:
+    description: >-
+      Path to an HTML fragment describing the packages, placed under the
+      heading of the generated index page. Optional.
+    required: false
+    default: ""
   gpg-private-key:
     description: ASCII-armoured private signing key. Pass the repository secret.
     required: true
@@ -64,7 +81,11 @@ runs:
         DESCRIPTION: ${{ inputs.description }}
       run: |
         set -eux
-        origin="${ORIGIN:-${GITHUB_REPOSITORY##*/}}"
+        repo="${GITHUB_REPOSITORY##*/}"
+        origin="${ORIGIN:-$repo}"
+        if [ "$origin" != "$repo" ]; then
+          echo "::warning::origin '$origin' is not the repository name '$repo'; drop the origin input (docs/conventions.md)"
+        fi
         desc="${DESCRIPTION:-${origin} apt repository}"
         for suite in $SUITES; do
           dir="$APT_ROOT/$suite"
@@ -115,6 +136,14 @@ runs:
         # each under the extension apt expects, so a signed-by= pointing at
         # either one works and no consumer has to change anything. Validated
         # before the private key is imported, so a bad name never touches it.
+        repo="${GITHUB_REPOSITORY##*/}"
+        KEYRING_NAME="${KEYRING_NAME:-$repo.gpg}"
+        case "$KEYRING_NAME" in
+          "$repo.gpg"|"$repo.asc") ;;
+          *.gpg|*.asc)
+            echo "::warning::keyring-name '$KEYRING_NAME' is not '$repo.gpg'; drop the keyring-name input (docs/conventions.md)"
+            ;;
+        esac
         case "$KEYRING_NAME" in
           *.asc) keyring_armored="$KEYRING_NAME"; keyring_binary="${KEYRING_NAME%.asc}.gpg" ;;
           *.gpg) keyring_binary="$KEYRING_NAME"; keyring_armored="${KEYRING_NAME%.gpg}.asc" ;;
@@ -163,6 +192,8 @@ runs:
         SUITES: ${{ inputs.suites }}
         KEYRING_BINARY: ${{ steps.sign.outputs.binary }}
         KEYRING_ARMORED: ${{ steps.sign.outputs.armored }}
+        SITE_URL: ${{ inputs.site-url }}
+        INTRO_HTML: ${{ inputs.intro-html }}
       run: |
         set -eu
         if [ -f "$APT_ROOT/index.html" ]; then
@@ -174,4 +205,6 @@ runs:
           --suites "$SUITES" \
           --keyring-name "$KEYRING_BINARY" \
           --keyring-asc "$KEYRING_ARMORED" \
-          --repo "$GITHUB_REPOSITORY"
+          --repo "$GITHUB_REPOSITORY" \
+          ${SITE_URL:+--site-url "$SITE_URL"} \
+          ${INTRO_HTML:+--intro-html "$INTRO_HTML"}

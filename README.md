@@ -6,6 +6,11 @@ a **signed, multi-distribution APT repository on GitHub Pages**.
 One flat repository per suite (`<pages-url>/<suite>/`), so the same package
 version can ship for bookworm, trixie and sid without filenames colliding.
 
+Every repository published with it looks the same: key `<repo>.gpg`, keyring
+`/etc/apt/keyrings/<repo>.gpg`, `Origin: <repo>`, one generated index page.
+**[docs/conventions.md](docs/conventions.md) is the convention**; this README
+covers using the workflow.
+
 ## What is here
 
 | path | kind | what it does |
@@ -15,6 +20,7 @@ version can ship for bookworm, trixie and sid without filenames colliding.
 | `build-deb/action.yml` | composite | `dpkg-buildpackage` in `debian:<suite>` for one architecture |
 | `scripts/make-index.py` | script | Generate the repository landing page |
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
+| `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |
 
 Most callers want the **reusable workflow** — it owns the `pages: write` /
@@ -75,7 +81,6 @@ jobs:
     with:
       suites: "bookworm trixie sid"
       architectures: "amd64 arm64 armhf riscv64"
-      keyring-name: my-project.gpg
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 ```
@@ -96,8 +101,11 @@ ends in `startup_failure` before any job begins, because the called workflow
 cannot escalate beyond its caller.
 
 The artifact name **must** be `debs-<suite>-<arch>`; the publish workflow splits
-on that to regroup artifacts per suite. Suite and architecture names contain no
-dashes, so the split is unambiguous.
+on the last dash to regroup artifacts per suite. Architecture names contain no
+dashes, so a suite may (`debs-raspbian-trixie-armhf`).
+
+The index page is generated for every repository. To say something about the
+packages, put an HTML fragment in `packaging/apt-intro.html`.
 
 ## Which suites to build
 
@@ -153,8 +161,10 @@ Each repository has **its own** signing key, referenced by consumers with
 `action.yml` **refuses to publish an unsigned repository**. An unsigned repo can
 only be consumed with `[trusted=yes]`, which is not an acceptable default.
 
-The key is published as `<stem>.gpg` (binary) and `<stem>.asc` (armoured). See
-[docs/signing.md](docs/signing.md) for why both, and for the self-test.
+The key is published as `<repo>.gpg` (binary) and `<repo>.asc` (armoured). See
+[docs/signing.md](docs/signing.md) for why both, and for the self-test. The
+`keyring-name` and `origin` inputs are deprecated: a value other than the
+repository name still works, with a warning, until its caller is migrated.
 
 ## Limitations
 
