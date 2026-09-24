@@ -47,6 +47,17 @@ differs from Debian's for the same codename is named `<derivative>-<codename>`
 Each suite's Release carries `Suite: stable` and `Codename: <suite>`. No
 `dists/` or `pool/`, and no repository at the site root.
 
+Each suite keeps earlier versions of its packages next to the new ones, all
+indexed, for as long as the whole site stays under `size-limit-mb` (default
+900 MB; GitHub Pages allows 1 GB). A deploy replaces the whole site, so
+without this a client whose index is a moment old would fail mid-install on a
+file the deploy just deleted, and nothing could go back a version
+(`apt install <package>=<version>`). `publish-apt.yml` fetches them from the
+live site (`scripts/keep-history.py`): every package's previous version
+first, then the one before, dropping the oldest when space runs out. Only
+versions lower than the new build's are kept, so publishing a lower version
+on purpose still takes effect; packages the build stops producing are dropped.
+
 ## One setup
 
 ```sh

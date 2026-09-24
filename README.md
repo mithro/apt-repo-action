@@ -21,6 +21,7 @@ covers using the workflow.
 | `scripts/make-index.py` | script | Generate the repository landing page |
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
+| `scripts/keep-history.py` | script | Keep earlier package versions from the live site, up to `size-limit-mb` |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |
 
 Most callers want the **reusable workflow** — it owns the `pages: write` /
@@ -135,6 +136,11 @@ commit, so each push is a new upgradeable version with no manual bump.
 
 `build-deb` calls it with `--write-changelog` so `dpkg-buildpackage` picks the
 version up from `debian/changelog`.
+
+Earlier versions stay published, and installable as `<package>=<version>`,
+while the site fits in `size-limit-mb` (default 900 MB of GitHub Pages' 1 GB):
+see "One layout" in [docs/conventions.md](docs/conventions.md). A repository
+with large packages keeps fewer; `size-limit-mb: 0` keeps none.
 
 ## Does a shared *build* action make sense?
 
