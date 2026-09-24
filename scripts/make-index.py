@@ -18,6 +18,7 @@ import argparse
 import html
 import pathlib
 import re
+import subprocess
 
 TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
@@ -39,13 +40,17 @@ TEMPLATE = """<!doctype html>
 <h1>{repo_name} apt repository</h1>
 <p>Debian packages built from
    <a href="https://github.com/{repo}">{repo}</a>.
-   Rolling release: every push to <code>main</code> publishes a new version.</p>
+   Rolling release: every push publishes a new version.</p>
+{intro}
 
 <h2>Packages</h2>
 {packages}
 
 <h2>Setup</h2>
+<p>Pick the suite matching your system
+   (<code>. /etc/os-release; echo $VERSION_CODENAME</code>).</p>
 {setup}
+<p>Signing key fingerprint: <code>{fingerprint}</code></p>
 
 <p class="muted">Signed with the repository's own key. apt reads a keyring's
    format from its file extension, so the key is published in both encodings:
@@ -92,6 +97,14 @@ def packages_in(suite_dir: pathlib.Path) -> list[tuple[str, str, str]]:
     return sorted(found.values())
 
 
+def fingerprint(keyring: pathlib.Path) -> str:
+    """Primary key fingerprint of a binary keyring, for the page to show."""
+    out = subprocess.run(["gpg", "--show-keys", "--with-colons", str(keyring)],
+                         capture_output=True, text=True, check=True).stdout
+    fprs = [line.split(":")[9] for line in out.splitlines() if line.startswith("fpr:")]
+    return fprs[0] if fprs else "unknown"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apt-root", required=True)
@@ -101,6 +114,10 @@ def main() -> None:
     ap.add_argument("--keyring-asc",
                     help="ASCII-armoured sibling; derived from --keyring-name if omitted")
     ap.add_argument("--repo", required=True, help="owner/name")
+    ap.add_argument("--site-url",
+                    help="the Pages URL; defaults to https://<owner>.github.io/<name>")
+    ap.add_argument("--intro-html",
+                    help="HTML fragment describing the packages, placed under the heading")
     args = ap.parse_args()
 
     # The same extension rule action.yml applies when exporting the key: apt
@@ -119,7 +136,8 @@ def main() -> None:
 
     root = pathlib.Path(args.apt_root)
     repo_name = args.repo.split("/")[-1]
-    base = f"https://{args.repo.split('/')[0]}.github.io/{repo_name}"
+    base = (args.site_url or f"https://{args.repo.split('/')[0]}.github.io/{repo_name}").rstrip("/")
+    intro = pathlib.Path(args.intro_html).read_text() if args.intro_html else ""
 
     rows = []
     for suite in args.suites.split():
@@ -147,7 +165,8 @@ def main() -> None:
 
     (root / "index.html").write_text(
         TEMPLATE.format(repo=args.repo, repo_name=repo_name, packages=packages,
-                        setup=setup, keyring=keyring, keyring_asc=keyring_asc)
+                        setup=setup, keyring=keyring, keyring_asc=keyring_asc,
+                        intro=intro, fingerprint=fingerprint(root / keyring))
     )
     print(f"wrote {root / 'index.html'}")
 
