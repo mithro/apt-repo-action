@@ -101,7 +101,7 @@ The failure mode if you grant too little is loud rather than subtle: the run
 ends in `startup_failure` before any job begins, because the called workflow
 cannot escalate beyond its caller.
 
-The artifact name **must** start `debs-<suite>-`, normally `debs-<suite>-<arch>`;
+The artifact name **must** be `debs-<suite>` or start `debs-<suite>-`, normally `debs-<suite>-<arch>`;
 further suffixes are allowed (`debs-bookworm-armhf-openocd-stable`). The publish
 workflow regroups each artifact under the longest suite in `suites` that its
 name starts with, so a suite may contain a dash (`debs-raspbian-trixie-armhf`).
