@@ -37,14 +37,41 @@ jobs:
         with:
           apt-root: apt-repo
           suites: bookworm trixie
-          keyring-name: selftest.gpg
+          # No keyring-name or origin: both default to the repository name.
           gpg-private-key: ${{ steps.fixture.outputs.private-key }}
 
-      - name: The index page links both keyrings
+      - name: Names follow the repository name (docs/conventions.md)
         run: |
           set -eu
-          grep -q 'href="selftest.gpg"' apt-repo/index.html
-          grep -q 'href="selftest.asc"' apt-repo/index.html
+          test -f apt-repo/apt-repo-action.gpg
+          test -f apt-repo/apt-repo-action.asc
+          grep -q 'href="apt-repo-action.gpg"' apt-repo/index.html
+          grep -q 'href="apt-repo-action.asc"' apt-repo/index.html
+          grep -q 'signed-by=/etc/apt/keyrings/apt-repo-action.gpg' apt-repo/index.html
+          grep -q '^Origin: apt-repo-action$' apt-repo/trixie/Release
+          grep -q '^Label: apt-repo-action$' apt-repo/trixie/Release
+          fpr=$(gpg --show-keys --with-colons apt-repo/apt-repo-action.gpg | awk -F: '/^fpr/ {print $10; exit}')
+          grep -q "$fpr" apt-repo/index.html
+
+      - name: carry-over.py copies a live repository byte for byte
+        run: |
+          set -eu
+          python3 -m http.server -d apt-repo 8765 &
+          server=$!
+          trap 'kill $server' EXIT
+          sleep 2
+          mkdir carried
+          python3 scripts/carry-over.py --site http://127.0.0.1:8765 --dest carried \
+            bookworm apt-repo-action.gpg
+          diff -r apt-repo/bookworm carried/bookworm
+          cmp apt-repo/apt-repo-action.gpg carried/apt-repo-action.gpg
+          # A path the new layout already publishes differently is refused.
+          echo different > carried/apt-repo-action.asc
+          if python3 scripts/carry-over.py --site http://127.0.0.1:8765 --dest carried \
+               apt-repo-action.asc; then
+            echo "::error::carry-over overwrote a file of the new layout"
+            exit 1
+          fi
 
       - name: A keyring-name apt cannot type is refused
         id: badname
@@ -75,7 +102,7 @@ jobs:
             echo "::error::a published file contains a private key block"
             fail=1
           fi
-          for k in apt-repo/selftest.gpg apt-repo/selftest.asc; do
+          for k in apt-repo/apt-repo-action.gpg apt-repo/apt-repo-action.asc; do
             if gpg --homedir "$(mktemp -d)" --list-packets "$k" | grep -q '^:secret'; then
               echo "::error::$k contains a secret key packet"
               fail=1
@@ -123,4 +150,4 @@ jobs:
         run: |
           docker run --rm \
             -v "$PWD/apt-repo:/repo:ro" -v "$PWD/tests:/tests:ro" \
-            "$IMAGE" bash /tests/apt-client-check.sh /repo "$SUITE" selftest
+            "$IMAGE" bash /tests/apt-client-check.sh /repo "$SUITE" apt-repo-action
