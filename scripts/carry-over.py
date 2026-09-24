@@ -12,8 +12,11 @@ which is exactly what those clients' configuration expects.
 A path naming a directory that holds a Release file ("." for a repository at
 the site root, "dists/bookworm" for a classic archive) is copied with every
 index file its Release lists and every .deb those indices reference. Any other
-path is copied as a single file. Every index file is checked against the
-SHA256 its Release promises, so a half-written copy is never published.
+path is copied as a single file. "old=new" serves the live site's file "new"
+under the old path "old", for a file the previous layout kept somewhere else
+(netplan's key under debian/ and raspbian/ is its root key). Every index file
+is checked against the SHA256 its Release promises, so a half-written copy is
+never published.
 """
 
 from __future__ import annotations
@@ -119,6 +122,14 @@ class Copier:
         print(f"carried over repository {path}/ with {len(debs)} packages")
 
     def path(self, path: str) -> None:
+        if "=" in path:
+            dest, src = (posixpath.normpath(p.strip("/")) for p in path.split("=", 1))
+            data = self.get(src)
+            if data is None:
+                raise SystemExit(f"{src}: not on the live site {self.site}")
+            self.put(dest, data)
+            print(f"carried over file {src} as {dest}")
+            return
         path = posixpath.normpath(path.strip("/")) or "."
         release = self.get(f"{path}/Release")
         if release is not None:

@@ -65,6 +65,10 @@ jobs:
             bookworm apt-repo-action.gpg
           diff -r apt-repo/bookworm carried/bookworm
           cmp apt-repo/apt-repo-action.gpg carried/apt-repo-action.gpg
+          # old=new serves a live file under a previous layout's path.
+          python3 scripts/carry-over.py --site http://127.0.0.1:8765 --dest carried \
+            old/place/key.gpg=apt-repo-action.gpg
+          cmp apt-repo/apt-repo-action.gpg carried/old/place/key.gpg
           # A path the new layout already publishes differently is refused.
           echo different > carried/apt-repo-action.asc
           if python3 scripts/carry-over.py --site http://127.0.0.1:8765 --dest carried \
