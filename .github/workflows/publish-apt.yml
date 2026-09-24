@@ -63,6 +63,14 @@ on:
         required: false
         default: ""
         type: string
+      size-limit-mb:
+        description: >-
+          Earlier package versions are kept from the live site, oldest dropped
+          first, while the whole site stays under this many MB (GitHub Pages
+          allows 1 GB). 0 keeps only the new build. See docs/conventions.md.
+        required: false
+        default: 900
+        type: number
       artifact-pattern:
         description: Pattern matching the caller's deb artifacts.
         required: false
@@ -149,6 +157,29 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .apt-repo-action
 
+      - name: Keep earlier versions within the size limit
+        if: inputs.size-limit-mb > 0
+        shell: bash
+        env:
+          SITE: ${{ steps.pages.outputs.base_url }}
+          SUITES: ${{ inputs.suites }}
+          LIMIT_MB: ${{ inputs.size-limit-mb }}
+          LEGACY_PATHS: ${{ inputs.legacy-paths }}
+        run: |
+          set -eu
+          # Leave room for what later steps add: the index files and pages
+          # (generously 20 MB) and any legacy-paths copy.
+          reserve=20000000
+          if [ -n "$LEGACY_PATHS" ]; then
+            # shellcheck disable=SC2086 # word splitting is the point
+            legacy=$(python3 .apt-repo-action/scripts/carry-over.py --measure \
+              --site "$SITE" --dest apt-repo $LEGACY_PATHS)
+            reserve=$((reserve + legacy))
+          fi
+          python3 .apt-repo-action/scripts/keep-history.py --site "$SITE" \
+            --dest apt-repo --suites "$SUITES" \
+            --limit-bytes $((LIMIT_MB * 1000000)) --reserve-bytes "$reserve"
+
       - name: Index and sign
         uses: ./.apt-repo-action
         with:
@@ -173,6 +204,16 @@ jobs:
           # shellcheck disable=SC2086 # word splitting is the point
           python3 .apt-repo-action/scripts/carry-over.py \
             --site "$SITE" --dest apt-repo $LEGACY_PATHS
+
+      - name: Site size
+        shell: bash
+        run: |
+          set -eu
+          bytes=$(du -sb apt-repo | cut -f1)
+          echo "deploying $((bytes / 1000000)) MB"
+          if [ "$bytes" -gt 1000000000 ]; then
+            echo "::warning::the site is $((bytes / 1000000)) MB; GitHub Pages allows 1 GB"
+          fi
 
       - uses: actions/upload-pages-artifact@v3
         with:
