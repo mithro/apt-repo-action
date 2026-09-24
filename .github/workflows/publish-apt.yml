@@ -4,10 +4,10 @@ name: Publish signed APT repository to Pages
 # indexes and signs one flat repository per suite, and deploys the result to
 # GitHub Pages.
 #
-# Callers upload one artifact per (suite, arch) named `debs-<suite>-<arch>`;
-# this workflow regroups them into apt-repo/<suite>/ before indexing.
-# Architecture names contain no dashes, so everything before the LAST dash is
-# the suite -- which may itself contain one (raspbian-trixie).
+# Callers upload one artifact per (suite, arch) named `debs-<suite>-<arch>`
+# (optionally with further `-<suffix>`es); this workflow regroups them into
+# apt-repo/<suite>/ before indexing, matching each name against the longest
+# suite in `suites` -- a suite may itself contain a dash (raspbian-trixie).
 #
 # Every name is derived from the repository name; see docs/conventions.md.
 #
@@ -102,11 +102,18 @@ jobs:
           for suite in $SUITES; do mkdir -p "apt-repo/$suite"; done
           shopt -s nullglob
           for d in staging/*/; do
-            name="$(basename "$d")"          # debs-<suite>-<arch>
+            name="$(basename "$d")"          # debs-<suite>-<arch>[-<anything>]
             rest="${name#debs-}"
-            suite="${rest%-*}"               # up to the last dash
-            if [ ! -d "apt-repo/$suite" ]; then
-              echo "::warning::artifact $name names suite '$suite' which is not in '$SUITES'; skipping"
+            # A suite may itself contain dashes (raspbian-trixie) and callers
+            # may add their own suffixes (bookworm-armhf-openocd-stable), so
+            # neither the first nor the last dash is the boundary: take the
+            # longest configured suite that the name starts with.
+            suite=""
+            for s in $SUITES; do
+              if [[ "$rest" == "$s-"* && ${#s} -gt ${#suite} ]]; then suite="$s"; fi
+            done
+            if [ -z "$suite" ]; then
+              echo "::warning::artifact $name names no suite in '$SUITES'; skipping"
               continue
             fi
             find "$d" -name '*.deb' -exec cp -v {} "apt-repo/$suite/" \;
