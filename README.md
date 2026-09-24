@@ -100,9 +100,10 @@ The failure mode if you grant too little is loud rather than subtle: the run
 ends in `startup_failure` before any job begins, because the called workflow
 cannot escalate beyond its caller.
 
-The artifact name **must** be `debs-<suite>-<arch>`; the publish workflow splits
-on the last dash to regroup artifacts per suite. Architecture names contain no
-dashes, so a suite may (`debs-raspbian-trixie-armhf`).
+The artifact name **must** start `debs-<suite>-`, normally `debs-<suite>-<arch>`;
+further suffixes are allowed (`debs-bookworm-armhf-openocd-stable`). The publish
+workflow regroups each artifact under the longest suite in `suites` that its
+name starts with, so a suite may contain a dash (`debs-raspbian-trixie-armhf`).
 
 The index page is generated for every repository. To say something about the
 packages, put an HTML fragment in `packaging/apt-intro.html`.
