@@ -105,3 +105,5 @@ their configuration is updated; then the paths are dropped from the workflow.
 
 A path naming a directory holding a `Release` is copied with its indices and
 every `.deb` they reference; anything else is copied as a single file.
+`old=new` serves the live file `new` under the old path `old`, for a file the
+previous layout kept elsewhere (`debian/netplan.gpg=netplan.gpg`).

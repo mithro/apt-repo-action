@@ -58,7 +58,8 @@ on:
           Transitional. Space-separated paths of the repository's previous
           layout (".", "debian", "dists/bookworm", "usdr.gpg") to copy, frozen,
           from the live site into this deploy so clients configured the old way
-          keep working while they are moved. See docs/conventions.md.
+          keep working while they are moved; "old=new" serves the live file
+          "new" under the old path "old". See docs/conventions.md.
         required: false
         default: ""
         type: string
