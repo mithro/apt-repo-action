@@ -8,8 +8,10 @@ version can ship for bookworm, trixie and sid without filenames colliding.
 
 Every repository published with it looks the same: key `<repo>.gpg`, keyring
 `/etc/apt/keyrings/<repo>.gpg`, `Origin: <repo>`, one generated index page.
-**[docs/conventions.md](docs/conventions.md) is the convention**; this README
-covers using the workflow.
+**[docs/conventions.md](docs/conventions.md)** is the convention for the published
+repository, and **[docs/packaging.md](docs/packaging.md)** the convention for
+building the packages: branches, workflow names, suites, architectures and
+versions. This README covers using the workflow.
 
 ## What is here
 
@@ -30,49 +32,57 @@ composite action cannot declare on a caller's behalf.
 
 ## Usage
 
+The `deb.yml` every repository uses, in outline; [docs/packaging.md](docs/packaging.md)
+fixes each name and value.
+
 ```yaml
 name: Debian packages
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [main]      # the default branch: `packaging` for a fork
+  pull_request:           # preview packages, never published
+  workflow_dispatch:
 
 # Least privilege by default. Only the publish job raises this, and only for
 # itself -- see "Permissions" below.
 permissions:
   contents: read
 
+concurrency:
+  group: deb-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build:
+  build-deb:
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        suite: [bookworm, trixie, sid]
-        arch: [amd64, arm64, armhf, riscv64]
-        exclude:
-          # riscv64 is only an official Debian architecture from trixie onwards.
-          - suite: bookworm
-            arch: riscv64
+        suite: [trixie, forky, sid]
+        arch: [amd64, i386, arm64, armhf, riscv64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # deb-version.py needs history + tags
-      - uses: mithro/apt-repo-action/build-deb@main
+          fetch-depth: 0        # the version needs history + tags
+      - name: Build
+        uses: mithro/apt-repo-action/build-deb@main
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
-          build-deps: libfoo-dev
-      - uses: actions/upload-artifact@v4
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
           name: debs-${{ matrix.suite }}-${{ matrix.arch }}
           path: built-debs/*.deb
+          retention-days: 14
 
-  publish:
+  publish-apt:
     # Never publish from a pull request: that would overwrite the live
     # repository with packages built from unreviewed code.
-    if: github.event_name != 'pull_request'
-    needs: build
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    needs: build-deb
     # Scoped to this job alone, NOT to the workflow.
     permissions:
       contents: read
@@ -80,8 +90,9 @@ jobs:
       id-token: write
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
-      suites: "bookworm trixie sid"
-      architectures: "amd64 arm64 armhf riscv64"
+      suites: "trixie forky sid"
+      architectures: "amd64 i386 arm64 armhf riscv64"
+      description: "What these packages are, in one line"
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 ```
@@ -109,33 +120,18 @@ name starts with, so a suite may contain a dash (`debs-raspbian-trixie-armhf`).
 The index page is generated for every repository. To say something about the
 packages, put an HTML fragment in `packaging/apt-intro.html`.
 
-## Which suites to build
+## Suites, architectures and versions
 
-- **trixie + sid** — everything.
-- **+ bookworm** — anything consumed by fpgas.online, whose Pi NFS root is still
-  Raspberry Pi OS bookworm.
-- **Ubuntu suites** (noble, jammy) are supported by the same machinery: pass them
-  in `suites` and build them in the matrix. `debian:<suite>` becomes
-  `ubuntu:<suite>`, which `build-deb` does not yet do — see *Limitations*.
+All three are fixed by [docs/packaging.md](docs/packaging.md):
 
-## Which architectures
-
-At least `amd64`, `arm64`, `armhf` (older Raspberry Pi) and `riscv64` — except
-for packages specific to the Raspberry Pi, which only need `arm64` and `armhf`.
-
-`riscv64` has no bookworm archive; `build-deb` fails that combination with an
-explicit message rather than a confusing apt error, and the example matrix
-excludes it.
-
-## Versioning
-
-Rolling releases: every push to `main` publishes. Versions come from
-`git describe`, via `packaging/deb-version.py` in the calling repository —
-`X.Y` at tag `vX.Y`, `X.Y.postN` N commits later. That increments on every
-commit, so each push is a new upgradeable version with no manual bump.
-
-`build-deb` calls it with `--write-changelog` so `dpkg-buildpackage` picks the
-version up from `debian/changelog`.
+- **Suites**: Debian stable, testing and unstable (trixie, forky, sid) plus the
+  Raspbian releases of the same codenames. bookworm only for the reasons
+  listed there.
+- **Architectures**: amd64, i386, arm64, armhf and riscv64, or `all` alone.
+  A smaller set only for hardware-specific packages.
+- **Versions**: from `git describe` counts, never dates. Every push to the
+  default branch is a new, higher version, with a `~deb<R>` suffix per suite
+  and `~pr<P>` for pull request previews.
 
 Earlier versions stay published, and installable as `<package>=<version>`,
 while the site fits in `size-limit-mb` (default 900 MB of GitHub Pages' 1 GB):
