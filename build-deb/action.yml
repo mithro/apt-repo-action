@@ -13,7 +13,7 @@ inputs:
     description: Debian suite to build in (bookworm, trixie, sid).
     required: true
   arch:
-    description: Target architecture (amd64, arm64, armhf, riscv64).
+    description: Target architecture (amd64, i386, arm64, armhf, riscv64).
     required: true
   build-deps:
     description: Extra apt packages required to build, space-separated.
@@ -65,6 +65,7 @@ runs:
         mkdir -p "$OUT_DIR"
         case "$ARCH" in
           amd64)   platform=linux/amd64 ;;
+          i386)    platform=linux/386 ;;
           arm64)   platform=linux/arm64 ;;
           armhf)   platform=linux/arm/v7 ;;
           riscv64) platform=linux/riscv64 ;;
