@@ -147,6 +147,11 @@ jobs:
   | `Install test` | install the built packages into a clean container of the suite and run the smoke test |
   | `Upload` | upload `debs-<suite>-<arch>` (and `dbgsym-<suite>-<arch>`, see [Package contents](#package-contents)) |
 
+- **An `Architecture: all` repository** has `arch: [all]` in its matrix, so
+  its jobs read `build-deb (trixie all)` and its artifacts `debs-trixie-all`.
+- **An existing `ci.yml`** (tests in a workflow of their own) becomes the
+  `test` job in `deb.yml`, and the file is deleted. Update the branch
+  protection's required checks in the same change: they name the old jobs.
 - **Artifacts** are named `debs-<suite>-<arch>`, with an optional further
   `-<part>` (`debs-bookworm-armhf-openocd-stable`), and kept for
   `retention-days: 14`.
@@ -337,6 +342,12 @@ A **backport** keeps Debian's version and adds Debian's backport suffix:
 - **`~pr<P>`** always goes last. A `~` sorts before everything, even the end
   of the string, so a preview is always older than the default-branch build
   of the same commit and never upgrades over it.
+  - A pull request builds GitHub's merge of it into the default branch, so
+    its count is the count the merge commit will have. The default branch's
+    build after the merge then sorts above every preview. A squash or rebase
+    merge makes fewer commits, and a preview of a pull request with several
+    commits can sort above it. So packaging repositories merge pull requests
+    with merge commits.
 
 For example, from lowest to highest (checked with `dpkg --compare-versions`):
 
@@ -376,6 +387,24 @@ that sorts wrongly. Each one is a recorded exception.
   exists (see [compliance-plan.md](compliance-plan.md)), and the shared
   version script. A repository doesn't carry its own copy of
   `deb-version.py`.
+- **`build-deb`** (`uses: mithro/apt-repo-action/build-deb@main`, as the
+  `Build` step):
+  - builds in `debian:<suite>`, installing the build dependencies from
+    `debian/control`;
+  - takes `arch: all` for a repository whose packages are all
+    `Architecture: all`: one build per suite, on the runner's own
+    architecture;
+  - stamps the version with the shared
+    [`scripts/deb-version.py`](../scripts/deb-version.py), passing it the
+    suite and, on a pull request, its number. The script reads the source
+    name and maintainer from `debian/control`.
+- **The shared version script implements Set B only**, the patch series and
+  Set A forms are still to come (compliance-plan.md, section 3). Until then
+  a repository that still has its own `packaging/deb-version.py` keeps it,
+  and `build-deb` runs it, with a warning. A Set B repository deletes its own
+  copy.
+- **`publish-apt.yml` refuses** to publish from a pull request, or from any
+  ref but the default branch, whatever the caller's `if:` says.
 - A repository that builds with `nfpm` instead of `dpkg-buildpackage` (Go
   static binaries) still follows every naming, version, suite and
   architecture rule here. Only the `Build` step differs.

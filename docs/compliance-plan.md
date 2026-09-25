@@ -126,6 +126,10 @@ what a repository gets by default.
      series), plus `~deb<R>` and `~pr<P>`;
    - has a test table, including every ordering in packaging.md;
    - replaces the 11 diverging copies of `packaging/deb-version.py`.
+
+   Started: Set B and both suffixes are done, `build-deb/` runs it, and
+   `tests/test_deb_version.py` checks the ordering table. The patch series,
+   Set A and backport forms are still to come.
 2. **`.github/workflows/build-deb.yml`**, a reusable build workflow:
    - takes `suites`/`architectures` (default: the defaults);
    - runs the matrix on the right runners, with QEMU for foreign
@@ -140,6 +144,8 @@ what a repository gets by default.
    (the composite action) stays for repositories that need their own job
    around the build (nfpm, patch series).
 3. **`publish-apt.yml` enforces what can only be checked at publish time:**
+   - refuses to publish from a pull request or any ref but the default
+     branch (done);
    - refuses a version that isn't greater than what the suite already
      publishes (PKG-VERSION's "every push is newer");
    - refuses to advertise an architecture with no packages;

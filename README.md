@@ -149,12 +149,19 @@ this pattern the build step falls into three families:
 2. **Go projects packaged with `nfpm`** — cross-compilation and an `nfpm.yaml`
    replace the whole Debian toolchain. Almost nothing is shared with (1) beyond
    the artifact naming, so these keep their own build job.
-3. **Pure-Python, `Architecture: all`** — one build, no matrix at all. Sharing a
-   matrix-shaped action here would add ceremony rather than remove it.
+3. **`Architecture: all`** (shell, pure Python) — one build per suite. These
+   are family (1) with `arch: all`: `build-deb` builds them once per suite, on
+   the runner's own architecture.
 
-So: share the publish half everywhere, share the build half only for family (1).
-Families (2) and (3) upload `debs-<suite>-<arch>` artifacts themselves and call
-the publish workflow unchanged.
+So: share the publish half everywhere, and the build half for every
+`dpkg-buildpackage` repository. Family (2) uploads `debs-<suite>-<arch>`
+artifacts itself and calls the publish workflow unchanged.
+
+`build-deb` stamps the version with the shared
+[`scripts/deb-version.py`](scripts/deb-version.py) (Set B, with the `~deb<R>`
+and `~pr<P>` suffixes of [docs/packaging.md](docs/packaging.md#versions)). A
+repository that still carries its own `packaging/deb-version.py` keeps using
+it, with a warning, until it is migrated.
 
 ## Signing
 
