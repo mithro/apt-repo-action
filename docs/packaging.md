@@ -8,9 +8,10 @@ lives, how builds are triggered and named, which suites and architectures
 are built, and how versions are made.
 
 **MUST** and **SHOULD** are used as in RFC 2119. Anything a repository does
-differently from a MUST, or from a default, is an *exception*. Exceptions
-are listed, with the reason, under [Recorded exceptions](#recorded-exceptions).
-An exception that isn't listed there is a bug.
+differently from a MUST, or from a default, is an *exception*. Each
+repository declares its kind and its exceptions, with the reason for each,
+in its own [`.github/apt-packaging.toml`](#the-declaration). An exception that
+isn't declared there is a bug.
 
 In what follows, `<repo>` is the GitHub repository name, and `<owner-tag>` is
 `welland` for `mithro/*` and `fpgasonline` for `fpgas-online/*` (see
@@ -236,7 +237,7 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
 **Also building `bookworm`** (and `raspbian-bookworm`, when the package is
 architecture-dependent) is allowed for exactly these reasons. Each
 repository that does so names its reason in
-[Recorded exceptions](#recorded-exceptions).
+[its declaration](#the-declaration).
 
 1. **fpgas.online uses it**: anything in `fpgas-online/*`, and anything
    fpgas.online installs. Its Pi NFS root is Raspberry Pi OS bookworm.
@@ -429,23 +430,48 @@ Optional. A repository that also publishes its builds as GitHub Releases:
 - The `github-pages` environment allows deployments from the default branch
   only.
 
-## Recorded exceptions
+## The declaration
 
-Every difference from a default or a MUST above, with its reason. A
-repository not listed follows every default.
+Every packaging repository has `.github/apt-packaging.toml` on its default
+branch. It says what kind of repository it is, and gives the reason for
+every exception. `scripts/apt-compliance.py` reads it; nothing else about a
+repository is recorded outside the repository.
 
-| repository | exception | reason |
-|---|---|---|
-| fpgas-online/apt | collects packages built elsewhere: no `debian/`, no build matrix, versions come from each package's own repository | it is fpgas.online's apt repository for small packages that don't warrant their own; each is built and versioned in its own repository |
-| fpgas-online/apt | `bookworm` | fpgas.online uses it |
-| fpgas-online/fpgas.online-fpga-tools | `bookworm` | fpgas.online uses it; NeTV2 |
-| fpgas-online/fpgas.online-fpga-tools | architectures `arm64 armhf` (+ `raspbian-*`) | hardware-specific: Raspberry Pi 5 (RP1 PIO JTAG) |
-| fpgas-online/fpgas.online-fpga-tools | `libpio0` / `libpio-dev` versioned by upstream commit date | Raspberry Pi's piolib has no tags or versions. Moving to `0.0+git<N>` needs an epoch, since it sorts below the published `20260914+…`. |
-| fpgas-online/nfsroot-watchdog | `bookworm` | fpgas.online uses it |
-| fpgas-online/rpi-qemu | epoch `2:` | recovery from an earlier version scheme |
-| mithro/paho-mqtt-bookworm | only `bookworm` | backport: paho-mqtt 2.x for bookworm, needed by sensors2mqtt there |
-| mithro/python-netgear-switch-library | `bookworm` | fpgas.online uses it |
-| mithro/rp1-jtag | not published | retired: its packages moved to fpgas.online-fpga-tools. Its Pages site is replaced by hand (`pages.yml`). |
-| mithro/rpi-hwid | `bookworm` | NeTV2 (the `rpi5-netv2` host) |
-| mithro/sensors2mqtt | `bookworm` | fpgas.online uses it |
-| mithro/ten64-microcontroller-utility | architecture `arm64` | hardware-specific: Traverse Ten64 |
+```toml
+kind = "A"                  # "A": someone else's code; "B": ours;
+                            # "aggregate": collects packages built elsewhere
+variant = "backport"        # optional: "backport" (A) or "patch-series" (B)
+upstream = "https://github.com/tmux/tmux"      # Set A
+architectures = "any"       # "any" (the default set), "all", or a list: ["arm64"]
+suites = "default"          # "default", or the full list:
+                            # ["bookworm", "trixie", "forky", "sid"]
+
+[exceptions]                # rule ID = reason, for every rule not followed
+PKG-SUITES = "fpgas.online uses it"
+```
+
+- `architectures` and `suites` other than the defaults need an entry under
+  `[exceptions]` (`PKG-ARCH`, `PKG-SUITES`) saying why.
+- A default `suites` adds the `raspbian-<codename>` suites when `armhf` is
+  built. A listed `suites` is taken exactly.
+- The rule IDs are the ones in
+  [compliance-plan.md](compliance-plan.md#2-the-checker-scriptsapt-compliancepy).
+
+The exceptions agreed on 2026-09-25, which each repository's declaration
+should carry:
+
+| repository | declaration |
+|---|---|
+| fpgas-online/apt | `kind = "aggregate"`, `architectures = "all"`, `suites = ["bookworm", "trixie", "forky", "sid"]`, `PKG-SUITES = "fpgas.online uses it"` |
+| fpgas-online/fpgas.online-fpga-tools | `kind = "B"`, `variant = "patch-series"`, `architectures = ["arm64", "armhf"]`, bookworm added to the suites; `PKG-ARCH = "hardware-specific: Raspberry Pi 5 (RP1 PIO JTAG)"`, `PKG-SUITES = "fpgas.online uses it; NeTV2"`, `PKG-NODATES = "libpio: Raspberry Pi's piolib has no tags or versions"` |
+| fpgas-online/nfsroot-watchdog | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"` |
+| fpgas-online/rpi-qemu | `kind = "B"`, `variant = "patch-series"`; `PKG-VERSION = "epoch 2: recovers from an earlier version scheme"` |
+| mithro/paho-mqtt-bookworm | `kind = "A"`, `variant = "backport"`, `architectures = "all"`, `suites = ["bookworm"]`; `PKG-SUITES = "backport: paho-mqtt 2.x for bookworm, needed by sensors2mqtt there"` |
+| mithro/python-netgear-switch-library | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"` |
+| mithro/rpi-hwid | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "NeTV2 (the rpi5-netv2 host)"` |
+| mithro/scanbd | `kind = "A"`; `PKG-VERSION = "epoch 1: the count-based version sorts below the published 1.5.1+welland4"` |
+| mithro/sensors2mqtt | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"` |
+| mithro/ten64-microcontroller-utility | `kind = "A"`, `architectures = ["arm64"]`; `PKG-ARCH = "hardware-specific: Traverse Ten64"` |
+
+Every other repository declares only its `kind` (and `upstream` or
+`architectures = "all"`).

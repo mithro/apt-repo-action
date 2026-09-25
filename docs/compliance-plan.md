@@ -1,12 +1,15 @@
 # Keeping every repository in compliance
 
-A plan, not yet built, for how apt-repo-action brings every apt repository
-in line with [packaging.md](packaging.md) and [conventions.md](conventions.md),
-and keeps it there as conventions are added.
+How apt-repo-action brings every apt repository in line with
+[packaging.md](packaging.md) and [conventions.md](conventions.md), and keeps
+it there as conventions are added. The checker (section 2) exists; the rest
+is a plan.
 
-On 2026-09-25 no repository meets every rule. Of 21 repositories, 19 build
-packages, and each of those fails between 6 and 17 of the 22 checks below.
-Most failures are the same six rules, each failing in 16 to 20 repositories:
+On 2026-09-25 no repository meets every rule. `scripts/apt-compliance.py`
+finds 20 packaging repositories, and each fails between 7 and 17 of its
+28 rules; `PKG-DECLARED` fails everywhere, since no repository has its
+declaration yet. Apart from that, most failures are the same six rules,
+each failing in 18 to 20 repositories:
 - the workflow file's name;
 - the concurrency block;
 - building with the shared build and version script;
@@ -21,84 +24,97 @@ are in the compliance report.
 
 1. **A rule that isn't checked by a program drifts.** Every rule gets an ID
    and a check, in the same pull request that adds the rule.
-2. **Put the rule in shared code instead of in 21 copies.** The version
+2. **Put the rule in shared code instead of in 20 copies.** The version
    script, the build matrix and the install test live in apt-repo-action,
    and every repository calls them at `@main`. Fixing it there fixes it
    everywhere.
-3. **Exceptions are data.** They're listed in one file, with a reason, and
-   the checker reads the same file. An unlisted difference is a failure, not
-   a judgement call.
+3. **Exceptions are data.** Each repository declares its own, with a
+   reason, in `.github/apt-packaging.toml`, and the checker reads that file.
+   An undeclared difference is a failure, not a judgement call.
 4. **New rules start as warnings.** A rule only fails builds once every
    repository passes it or has an exception, so adding a rule never breaks
    a publish.
 
-## 1. The registry: `repositories.toml`
+## 1. Each repository declares itself
 
-One entry per apt repository, at the root of apt-repo-action:
+Nothing about a repository is kept outside it. Its
+[`.github/apt-packaging.toml`](packaging.md#the-declaration) gives its kind
+(Set A, Set B, aggregate), variant, upstream, and any non-default suites or
+architectures, with a reason for each exception, keyed by rule ID. An
+exception is reviewed in the repository's own pull request, like any other
+change to its packaging.
 
-```toml
-[repo."mithro/tmux"]
-set = "A"                          # A, B, aggregate, retired
-variant = ""                       # backport, patch-series
-upstream = "https://github.com/tmux/tmux"
-suites = "default"                 # or a list; anything but "default" needs an exception
-architectures = "default"          # "default", "all", or a list
+Until a repository has its declaration, the checker infers its kind:
+- **aggregate** if its workflows build nothing;
+- **Set A** if it is a fork, has an `upstream` branch, carries commits by
+  people outside the owner (or the organisation's members) from before the
+  repository existed, or publishes `~bpo` or `+<owner-tag><M>` versions;
+- **Set B** otherwise.
 
-[[repo."fpgas-online/fpgas.online-fpga-tools".exception]]
-rule = "PKG-ARCH"
-value = "arm64 armhf"
-reason = "hardware-specific: Raspberry Pi 5 (RP1 PIO JTAG)"
+Inferred kinds fail `PKG-DECLARED`.
+
+**Discovery** needs no list either. A repository is a packaging repository
+when a workflow, on its default branch or on the branch its Pages site last
+deployed from, calls apt-repo-action (`uses: <action-repo>/…`) or indexes an
+apt repository itself (`dpkg-scanpackages`, `apt-ftparchive`, `reprepro`).
+Comments don't count. A repository that stops publishing (as rp1-jtag did)
+stops being found. A Pages site that still serves `<repo>.gpg` without such
+a workflow is reported separately, as a *site without packaging*: something
+still serves frozen packages there.
+
+## 2. The checker: `scripts/apt-compliance.py`
+
+One self-contained script (`uv run`, needs only `gh`). It knows what the
+conventions mean and nothing about any particular owner; the owners, their
+version tags and the maintainer are arguments:
+
+```sh
+uv run scripts/apt-compliance.py \
+  --owner mithro=welland --owner fpgas-online=fpgasonline \
+  --maintainer "Tim 'mithro' Ansell <me@mith.ro>" \
+  --html report.html --markdown report.md --json report.json
 ```
 
-- It replaces the *Recorded exceptions* table in packaging.md; that table
-  is generated from the registry.
-- Discovery keeps it complete. The nightly job also lists every repository
-  with GitHub Pages in both owners, and one that serves `<repo>.gpg` but
-  isn't registered is reported. That is how rp1-jtag was found missing from
-  the earlier audit.
-
-## 2. The checker: `scripts/check-compliance.py`
-
-Each rule has an ID, and each ID has a check:
+It discovers the repositories, gathers facts from the GitHub API and the
+live sites, checks each rule, and writes the tables and per-repository todo
+lists (HTML), one checklist per repository (Markdown, the body of the
+repository's issue in section 4), and everything as JSON.
 
 | ID | rule | how it's checked |
 |---|---|---|
-| PKG-BRANCH | default branch `packaging` (A) or `main` (B) | GitHub API |
-| PKG-HISTORY | Set A carries upstream's history | fork parent, or `upstream` shares commits with the upstream URL |
+| PKG-DECLARED | the kind is declared | `.github/apt-packaging.toml` parses |
+| PKG-BRANCH | default branch `packaging` (A) or `main` (B), and it publishes | GitHub API, last Pages deployment |
+| PKG-HISTORY | Set A carries upstream's history | fork, or commits by others before the repository existed |
 | PKG-UPSTREAM | Set A has an `upstream` branch | GitHub API |
-| PKG-SYNC | Set A has `sync-upstream.yml` | file on the default branch |
+| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule) | files on the publishing branch |
 | PKG-README | Set A has `packaging/README.md` | file |
-| PKG-DEBIAN | `debian/` at the root of the default branch | file |
+| PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
-| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; no workflow_run | parse YAML |
+| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else | parse YAML |
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
-| PKG-CONCURRENCY | `deb-${{ github.ref }}` group | parse YAML |
+| PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |
-| PKG-SHARED | shared build and version script; no local `deb-version.py` | YAML + files |
-| PKG-SUITES | suites = default or registered exception | live site |
-| PKG-ARCH | architectures = default or registered exception, nothing advertised without packages | live site |
+| PKG-SHARED | shared build; no local `deb-version.py` | YAML + tree |
+| PKG-INSTALL-TEST | an `Install test` step | YAML |
+| PKG-SUITES | default suites, or declared with a reason | live site |
+| PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site |
 | PKG-NODATES | no date in a version | live `Packages` |
-| PKG-VERSION | version matches its set's form | live `Packages` |
+| PKG-VERSION | version matches its kind's form; no epoch | live `Packages` |
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
-| PKG-INSTALL-TEST | an install test runs | YAML |
-| PKG-MAINTAINER | `Maintainer: Tim 'mithro' Ansell <me@mith.ro>` | `debian/control` |
-| PKG-DOCS | `## Install` with the setup lines | README |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
-| REPO-* | everything in conventions.md: key files, layout, Origin/Label, index page | live site (`tmp/consist/verify.py` today) |
+| PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
+| PKG-DOCS | `## Install` with the setup lines | README |
+| REPO-PAGES | Pages from Actions, HTTPS enforced | GitHub API |
+| REPO-KEYS | `<repo>.gpg` binary, `<repo>.asc` armoured | live site |
+| REPO-LAYOUT | flat signed suites, nothing at the root | live site |
+| REPO-RELEASE | Origin = Label = `<repo>`, `Suite: stable`, `Codename: <suite>` | live `Release` |
+| REPO-INDEX | the one setup for every suite, nothing forbidden | live index page |
 
-The prototype of the `PKG-*` checks, which produced the compliance report,
-is `tmp/consist/compliance.py` in the working tree that wrote this plan. It
-moves into `scripts/` with the registry replacing its hard-coded targets.
-
-The checker has two modes:
-- **`--all`** (nightly): every registered repository. It uses the GitHub
-  API and the live sites, and writes `compliance.json` plus a Markdown
-  report.
-- **`--self`** (inside a build): the static checks for the calling
-  repository only (branch, names, triggers, suites/architectures
-  against the registry). This takes seconds and needs no network beyond
-  the registry.
+Still to add:
+- a **`--self`** mode for use inside a build: the static checks for the
+  calling repository only (branch, names, triggers, declaration), in seconds;
+- severities (`warn`/`error`) per rule, for section 5.
 
 ## 3. Move the rules into shared code
 
@@ -127,7 +143,7 @@ what a repository gets by default.
    - refuses a version that isn't greater than what the suite already
      publishes (PKG-VERSION's "every push is newer");
    - refuses to advertise an architecture with no packages;
-   - runs `check-compliance --self` and prints its warnings, turning into
+   - runs `apt-compliance.py --self` and prints its warnings, turning into
      errors per rule as described below.
 4. **Scaffolding for new repositories**:
    - `scripts/new-repo.py --set B` writes `deb.yml`, `debian/` and the README
@@ -139,8 +155,8 @@ what a repository gets by default.
 
 ## 4. Continuous checking
 
-- **Nightly `compliance.yml` in apt-repo-action** runs `check-compliance
-  --all` plus discovery, then:
+- **Nightly `compliance.yml` in apt-repo-action** runs
+  `scripts/apt-compliance.py`, then:
   - publishes the report on apt-repo-action's own Pages site: the tables
     and todo lists of the compliance report, from live data;
   - keeps **one issue per non-compliant repository**, in that repository,
@@ -174,11 +190,12 @@ The same five steps every time:
    - Per-repository fixes go out as pull requests, scripted where the
      change is mechanical: `scripts/migrate/<rule-id>.py` opens a pull
      request in each failing repository.
-   - A repository that can't follow the rule gets a registry exception, with
-     its reason, reviewed like any other change.
+   - A repository that can't follow the rule declares an exception, with
+     its reason, in its own `.github/apt-packaging.toml`, reviewed like any
+     other change.
 4. **Enforce.** When every repository passes or has an exception, the rule's
    severity becomes `error`, and `--self` then fails a build that regresses.
-5. **Removing or changing a rule** runs the same steps. The registry keeps
+5. **Removing or changing a rule** runs the same steps. The checker keeps
    an `introduced` date per rule, so the report can say how long each
    failure has been outstanding.
 
@@ -189,11 +206,11 @@ and the shared code is proven on simple repositories before hard ones.
 
 | phase | what | repositories |
 |---|---|---|
-| 0 | Merge packaging.md; add the registry and the checker, report-only; start the nightly report and issues | apt-repo-action |
+| 0 | Merge packaging.md and the checker; add each repository's declaration; start the nightly report and issues | apt-repo-action, then all |
 | 1 | `deb-version.py` (shared) and `build-deb.yml`; migrate the `Architecture: all` Set B repositories: names, triggers, concurrency, forky, `~deb<R>` | nfsroot-watchdog, rpi-hwid, sensors2mqtt, python-netgear-switch-library, ntrip-rtcm3-to-rtcm2p3 |
 | 2 | Architecture-dependent Set B and patch series: the full architecture set and Raspbian; fpga-tools back to `@main` | go-claude-teleport, go-tmux-saver, fpgas.online-fpga-tools, rpi-qemu |
-| 3 | Set A branch layout: rename the packaging branch to `packaging` and make it the default, create `upstream`, `sync-upstream.yml`, `packaging/README.md` | dnsmasq, netplan, usdr-lib, dtbocfg, ten64-microcontroller-utility, traverse-sensors |
-| 4 | Set A repositories that are flat snapshots: re-import upstream history, then as phase 3 | tmux, scanbd, paramiko-insecure |
+| 3 | Set A branch layout: rename the packaging branch to `packaging` and make it the default, create `upstream`, `sync-upstream.yml`, `packaging/README.md` | dnsmasq, netplan, usdr-lib, dtbocfg, ten64-microcontroller-utility, traverse-sensors, tmux |
+| 4 | Set A repositories without upstream's history: import it, then as phase 3 | scanbd (a snapshot), paramiko-insecure (carries Debian's packaging history, not paramiko's) |
 | 5 | Backport and aggregate: names, triggers, suites | paho-mqtt-bookworm, fpgas-online/apt |
 | 6 | Enforce: every `PKG-*` rule to `error` | all |
 
