@@ -1,34 +1,48 @@
 name: Build a .deb for one suite and architecture
 description: >-
   Run dpkg-buildpackage inside debian:<suite> for one architecture, after
-  stamping the version from packaging/deb-version.py. Emits the .debs into a
-  directory ready to upload as a debs-<suite>-<arch> artifact.
+  stamping the version with the shared scripts/deb-version.py. Emits the .debs
+  into a directory ready to upload as a debs-<suite>-<arch> artifact.
 
 # Covers the dpkg-buildpackage family only. Repositories that build with nfpm
-# (Go projects) or produce arch-independent wheels keep their own build step and
-# use only the publish half -- see README.md.
+# (Go projects) keep their own build step and use only the publish half --
+# see README.md. The version rules are docs/packaging.md's ("Versions").
 
 inputs:
   suite:
-    description: Debian suite to build in (bookworm, trixie, sid).
+    description: Debian suite to build in (bookworm, trixie, forky, sid).
     required: true
   arch:
-    description: Target architecture (amd64, i386, arm64, armhf, riscv64).
+    description: >-
+      Target architecture: amd64, i386, arm64, armhf, riscv64, or "all" for a
+      repository whose packages are all Architecture: all (built once, on the
+      runner's own architecture).
     required: true
   build-deps:
-    description: Extra apt packages required to build, space-separated.
+    description: >-
+      Extra apt packages to install before building, space-separated. Build
+      dependencies belong in debian/control, which is always installed from;
+      this is only for what can't be declared there.
     required: false
     default: ""
+  source-dir:
+    description: The source tree to build, relative to the workspace.
+    required: false
+    default: "."
   out-dir:
     description: Directory the built .debs are collected into.
     required: false
     default: built-debs
   version-script:
     description: >-
-      Script that stamps debian/changelog with the rolling version. Set empty to
-      skip (the repository then supplies its own changelog version).
+      How debian/changelog gets this build's version. "auto" (the default):
+      the shared scripts/deb-version.py, or, while a repository still carries
+      its own packaging/deb-version.py, that one (with a warning). "shared":
+      always the shared script. A path: that script, run with
+      --write-changelog; the build fails if it is missing. "none" (or empty):
+      the committed changelog's version is used as it is.
     required: false
-    default: packaging/deb-version.py
+    default: auto
 
 runs:
   using: composite
@@ -36,19 +50,64 @@ runs:
     # riscv64 only became an official Debian architecture in trixie; there is no
     # bookworm riscv64 archive to install build-deps from. Fail with a clear
     # message rather than a confusing apt error deep inside the container.
-    - name: Reject impossible suite/arch combinations
+    - name: Check the inputs
+      id: plan
       shell: bash
       env:
         SUITE: ${{ inputs.suite }}
         ARCH: ${{ inputs.arch }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        VERSION_SCRIPT: ${{ inputs.version-script }}
       run: |
         set -eu
         if [ "$ARCH" = "riscv64" ] && [ "$SUITE" = "bookworm" ]; then
           echo "::error::riscv64 is not an official Debian architecture in bookworm"
           exit 1
         fi
+        case "$RUNNER_ARCH" in
+          X64)   native="amd64 i386 all"; all_platform=linux/amd64 ;;
+          ARM64) native="arm64 all";      all_platform=linux/arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        case "$ARCH" in
+          amd64)   platform=linux/amd64 ;;
+          i386)    platform=linux/386 ;;
+          arm64)   platform=linux/arm64 ;;
+          armhf)   platform=linux/arm/v7 ;;
+          riscv64) platform=linux/riscv64 ;;
+          all)     platform=$all_platform ;;
+          *) echo "::error::unknown arch $ARCH"; exit 1 ;;
+        esac
+        emulated=true
+        for a in $native; do [ "$a" = "$ARCH" ] && emulated=false; done
+
+        src="$GITHUB_WORKSPACE/$SOURCE_DIR"
+        case "$VERSION_SCRIPT" in
+          auto)
+            if [ -f "$src/packaging/deb-version.py" ]; then
+              echo "::warning::using this repository's own packaging/deb-version.py. Delete it to use the shared scripts/deb-version.py, which adds the ~deb<R> and ~pr<P> suffixes (docs/packaging.md, \"Versions\")."
+              mode=script; script=packaging/deb-version.py
+            else
+              mode=shared; script=
+            fi ;;
+          shared) mode=shared; script= ;;
+          none|"") mode=none; script= ;;
+          *)
+            if [ ! -f "$src/$VERSION_SCRIPT" ]; then
+              echo "::error::version-script $VERSION_SCRIPT does not exist. Without it the build would carry the committed changelog's version, which can go backwards."
+              exit 1
+            fi
+            mode=script; script=$VERSION_SCRIPT ;;
+        esac
+        {
+          echo "platform=$platform"
+          echo "emulated=$emulated"
+          echo "version-mode=$mode"
+          echo "version-script=$script"
+        } >> "$GITHUB_OUTPUT"
 
     - name: Enable binfmt for cross-architecture containers
+      if: steps.plan.outputs.emulated == 'true'
       shell: bash
       run: docker run --privileged --rm tonistiigi/binfmt --install all
 
@@ -58,36 +117,42 @@ runs:
         SUITE: ${{ inputs.suite }}
         ARCH: ${{ inputs.arch }}
         BUILD_DEPS: ${{ inputs.build-deps }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
         OUT_DIR: ${{ inputs.out-dir }}
-        VERSION_SCRIPT: ${{ inputs.version-script }}
+        PLATFORM: ${{ steps.plan.outputs.platform }}
+        VERSION_MODE: ${{ steps.plan.outputs.version-mode }}
+        VERSION_SCRIPT: ${{ steps.plan.outputs.version-script }}
+        PR: ${{ github.event.pull_request.number }}
+        ACTION_ROOT: ${{ github.action_path }}/..
       run: |
         set -eux
-        mkdir -p "$OUT_DIR"
-        case "$ARCH" in
-          amd64)   platform=linux/amd64 ;;
-          i386)    platform=linux/386 ;;
-          arm64)   platform=linux/arm64 ;;
-          armhf)   platform=linux/arm/v7 ;;
-          riscv64) platform=linux/riscv64 ;;
-          *) echo "::error::unknown arch $ARCH"; exit 1 ;;
-        esac
-        docker run --rm --platform "$platform" \
-          -v "$GITHUB_WORKSPACE:/work/src" \
+        mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
+        docker run --rm --platform "$PLATFORM" \
+          -v "$GITHUB_WORKSPACE/$SOURCE_DIR:/work/src" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
+          -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
           -w /work/src \
-          -e VERSION_SCRIPT="$VERSION_SCRIPT" \
-          -e BUILD_DEPS="$BUILD_DEPS" \
+          -e SUITE -e ARCH -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
+          -e GITHUB_REPOSITORY \
           "debian:$SUITE" bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y --no-install-recommends \
-              build-essential debhelper fakeroot git python3 $BUILD_DEPS
-            # dpkg-buildpackage refuses to work in a tree git considers unsafe.
-            git config --global --add safe.directory /work/src || true
-            if [ -n "$VERSION_SCRIPT" ] && [ -f "$VERSION_SCRIPT" ]; then
-              python3 "$VERSION_SCRIPT" --write-changelog
-            fi
+              build-essential ca-certificates debhelper dpkg-dev fakeroot git python3 $BUILD_DEPS
+            # Build dependencies come from debian/control (docs/packaging.md, "Builds").
+            apt-get build-dep -y ./
+            # git refuses to read a tree owned by another user.
+            git config --global --add safe.directory "*"
+            case "$VERSION_MODE" in
+              shared) python3 /work/apt-repo-action/scripts/deb-version.py \
+                        --suite "$SUITE" ${PR:+--pr "$PR"} --write-changelog ;;
+              script) python3 "$VERSION_SCRIPT" --write-changelog ;;
+            esac
             dpkg-parsechangelog -S Version
-            dpkg-buildpackage -us -uc -b
+            # -A: only the Architecture: all packages; -b: everything binary.
+            # dpkg-buildpackage takes SOURCE_DATE_EPOCH from the changelog date.
+            if [ "$ARCH" = all ]; then what=-A; else what=-b; fi
+            dpkg-buildpackage -us -uc "$what"
             # dpkg-buildpackage writes to the parent directory.
             cp /work/*.deb /work/out/
             ls -lh /work/out/

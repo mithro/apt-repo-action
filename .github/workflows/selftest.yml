@@ -15,6 +15,89 @@ permissions:
   contents: read
 
 jobs:
+  deb-version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: scripts/deb-version.py against docs/packaging.md
+        run: python3 -m unittest discover -v -s tests -p 'test_*.py'
+
+  build-deb:
+    # Build a throwaway source tree with THIS checkout of build-deb and check
+    # the version it stamped. On a pull request every build is a preview, so
+    # ~pr<P> is expected there.
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: trixie, arch: all, want: "0.3.post1~deb13"}
+          - {suite: sid, arch: amd64, want: "0.3.post1"}
+          - {suite: bookworm, arch: arm64, want: "0.3.post1~deb12"}    # under QEMU
+          # A repository still carrying its own packaging/deb-version.py
+          # keeps using it (tmux, scanbd) until it is migrated.
+          - {suite: trixie, arch: all, legacy: true, want: "9.9"}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make the fixture source tree
+        run: python3 tests/make-source-fixture.py fixture-src ${{ matrix.legacy && '--legacy' || '' }}
+
+      - name: Build with this checkout of build-deb
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          source-dir: fixture-src
+
+      - name: Check the version and changelog
+        env:
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+          LEGACY: ${{ matrix.legacy }}
+        run: |
+          set -eu
+          if [ -n "$PR" ] && [ "$LEGACY" != true ]; then WANT="$WANT~pr$PR"; fi
+          ls built-debs/
+          got=$(dpkg-deb -f built-debs/apt-repo-selftest-src_*.deb Version)
+          echo "version: $got (want $WANT)"
+          test "$got" = "$WANT"
+          if [ "$LEGACY" != true ]; then
+            sha=$(git -C fixture-src rev-parse HEAD)
+            head -n 3 fixture-src/debian/changelog
+            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" fixture-src/debian/changelog
+            # The placeholder stays underneath the build's entry.
+            grep -q 'Placeholder changelog' fixture-src/debian/changelog
+          fi
+
+  build-deb-refuses:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: A version-script that doesn't exist
+        id: missing
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+          version-script: packaging/no-such-script.py
+      - name: Check the build failed instead of using the placeholder version
+        env:
+          OUTCOME: ${{ steps.missing.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::a missing version-script was accepted (outcome: $OUTCOME)"
+            exit 1
+          fi
+          if ls built-debs/*.deb; then
+            echo "::error::a package was built without its version"
+            exit 1
+          fi
+
   publish:
     runs-on: ubuntu-latest
     steps:
