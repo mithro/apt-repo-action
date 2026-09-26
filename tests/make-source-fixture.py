@@ -4,9 +4,11 @@
 It gets a placeholder changelog, a v0.3 tag and one commit after it, so the
 shared version script gives 0.3.post1 plus the suffixes. --legacy also commits
 a packaging/deb-version.py of the kind repositories carried before the shared
-one, which stamps 9.9 (build-deb's "auto" must still run it).
+one, which stamps 9.9 (build-deb's "auto" must still run it). --no-changelog
+commits no debian/changelog and ignores it, as Set B does (docs/packaging.md,
+"The changelog"), so the build's entry is the only one.
 
-Usage: tests/make-source-fixture.py <dir> [--legacy]
+Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog]
 """
 import argparse
 import os
@@ -51,11 +53,17 @@ p.write_text(re.sub(r"\\(0\\.0\\)", "(9.9)", p.read_text(), count=1))
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", type=Path)
-    ap.add_argument("--legacy", action="store_true")
+    how = ap.add_mutually_exclusive_group()
+    how.add_argument("--legacy", action="store_true")
+    # The legacy script edits the committed placeholder, so it needs one.
+    how.add_argument("--no-changelog", action="store_true")
     args = ap.parse_args()
     files = dict(FILES)
     if args.legacy:
         files["packaging/deb-version.py"] = LEGACY
+    if args.no_changelog:
+        del files["debian/changelog"]
+        files[".gitignore"] = "debian/changelog\n"
     for name, text in files.items():
         path = args.dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
