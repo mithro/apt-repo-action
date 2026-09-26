@@ -95,7 +95,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
 | PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |
-| PKG-SHARED | shared build; no local `deb-version.py` | YAML + tree |
+| PKG-SHARED | shared build at `@main`; no local `deb-version.py` | YAML + tree |
 | PKG-INSTALL-TEST | an `Install test` step | YAML |
 | PKG-SUITES | default suites, or declared with a reason | live site |
 | PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site |

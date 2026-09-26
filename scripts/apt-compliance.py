@@ -102,8 +102,8 @@ RULES = [
      "Add the conventional concurrency block."),
     ("PKG-PUBLISHER", "Workflow", "publishes only through `publish-apt.yml@main`",
      "Publish through <action-repo>/.github/workflows/publish-apt.yml@main."),
-    ("PKG-SHARED", "Workflow", "builds with the shared build; no local `deb-version.py`",
-     "Build with the shared build-deb and drop packaging/deb-version.py."),
+    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main`; no local `deb-version.py`",
+     "Build with <action-repo>/build-deb@main and drop packaging/deb-version.py."),
     ("PKG-INSTALL-TEST", "Workflow", "an `Install test` step installs the packages in a clean container",
      "Add an `Install test` step."),
     ("PKG-SUITES", "Packages", "the default suites, or the declared ones with a reason",
@@ -583,15 +583,18 @@ def check(f: dict, t: dict, args, owner_tag: str | None) -> dict:
         (f"group {conc.get('group') if isinstance(conc, dict) else conc}" if conc else "none"))
     ref = str(pub.get("uses", "")).rpartition("@")[2] if pub else None
     put("PKG-PUBLISHER", ref == "main", f"publish-apt.yml@{ref}" if ref else "not through publish-apt.yml")
-    all_uses = " ".join(str(s.get("uses", "")) for j in jobs.values() if isinstance(j, dict)
-                        for s in (j.get("steps") or []) if isinstance(s, dict)) + \
-        " ".join(str(j.get("uses", "")) for j in jobs.values() if isinstance(j, dict))
-    shared = f"{args.action_repo}/build-deb" in all_uses or f"{args.action_repo}/.github/workflows/build-deb.yml" in all_uses
+    all_uses = [str(s.get("uses", "")) for j in jobs.values() if isinstance(j, dict)
+                for s in (j.get("steps") or []) if isinstance(s, dict)] + \
+        [str(j.get("uses", "")) for j in jobs.values() if isinstance(j, dict)]
+    shared_builds = {f"{args.action_repo}/build-deb".lower(), f"{args.action_repo}/.github/workflows/build-deb.yml".lower()}
+    shared = [u.partition("@") for u in all_uses if u.partition("@")[0].lower() in shared_builds]
+    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)" for path, _, ref in shared if ref != "main"]
     local_ver = "packaging/deb-version.py" in f["files"]
     if kind == "aggregate":
         put("PKG-SHARED", None, "nothing to build")
     else:
-        put("PKG-SHARED", shared and not local_ver, ("shared build" if shared else "own build steps")
+        put("PKG-SHARED", bool(shared) and not off_main and not local_ver,
+            ("; ".join(off_main) if off_main else "shared build" if shared else "own build steps")
             + ("; local deb-version.py" if local_ver else ""))
     step_names = {str(s.get("name", "")) for j in jobs.values() if isinstance(j, dict)
                   for s in (j.get("steps") or []) if isinstance(s, dict)}
