@@ -8,6 +8,10 @@ them is the same four lines with a different name in them. In what follows
 URL as GitHub reports it (`https://mith.ro/tmux`, `https://fpgas.online/nfsroot-watchdog`,
 `https://apt.fpgas.online`).
 
+This document covers the published repository. How the packages are built
+(branches, workflow names, suites, architectures and versions) is
+[packaging.md](packaging.md).
+
 ## One name
 
 `<repo>` is the only name. It is used, unchanged, for:
