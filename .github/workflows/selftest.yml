@@ -18,7 +18,7 @@ jobs:
   deb-version:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: scripts/deb-version.py against docs/packaging.md
         run: python3 -m unittest discover -v -s tests -p 'test_*.py'
 
@@ -39,7 +39,7 @@ jobs:
           # keeps using it (tmux, scanbd) until it is migrated.
           - {suite: trixie, arch: all, legacy: true, want: "9.9"}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Make the fixture source tree
         run: python3 tests/make-source-fixture.py fixture-src ${{ matrix.legacy && '--legacy' || '' }}
@@ -74,7 +74,7 @@ jobs:
   build-deb-refuses:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: python3 tests/make-source-fixture.py fixture-src
       - name: A version-script that doesn't exist
         id: missing
@@ -101,7 +101,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build a fixture package and a throwaway signing key
         id: fixture
@@ -226,7 +226,7 @@ jobs:
           - {image: "ubuntu:noble", suite: bookworm}     # apt 2.8, gpgv
     name: apt-client (${{ matrix.image }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v8
         with:

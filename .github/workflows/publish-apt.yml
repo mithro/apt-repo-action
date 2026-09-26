@@ -118,7 +118,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all deb artifacts
         uses: actions/download-artifact@v4
@@ -179,7 +179,7 @@ jobs:
       # caller pinned to a branch or SHA gets one consistent version of all
       # three. job.workflow_sha is the commit of the file defining this job.
       - name: Check out this workflow's own apt-repo-action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
