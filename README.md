@@ -161,7 +161,8 @@ artifacts itself and calls the publish workflow unchanged.
 [`scripts/deb-version.py`](scripts/deb-version.py) (Set B, with the `~deb<R>`
 and `~pr<P>` suffixes of [docs/packaging.md](docs/packaging.md#versions)). A
 repository that still carries its own `packaging/deb-version.py` keeps using
-it, with a warning, until it is migrated.
+it, with a warning, until it is migrated: see
+[Moving a repository to the shared build](docs/packaging.md#moving-a-repository-to-the-shared-build).
 
 ## Signing
 

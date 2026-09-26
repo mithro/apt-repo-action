@@ -220,6 +220,10 @@ and the shared code is proven on simple repositories before hard ones.
 | 5 | Backport and aggregate: names, triggers, suites | paho-mqtt-bookworm, fpgas-online/apt |
 | 6 | Enforce: every `PKG-*` rule to `error` | all |
 
+From phase 1 on, each repository moves to the shared build in one commit
+that also deletes its own version and build scripts: see
+[Moving a repository to the shared build](packaging.md#moving-a-repository-to-the-shared-build).
+
 **Version changes that need care**, each checked with
 `dpkg --compare-versions` against what is published now:
 
