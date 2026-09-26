@@ -362,15 +362,25 @@ For example, from lowest to highest (checked with `dpkg --compare-versions`):
 
 ### The changelog
 
-`debian/changelog` in git is not where versions are kept. The build
-prepends an entry:
+`debian/changelog` in git is not where versions are kept. The build writes
+an entry:
 - `<source> (<version>) <suite>; urgency=medium`;
 - one line, `Built from <owner>/<repo>@<sha>`;
 - the maintainer from [Package contents](#package-contents);
 - the build commit's committer time as its date.
 
-Set A repositories whose `debian/` came from Debian keep Debian's entries
-underneath.
+**Set B commits no `debian/changelog`**, and lists `debian/changelog` in
+`.gitignore`, so a local build doesn't dirty the tree. The build's entry is
+the whole file. Why:
+- each package's changelog is one true entry, the build's, not the build's
+  entry on top of a stale `0.0.post0 unstable` placeholder;
+- a plain `dpkg-buildpackage`, run without the version script, fails for
+  want of a changelog instead of quietly building a package with the
+  placeholder's version.
+
+**Set A keeps its committed `debian/changelog`**: a repository whose
+`debian/` came from Debian keeps Debian's entries, and the build's entry
+goes on top of them.
 
 **Epochs** (`2:`) are never introduced, except to recover from a version
 that sorts wrongly. Each one is a recorded exception.
@@ -428,6 +438,19 @@ scripts first leaves the old `Build` step without the scripts it runs.
 
 `build-deb` doesn't pass `--suite` or `--pr` to a repository's own script on
 purpose: tmux's and scanbd's accept only `--write-changelog`, and would fail.
+
+A Set B repository also deletes its committed `debian/changelog` and adds
+`debian/changelog` to `.gitignore` ([The changelog](#the-changelog)). It
+SHOULD do so in that same commit, but a separate commit, before or after,
+builds too:
+- the shared script works with or without a committed changelog;
+- the repositories' own scripts write the whole file rather than adding to
+  it, so they don't need one either. (sensors2mqtt's reads it only when
+  `setuptools_scm` is missing, and its build dependencies install it.)
+
+Doing it in the same commit means no published package carries the
+placeholder underneath the build's entry: the shared script keeps a
+committed changelog, while the old scripts replaced it.
 
 To check it worked, look at any `build-deb` job of that commit:
 - the `Build` step's environment shows `VERSION_MODE: shared` (`script`
