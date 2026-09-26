@@ -26,7 +26,7 @@ jobs:
     # Build a throwaway source tree with THIS checkout of build-deb and check
     # the version it stamped. On a pull request every build is a preview, so
     # ~pr<P> is expected there.
-    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }})
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -38,11 +38,17 @@ jobs:
           # A repository still carrying its own packaging/deb-version.py
           # keeps using it (tmux, scanbd) until it is migrated.
           - {suite: trixie, arch: all, legacy: true, want: "9.9"}
+          # Set B commits no debian/changelog: the build's entry is the only
+          # one in the package (docs/packaging.md, "The changelog").
+          - {suite: trixie, arch: all, no-changelog: true, want: "0.3.post1~deb13"}
     steps:
       - uses: actions/checkout@v5
 
       - name: Make the fixture source tree
-        run: python3 tests/make-source-fixture.py fixture-src ${{ matrix.legacy && '--legacy' || '' }}
+        run: >-
+          python3 tests/make-source-fixture.py fixture-src
+          ${{ matrix.legacy && '--legacy' || '' }}
+          ${{ matrix.no-changelog && '--no-changelog' || '' }}
 
       - name: Build with this checkout of build-deb
         uses: ./build-deb
@@ -56,6 +62,7 @@ jobs:
           WANT: ${{ matrix.want }}
           PR: ${{ github.event.pull_request.number }}
           LEGACY: ${{ matrix.legacy }}
+          NO_CHANGELOG: ${{ matrix.no-changelog }}
         run: |
           set -eu
           if [ -n "$PR" ] && [ "$LEGACY" != true ]; then WANT="$WANT~pr$PR"; fi
@@ -67,6 +74,21 @@ jobs:
             sha=$(git -C fixture-src rev-parse HEAD)
             head -n 3 fixture-src/debian/changelog
             grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" fixture-src/debian/changelog
+          fi
+          if [ "$NO_CHANGELOG" = true ]; then
+            # Nothing committed, so the package's changelog is the build's
+            # one entry. A native package installs it as changelog.gz, a
+            # non-native one as changelog.Debian.gz.
+            dpkg-deb -x built-debs/apt-repo-selftest-src_*.deb deb-root
+            doc=deb-root/usr/share/doc/apt-repo-selftest-src
+            ls "$doc"
+            log=$(ls "$doc"/changelog.Debian.gz "$doc"/changelog.gz || true)
+            test "$(echo "$log" | wc -w)" = 1
+            zcat "$log"
+            entries=$(zcat "$log" | grep -cE '^[a-z0-9][a-z0-9.+-]* \(.+\) .+; urgency=')
+            echo "changelog entries: $entries (want 1)"
+            test "$entries" = 1
+          elif [ "$LEGACY" != true ]; then
             # The placeholder stays underneath the build's entry.
             grep -q 'Placeholder changelog' fixture-src/debian/changelog
           fi
