@@ -72,7 +72,7 @@ jobs:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: debs-${{ matrix.suite }}-${{ matrix.arch }}
           path: built-debs/*.deb

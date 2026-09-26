@@ -208,7 +208,7 @@ jobs:
           fi
           exit "$fail"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: selftest-apt-repo
           path: apt-repo/
