@@ -173,7 +173,7 @@ jobs:
           fi
 
       - id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       # The action and scripts at the same commit as this workflow file, so a
       # caller pinned to a branch or SHA gets one consistent version of all
