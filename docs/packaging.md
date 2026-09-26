@@ -402,12 +402,41 @@ that sorts wrongly. Each one is a recorded exception.
   Set A forms are still to come (compliance-plan.md, section 3). Until then
   a repository that still has its own `packaging/deb-version.py` keeps it,
   and `build-deb` runs it, with a warning. A Set B repository deletes its own
-  copy.
+  copy, in the commit that moves it to `build-deb` (see
+  [below](#moving-a-repository-to-the-shared-build)).
 - **`publish-apt.yml` refuses** to publish from a pull request, or from any
   ref but the default branch, whatever the caller's `if:` says.
 - A repository that builds with `nfpm` instead of `dpkg-buildpackage` (Go
   static binaries) still follows every naming, version, suite and
   architecture rule here. Only the `Build` step differs.
+
+### Moving a repository to the shared build
+
+A repository with its own version script moves to `build-deb` in **one
+commit**, which:
+- changes the `Build` step to `uses: mithro/apt-repo-action/build-deb@main`;
+- deletes `packaging/deb-version.py`;
+- deletes any local build script the old `Build` step ran (nfsroot-watchdog's
+  `packaging/ci-build.sh`), and any local test of the old version script.
+
+That commit MUST NOT be split. `build-deb`'s default, `version-script: auto`,
+runs the repository's own `packaging/deb-version.py` whenever the file
+exists, with only `--write-changelog`: no suite, no pull request number. So a
+commit that switches the `Build` step but keeps the script builds with it,
+and fails if the script requires `--suite`. A commit that deletes the
+scripts first leaves the old `Build` step without the scripts it runs.
+
+`build-deb` doesn't pass `--suite` or `--pr` to a repository's own script on
+purpose: tmux's and scanbd's accept only `--write-changelog`, and would fail.
+
+To check it worked, look at any `build-deb` job of that commit:
+- the `Build` step's environment shows `VERSION_MODE: shared` (`script`
+  means the repository's own script ran);
+- the run has no "using this repository's own packaging/deb-version.py"
+  warning annotation. The same text also appears in the printed source of
+  the `Check the inputs` step; that doesn't count;
+- the version `dpkg-parsechangelog` prints ends in `~deb<R>` (nothing for
+  sid), then `~pr<P>` on a pull request.
 
 ## Package contents
 
