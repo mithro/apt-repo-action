@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0        # the version needs history + tags
       - name: Build
@@ -72,7 +72,7 @@ jobs:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: debs-${{ matrix.suite }}-${{ matrix.arch }}
           path: built-debs/*.deb
