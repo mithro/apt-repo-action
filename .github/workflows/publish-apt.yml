@@ -243,9 +243,11 @@ jobs:
             echo "::warning::the site is $((bytes / 1000000)) MB; GitHub Pages allows 1 GB"
           fi
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: apt-repo/
+          # v4 and later leave out dotfiles unless asked; v3 kept them.
+          include-hidden-files: true
 
       - id: deploy
         uses: actions/deploy-pages@v5
