@@ -121,6 +121,24 @@ class Tree(unittest.TestCase):
         self.run_script("--suite", "trixie", "--write-changelog")
         self.assertEqual((self.src / "debian/changelog").read_text(), text)
 
+    def test_no_committed_changelog(self):
+        # Set B commits no debian/changelog and ignores it (docs/packaging.md,
+        # "The changelog"): the build's entry is the whole file.
+        (self.src / "debian/changelog").unlink()
+        (self.src / ".gitignore").write_text("debian/changelog\n")
+        self.commit("two: no committed changelog")
+        sha = self.git("rev-parse", "HEAD")
+        want = ("selftest-src (0.0.post2~deb13) trixie; urgency=medium\n\n"
+                f"  * Built from example/selftest-src@{sha}\n\n"
+                " -- Self Test <selftest@invalid>  Thu, 24 Sep 2026 12:00:00 +0000\n")
+        self.run_script("--suite", "trixie", "--write-changelog")
+        self.assertEqual((self.src / "debian/changelog").read_text(), want)
+        # Again, over the file the first run left: still exactly one entry.
+        self.run_script("--suite", "trixie", "--write-changelog")
+        self.assertEqual((self.src / "debian/changelog").read_text(), want)
+        # And the ignored file leaves the tree clean.
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_committed_build_entry_is_refused(self):
         self.run_script("--suite", "trixie", "--write-changelog")
         self.commit("oops: committed a build's changelog")

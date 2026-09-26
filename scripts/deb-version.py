@@ -11,10 +11,12 @@ Implements the Set B version and the suite and preview suffixes:
 - ``~deb<R>`` is the suite's Debian release number; sid has none.
 - ``~pr<P>`` goes last, on pull request previews only.
 
-``--write-changelog`` prepends the build's entry to the committed
-debian/changelog: ``<source> (<version>) <suite>``, "Built from
-<owner>/<repo>@<sha>", the maintainer from debian/control, and the commit's
-committer time, which dpkg-buildpackage then uses as SOURCE_DATE_EPOCH.
+``--write-changelog`` writes debian/changelog with the build's entry:
+``<source> (<version>) <suite>``, "Built from <owner>/<repo>@<sha>", the
+maintainer from debian/control, and the commit's committer time, which
+dpkg-buildpackage then uses as SOURCE_DATE_EPOCH. A Set A repository's
+committed changelog stays underneath it; a Set B repository commits none, so
+the entry is the whole file.
 
 Usage (run from the source tree, with full history and tags):
     deb-version.py --suite trixie                  # print the version
@@ -115,7 +117,7 @@ def github_repository(src: Path) -> str:
 def write_changelog(src: Path, version: str, suite: str, repo: str) -> None:
     control = (src / "debian/control").read_text()
     # The committed changelog, not the working tree's, so running this twice
-    # doesn't stack two entries.
+    # doesn't stack two entries. Set B commits none: the entry is the file.
     committed = subprocess.run(["git", "-C", str(src), "show", "HEAD:debian/changelog"],
                                capture_output=True, text=True)
     old = committed.stdout if committed.returncode == 0 else ""
@@ -140,7 +142,7 @@ def main() -> None:
     ap.add_argument("--source-dir", type=Path, default=Path("."),
                     help="the source tree (default: the current directory)")
     ap.add_argument("--write-changelog", action="store_true",
-                    help="prepend this build's entry to debian/changelog")
+                    help="write this build's entry to debian/changelog, above the committed one if any")
     args = ap.parse_args()
     if args.pr is not None and args.pr <= 0:
         fail(f"--pr must be a pull request number, not {args.pr}")
