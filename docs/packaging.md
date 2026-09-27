@@ -123,7 +123,7 @@ concurrency:
 
 jobs:
   test:           # optional: the project's own test suite
-  build-deb:      # matrix: suite x arch
+  build-deb:      # uses: build-deb.yml, or its own matrix: suite x arch
   publish-apt:    # calls publish-apt.yml
   release:        # optional, see "GitHub Releases"
 ```
@@ -138,7 +138,26 @@ jobs:
 - **Job names** are exactly `test`, `build-deb`, `publish-apt` and
   `release`. The matrix job's display name is
   `build-deb (${{ matrix.suite }} ${{ matrix.arch }})`.
-- **Steps** in `build-deb` are named, in order:
+- **`build-deb` is the reusable
+  [`build-deb.yml`](../.github/workflows/build-deb.yml)** unless the
+  repository needs a build job of its own (nfpm, a patch series, steps
+  around the build):
+
+  ```yaml
+    build-deb:
+      needs: test      # when there is a test job
+      uses: mithro/apt-repo-action/.github/workflows/build-deb.yml@main
+  ```
+
+  It reads the suites and architectures from
+  [the declaration](#the-declaration), so the workflow lists neither, and
+  gives them to `publish-apt` as its outputs `suites` and `architectures`.
+  Its jobs read `build-deb / build (trixie amd64)` and
+  `build-deb / install-test (trixie amd64)`, and it does everything below
+  itself: the step names, the artifacts, the install test (on a native
+  architecture, once per suite), `-dbgsym` over 10 MB kept out of apt, and
+  the `Architecture: all` packages built in exactly one job per suite.
+- **Steps** in a repository's own `build-deb` job are named, in order:
 
   | step | does |
   |---|---|
@@ -168,8 +187,8 @@ jobs:
         id-token: write
       uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
       with:
-        suites: "<suites>"
-        architectures: "<architectures>"
+        suites: ${{ needs.build-deb.outputs.suites }}       # or "<suites>" with an own build job
+        architectures: ${{ needs.build-deb.outputs.architectures }}
         description: "<one line: what these packages are>"
       secrets:
         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
@@ -419,10 +438,10 @@ that sorts wrongly. Each one is a recorded exception.
     publisher;
   - no repository indexes, signs or deploys an apt repository itself.
 - The build and the version are the shared `mithro/apt-repo-action`
-  pieces: `build-deb/` today, the reusable `build-deb.yml` workflow once it
-  exists (see [compliance-plan.md](compliance-plan.md)), and the shared
-  version script. A repository doesn't carry its own copy of
-  `deb-version.py`.
+  pieces: the reusable `build-deb.yml` workflow (see
+  [Workflows](#workflows)), or, in a repository's own build job, the
+  `build-deb/` action it runs; and the shared version script. A repository
+  doesn't carry its own copy of `deb-version.py`.
 - **`build-deb`** (`uses: mithro/apt-repo-action/build-deb@main`, as the
   `Build` step):
   - builds in `debian:<suite>`, or for `raspbian-<codename>` in a Raspbian

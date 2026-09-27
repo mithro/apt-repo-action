@@ -19,7 +19,10 @@ versions. This README covers using the workflow.
 |---|---|---|
 | `action.yml` | composite | Index and sign a tree of per-suite `.deb` directories |
 | `.github/workflows/publish-apt.yml` | reusable workflow | Collect build artifacts → index+sign → deploy to Pages |
-| `build-deb/action.yml` | composite | `dpkg-buildpackage` in `debian:<suite>` for one architecture |
+| `.github/workflows/build-deb.yml` | reusable workflow | Build every suite and architecture the declaration names, install-test each suite, upload the artifacts publish-apt collects |
+| `build-deb/action.yml` | composite | `dpkg-buildpackage` in `debian:<suite>`, or a Raspbian root for `raspbian-<codename>`, for one architecture |
+| `scripts/build-matrix.py` | script | `build-deb.yml`'s plan: suites, architectures, runners, which job builds the `Architecture: all` packages |
+| `scripts/install-test.sh` | script | `build-deb.yml`'s install test, run in a clean container of the suite |
 | `scripts/make-index.py` | script | Generate the repository landing page |
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
@@ -55,29 +58,8 @@ concurrency:
 
 jobs:
   build-deb:
-    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [trixie, forky, sid]
-        arch: [amd64, i386, arm64, armhf, riscv64]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0        # the version needs history + tags
-      - name: Build
-        uses: mithro/apt-repo-action/build-deb@main
-        with:
-          suite: ${{ matrix.suite }}
-          arch: ${{ matrix.arch }}
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: debs-${{ matrix.suite }}-${{ matrix.arch }}
-          path: built-debs/*.deb
-          retention-days: 14
+    # Suites and architectures from .github/apt-packaging.toml.
+    uses: mithro/apt-repo-action/.github/workflows/build-deb.yml@main
 
   publish-apt:
     # Never publish from a pull request: that would overwrite the live
@@ -91,11 +73,40 @@ jobs:
       id-token: write
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
-      suites: "trixie forky sid"
-      architectures: "amd64 i386 arm64 armhf riscv64"
+      suites: ${{ needs.build-deb.outputs.suites }}
+      architectures: ${{ needs.build-deb.outputs.architectures }}
       description: "What these packages are, in one line"
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+```
+
+A `test` job goes before `build-deb`, which then takes `needs: test`.
+`build-deb.yml` plans the builds from the repository's declaration
+(`suites`, `architectures`; see
+[The declaration](docs/packaging.md#the-declaration)), runs each suite and
+architecture on the right runner (armhf natively on the arm64 runners,
+riscv64 under QEMU, Raspbian in an ARMv6 root), builds the
+`Architecture: all` packages in exactly one job per suite, keeps `-dbgsym`
+packages over 10 MB out of apt, and install-tests each suite in a clean
+container, running `packaging/install-test.sh` if there is one and
+`<command> --version` otherwise. Its inputs (`suites`, `architectures`,
+`source-dir`, `version-script`, `build-deps`, `dbgsym-limit-mb`,
+`install-test-options`) are documented in the workflow.
+
+A repository that needs its own build job (nfpm, a patch series, extra
+steps around the build) uses the `build-deb` action in it instead, one job
+per suite and architecture:
+
+```yaml
+      - name: Build
+        uses: mithro/apt-repo-action/build-deb@main
+        with:
+          suite: ${{ matrix.suite }}      # trixie, ..., raspbian-trixie
+          arch: ${{ matrix.arch }}        # amd64, ..., or all
+      - uses: actions/upload-artifact@v7
+        with:
+          name: debs-${{ matrix.suite }}-${{ matrix.arch }}
+          path: built-debs/*.deb
 ```
 
 ## Permissions
@@ -197,7 +208,10 @@ repository name still works, with a warning, until its caller is migrated.
 
 ## Limitations
 
-- `build-deb` always pulls `debian:<suite>`; Ubuntu suites need an image-name
-  input. Not yet implemented.
+- `build-deb` builds in `debian:<suite>` or a Raspbian root; Ubuntu suites
+  need an image-name input. Not yet implemented.
+- `publish-apt` advertises one architecture list for every suite, so a
+  repository building riscv64 also advertises it in bookworm, which has
+  none (docs/compliance-plan.md, section 3).
 - Suites are indexed as `Suite: stable` regardless of the codename, matching the
   existing repositories.
