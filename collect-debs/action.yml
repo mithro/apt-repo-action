@@ -1,0 +1,70 @@
+name: Collect a run's .deb artifacts by suite
+description: >-
+  Download this run's debs-<suite>[-<arch>...] artifacts and copy their .debs
+  into <dest>/<suite>/, one directory per suite. publish-apt.yml's first half,
+  as an action of its own so the self-test runs it too.
+
+# Each artifact's suite comes from its name (README.md), so each has to land
+# in a directory of its own name. download-artifact v5+ extracts a lone
+# matching artifact straight into `path` (actions/download-artifact#455), so
+# scripts/collect-debs.py lists the artifacts first and says where they go.
+
+inputs:
+  suites:
+    description: Space-separated suites; each artifact goes to the longest one its name starts with.
+    required: true
+  pattern:
+    description: Shell-style glob matching the artifacts to collect.
+    required: false
+    default: "debs-*"
+  dest:
+    description: Directory to fill with <suite>/*.deb.
+    required: false
+    default: apt-repo
+  staging:
+    description: Directory the artifacts are downloaded into, one <name>/ each.
+    required: false
+    default: staging
+  github-token:
+    description: >-
+      Token that can list this run's artifacts. The workflow's own token can
+      in a public repository; a private one needs `actions: read`.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  count:
+    description: How many artifacts were collected.
+    value: ${{ steps.plan.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: List the artifacts
+      id: plan
+      shell: bash
+      env:
+        PATTERN: ${{ inputs.pattern }}
+        STAGING: ${{ inputs.staging }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        ACTION_ROOT: ${{ github.action_path }}/..
+      run: python3 "$ACTION_ROOT/scripts/collect-debs.py" plan --pattern "$PATTERN" --staging "$STAGING"
+
+    - name: Download them
+      if: steps.plan.outputs.count != '0'
+      uses: actions/download-artifact@v8
+      with:
+        artifact-ids: ${{ steps.plan.outputs.ids }}
+        path: ${{ steps.plan.outputs.path }}
+
+    - name: Regroup them into <dest>/<suite>/
+      shell: bash
+      env:
+        SUITES: ${{ inputs.suites }}
+        STAGING: ${{ inputs.staging }}
+        DEST: ${{ inputs.dest }}
+        ACTION_ROOT: ${{ github.action_path }}/..
+      run: |
+        set -eu
+        python3 "$ACTION_ROOT/scripts/collect-debs.py" regroup --staging "$STAGING" --suites "$SUITES" --dest "$DEST"
+        ls -lR "$DEST"
