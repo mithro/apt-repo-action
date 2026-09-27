@@ -10,7 +10,11 @@ description: >-
 
 inputs:
   suite:
-    description: Debian suite to build in (bookworm, trixie, forky, sid).
+    description: >-
+      Suite to build in: a Debian suite (bookworm, trixie, forky, sid), built
+      in debian:<suite>, or raspbian-<codename> (raspbian-bookworm,
+      raspbian-trixie, raspbian-forky), built in a Raspbian root file system
+      bootstrapped from archive.raspbian.org. Raspbian suites are armhf only.
     required: true
   arch:
     description: >-
@@ -18,6 +22,15 @@ inputs:
       repository whose packages are all Architecture: all (built once, on the
       runner's own architecture).
     required: true
+  arch-all:
+    description: >-
+      For an architecture-dependent build (arch is not "all"): "true" (the
+      default) also builds the Architecture: all packages, "false" builds only
+      the architecture-dependent ones (dpkg-buildpackage -B). A matrix builds
+      the Architecture: all packages in one job per suite, so no two jobs
+      publish different files under the same name.
+    required: false
+    default: "true"
   build-deps:
     description: >-
       Extra apt packages to install before building, space-separated. Build
@@ -60,6 +73,15 @@ outputs:
       before installing the built packages; with none declared for the
       suite, install.sh does nothing.
     value: ${{ steps.depends.outputs.path }}
+  image:
+    description: >-
+      The docker image the build ran in: debian:<suite>, or the Raspbian root
+      file system imported for this job. An install test runs a clean
+      container of it, with the same --platform.
+    value: ${{ steps.plan.outputs.image }}
+  platform:
+    description: The docker --platform the build ran with (linux/arm/v6 for Raspbian).
+    value: ${{ steps.plan.outputs.platform }}
 
 runs:
   using: composite
@@ -75,8 +97,13 @@ runs:
         ARCH: ${{ inputs.arch }}
         SOURCE_DIR: ${{ inputs.source-dir }}
         VERSION_SCRIPT: ${{ inputs.version-script }}
+        ARCH_ALL: ${{ inputs.arch-all }}
       run: |
         set -eu
+        case "$ARCH_ALL" in
+          true|false) ;;
+          *) echo "::error::arch-all is \"$ARCH_ALL\": it takes true or false"; exit 1 ;;
+        esac
         if [ "$ARCH" = "riscv64" ] && [ "$SUITE" = "bookworm" ]; then
           echo "::error::riscv64 is not an official Debian architecture in bookworm"
           exit 1
@@ -95,6 +122,30 @@ runs:
           all)     platform=$all_platform ;;
           *) echo "::error::unknown arch $ARCH"; exit 1 ;;
         esac
+        image="debian:$SUITE"
+        codename=
+        case "$SUITE" in
+          raspbian-*)
+            # Raspbian is Debian rebuilt for ARMv6 armhf; it has no other
+            # architecture and no sid (docs/packaging.md, "Suites").
+            codename=${SUITE#raspbian-}
+            case "$codename" in
+              ""|sid|*[!a-z]*) echo "::error::unknown Raspbian suite $SUITE: Raspbian has raspbian-<codename> for bookworm, trixie and forky, and no sid"; exit 1 ;;
+            esac
+            if [ "$ARCH" != armhf ]; then
+              echo "::error::$SUITE is armhf only, not $ARCH. A repository whose packages are all Architecture: all publishes only the Debian suites, which Raspbian hosts use (docs/packaging.md, \"Suites\")."
+              exit 1
+            fi
+            platform=linux/arm/v6
+            image="apt-repo-action/raspbian:$codename" ;;
+        esac
+        # 64-bit ARM CPUs may also run 32-bit ARM code natively (GitHub's
+        # Neoverse-N2 arm64 runners do), or may not (AArch32 is optional), so
+        # try it instead of assuming either way.
+        if [ "$ARCH" = armhf ] && [ "$RUNNER_ARCH" = ARM64 ] &&
+           docker run --rm --platform linux/arm/v7 debian:trixie true; then
+          native="$native armhf"
+        fi
         emulated=true
         for a in $native; do [ "$a" = "$ARCH" ] && emulated=false; done
 
@@ -118,6 +169,8 @@ runs:
         esac
         {
           echo "platform=$platform"
+          echo "image=$image"
+          echo "raspbian=$codename"
           echo "emulated=$emulated"
           echo "version-mode=$mode"
           echo "version-script=$script"
@@ -151,11 +204,85 @@ runs:
       shell: bash
       run: docker run --privileged --rm tonistiigi/binfmt --install all
 
+    # There is no official Raspbian image, so a raspbian-<codename> build
+    # bootstraps one from archive.raspbian.org, verified with the key pinned
+    # in build-deb/raspbian/ (see its README.md). It is cached in the calling
+    # repository for a week: the cache needs no secret or registry, and the
+    # build runs apt-get update itself, so a week-old root only means a few
+    # more downloads.
+    - name: Plan the Raspbian root file system
+      id: raspbian
+      if: steps.plan.outputs.raspbian != ''
+      shell: bash
+      env:
+        CODENAME: ${{ steps.plan.outputs.raspbian }}
+        KEY: ${{ github.action_path }}/raspbian/raspbian.public.key
+        # docs: build-deb/raspbian/README.md. Change both together.
+        FINGERPRINT: A0DA38D0D76E8B5D638872819165938D90FDDD2E
+      run: |
+        set -eu
+        got=$(gpg --show-keys --with-colons "$KEY" | awk -F: '$1 == "fpr" { print $10; exit }')
+        if [ "$got" != "$FINGERPRINT" ]; then
+          echo "::error::build-deb/raspbian/raspbian.public.key is $got, not the pinned $FINGERPRINT"
+          exit 1
+        fi
+        keysum=$(sha256sum "$KEY" | cut -c1-16)
+        {
+          echo "tar=$RUNNER_TEMP/apt-repo-action-raspbian/$CODENAME.tar"
+          echo "cache-key=apt-repo-action-raspbian-$CODENAME-$(date -u +%G-W%V)-$keysum-1"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore the Raspbian root file system
+      id: raspbian-cache
+      if: steps.plan.outputs.raspbian != ''
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.raspbian.outputs.tar }}
+        key: ${{ steps.raspbian.outputs.cache-key }}
+
+    - name: Bootstrap the Raspbian root file system
+      if: steps.plan.outputs.raspbian != '' && steps.raspbian-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CODENAME: ${{ steps.plan.outputs.raspbian }}
+        TAR: ${{ steps.raspbian.outputs.tar }}
+        KEY: ${{ github.action_path }}/raspbian/raspbian.public.key
+        HOOK: ${{ github.action_path }}/raspbian/customize.sh
+      run: |
+        set -eux
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends mmdebstrap
+        # signed-by names a path that is the same outside the root (apt's
+        # update during the bootstrap) and inside it (every later update).
+        keyring=/usr/share/keyrings/apt-repo-action-raspbian.gpg
+        gpg --dearmor < "$KEY" > "$RUNNER_TEMP/apt-repo-action-raspbian.gpg"
+        sudo install -D -m 644 "$RUNNER_TEMP/apt-repo-action-raspbian.gpg" "$keyring"
+        mkdir -p "$(dirname "$TAR")"
+        sudo mmdebstrap --variant=minbase --architectures=armhf \
+          --include=ca-certificates \
+          --setup-hook='mkdir -p "$1/usr/share/keyrings"' \
+          --setup-hook="copy-in $keyring /usr/share/keyrings/" \
+          --customize-hook="$HOOK" \
+          "$CODENAME" "$TAR" \
+          "deb [signed-by=$keyring] https://archive.raspbian.org/raspbian $CODENAME main contrib non-free rpi"
+        sudo chown "$(id -u):$(id -g)" "$TAR"
+        ls -lh "$TAR"
+
+    - name: Load the Raspbian root file system into docker
+      if: steps.plan.outputs.raspbian != ''
+      shell: bash
+      env:
+        TAR: ${{ steps.raspbian.outputs.tar }}
+        IMAGE: ${{ steps.plan.outputs.image }}
+      run: docker import --platform linux/arm/v6 "$TAR" "$IMAGE"
+
     - name: Build
       shell: bash
       env:
         SUITE: ${{ inputs.suite }}
         ARCH: ${{ inputs.arch }}
+        ARCH_ALL: ${{ inputs.arch-all }}
+        IMAGE: ${{ steps.plan.outputs.image }}
         BUILD_DEPS: ${{ inputs.build-deps }}
         SOURCE_DIR: ${{ inputs.source-dir }}
         OUT_DIR: ${{ inputs.out-dir }}
@@ -176,9 +303,9 @@ runs:
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
           "${depends[@]}" \
           -w /work/src \
-          -e SUITE -e ARCH -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
+          -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
           -e GITHUB_REPOSITORY \
-          "debian:$SUITE" bash -ec '
+          "$IMAGE" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y --no-install-recommends \
@@ -196,9 +323,12 @@ runs:
               script) python3 "$VERSION_SCRIPT" --write-changelog ;;
             esac
             dpkg-parsechangelog -S Version
-            # -A: only the Architecture: all packages; -b: everything binary.
+            # -A: only the Architecture: all packages; -B: only the
+            # architecture-dependent ones; -b: both.
             # dpkg-buildpackage takes SOURCE_DATE_EPOCH from the changelog date.
-            if [ "$ARCH" = all ]; then what=-A; else what=-b; fi
+            if [ "$ARCH" = all ]; then what=-A
+            elif [ "$ARCH_ALL" = false ]; then what=-B
+            else what=-b; fi
             dpkg-buildpackage -us -uc "$what"
             # dpkg-buildpackage writes to the parent directory.
             cp /work/*.deb /work/out/
