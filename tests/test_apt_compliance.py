@@ -139,5 +139,33 @@ class WorkflowRun(unittest.TestCase):
         self.assertIn("workflow_run", apc.triggers(yaml.safe_load(PYPI)))
 
 
+class Changelog(unittest.TestCase):
+    ROOT = ["debian/control", "debian/rules", ".gitignore"]
+
+    def test_set_b_ignored(self):
+        self.assertEqual(apc.changelog(self.ROOT, "tmp/\ndebian/changelog\n", "B", False),
+                         (True, "not committed; ignored"))
+        self.assertTrue(apc.changelog(self.ROOT, "/debian/changelog\n", "B", False)[0])
+
+    def test_set_b_committed(self):
+        self.assertEqual(apc.changelog(self.ROOT + ["debian/changelog"], "debian/changelog\n", "B", False),
+                         (False, "commits debian/changelog"))
+
+    def test_set_b_not_ignored(self):
+        self.assertEqual(apc.changelog(self.ROOT, "tmp/\n# debian/changelog\n", "B", False),
+                         (False, "not committed, but not in .gitignore"))
+        self.assertFalse(apc.changelog(self.ROOT, None, "B", False)[0])
+
+    def test_patch_series_templates(self):
+        files = ["packaging/debian/openocd/control", "packaging/debian/openocd/rules"]
+        self.assertEqual(apc.changelog(files, None, "B", False), (True, "no committed changelog"))
+        self.assertEqual(apc.changelog(files + ["packaging/debian/openocd/changelog"], None, "B", False),
+                         (False, "commits packaging/debian/openocd/changelog"))
+
+    def test_set_a_and_nfpm(self):
+        self.assertIsNone(apc.changelog(self.ROOT + ["debian/changelog"], None, "A", False)[0])
+        self.assertEqual(apc.changelog(["nfpm.yaml"], None, "B", True), (None, "nfpm build"))
+
+
 if __name__ == "__main__":
     unittest.main()

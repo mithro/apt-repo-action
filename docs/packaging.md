@@ -464,8 +464,8 @@ an entry:
 - the build commit's committer time as its date.
 
 **Set B commits no `debian/changelog`**, and lists `debian/changelog` in
-`.gitignore`, so a local build doesn't dirty the tree. The build's entry is
-the whole file. Why:
+`.gitignore`, so a local build doesn't dirty the tree (`PKG-CHANGELOG`
+checks both). The build's entry is the whole file. Why:
 - each package's changelog is one true entry, the build's, not the build's
   entry on top of a stale `0.0.post0 unstable` placeholder;
 - a plain `dpkg-buildpackage`, run without the version script, fails for

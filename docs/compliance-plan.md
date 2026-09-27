@@ -89,6 +89,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule) | files on the publishing branch |
 | PKG-README | Set A has `packaging/README.md` | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
+| PKG-CHANGELOG | Set B commits no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |
 | PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |

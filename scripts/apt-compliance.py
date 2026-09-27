@@ -90,6 +90,8 @@ RULES = [
      "Write packaging/README.md: upstream, what we change, how to update."),
     ("PKG-DEBIAN", "Repository", "`debian/` at the root of the default branch (a patch series: `packaging/debian/<name>/`)",
      "Move the packaging to debian/ at the root of the default branch."),
+    ("PKG-CHANGELOG", "Repository", "Set B commits no `debian/changelog`, and `.gitignore` lists it",
+     "Delete the committed debian/changelog and add `debian/changelog` to .gitignore (the build writes it)."),
     ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites",
      f"Fix the [[depends]] entries in {DECLARATION} (docs/packaging.md, \"The declaration\")."),
     ("PKG-WORKFLOW", "Workflow", f"`.github/workflows/{WORKFLOW_FILE}` named `{WORKFLOW_NAME}`",
@@ -399,7 +401,7 @@ def repo_facts(d: dict, action_repo: str) -> dict:
     f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
     f["tree_truncated"] = tree.get("truncated", False)
     f["declaration"] = file_at(full, oid, DECLARATION)
-    for p in ("README.md", "packaging/README.md", "debian/control"):
+    for p in ("README.md", "packaging/README.md", "debian/control", ".gitignore"):
         f[p] = file_at(full, oid, p) if p in f["files"] else None
     ctl = [p for p in f["files"] if re.fullmatch(r"packaging/debian/[^/]+/control(\.in)?", p)]
     f["other_controls"] = {p: file_at(full, oid, p) for p in ctl[:3]}
@@ -574,6 +576,23 @@ def install_test(jobs: dict, action_repo: str) -> tuple[bool, str]:
     return False, f"no `Install test` step in {', '.join(n for n, _ in builders)}"
 
 
+def changelog(files: list[str], gitignore: str | None, kind: str, nfpm: bool) -> tuple[bool | None, str]:
+    """PKG-CHANGELOG (docs/packaging.md, "The changelog"): Set B commits no
+    changelog, a patch series' templates included, and with `debian/` at the
+    root lists `debian/changelog` in .gitignore, so a local build doesn't
+    dirty the tree. Set A keeps its committed one."""
+    if kind != "B":
+        return None, "Set A keeps its changelog" if kind == "A" else "no build of its own"
+    tracked = sorted(p for p in files if p == "debian/changelog" or p.endswith("/debian/changelog")
+                     or re.fullmatch(r"packaging/debian/[^/]+/changelog", p))
+    if tracked:
+        return False, f"commits {', '.join(tracked[:2])}"
+    if "debian/control" not in files:
+        return (None, "nfpm build") if nfpm else (True, "no committed changelog")
+    ignored = {l.strip() for l in (gitignore or "").splitlines()} & {"debian/changelog", "/debian/changelog"}
+    return (True, "not committed; ignored") if ignored else (False, "not committed, but not in .gitignore")
+
+
 # --------------------------------------------------------------------------
 # The checks.
 
@@ -641,6 +660,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     else:
         where = sorted({p.rsplit("/control", 1)[0] for p in f["files"] if p.endswith("debian/control")})
         put("PKG-DEBIAN", False, "no debian/ at the root" + (f" (found {', '.join(where)})" if where else ""))
+    put("PKG-CHANGELOG", *changelog(f["files"], f[".gitignore"], kind, t["nfpm"]))
     if t["depends_error"]:
         put("PKG-DEPENDS", False, t["depends_error"])
     elif not t["depends"]:
