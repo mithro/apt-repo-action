@@ -144,7 +144,7 @@ jobs:
     # The version for a build outside build-deb (docs/packaging.md, "The
     # shared actions"): an nfpm package, as the Go repositories build, and a
     # patch series' own job. nfpm must keep the version exactly as given.
-    name: deb-version (${{ matrix.case }})
+    name: deb-version (${{ matrix.case }} ${{ matrix.suite }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
