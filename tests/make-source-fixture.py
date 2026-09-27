@@ -8,7 +8,15 @@ one, which stamps 9.9 (build-deb's "auto" must still run it). --no-changelog
 commits no debian/changelog and ignores it, as Set B does (docs/packaging.md,
 "The changelog"), so the build's entry is the only one.
 
+--depends <url> --depends-key <url> makes the package build-depend on
+apt-repo-selftest-dep, which Debian doesn't have, and declares the flat
+repository at <url>/<suite>/ that has it as a `[[depends]]` in
+.github/apt-packaging.toml (docs/packaging.md, "The declaration").
+--declare-only leaves out the Build-Depends, so a build that fails can only
+have failed on the repository itself (a wrong key, no Release).
+
 Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog]
+           [--depends <url> --depends-key <url> [--declare-only]]
 """
 import argparse
 import os
@@ -50,6 +58,19 @@ p.write_text(re.sub(r"\\(0\\.0\\)", "(9.9)", p.read_text(), count=1))
 """
 
 
+DEPENDS = """\
+kind = "B"
+architectures = "all"
+
+[[depends]]
+name = "apt-repo-selftest-dep"
+url = "{url}/{{suite}}/"
+suite = "./"
+key = "{key}"
+reason = "apt-repo-selftest-dep is not in Debian"
+"""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", type=Path)
@@ -57,8 +78,19 @@ def main() -> None:
     how.add_argument("--legacy", action="store_true")
     # The legacy script edits the committed placeholder, so it needs one.
     how.add_argument("--no-changelog", action="store_true")
+    ap.add_argument("--depends", metavar="URL", help="the dependency repository's site")
+    ap.add_argument("--depends-key", metavar="URL", help="its key")
+    ap.add_argument("--declare-only", action="store_true", help="declare it, but don't build-depend on it")
     args = ap.parse_args()
+    if bool(args.depends) != bool(args.depends_key):
+        ap.error("--depends and --depends-key go together")
     files = dict(FILES)
+    if args.depends:
+        if not args.declare_only:
+            files["debian/control"] = files["debian/control"].replace(
+                "Build-Depends: debhelper-compat (= 13)",
+                "Build-Depends: debhelper-compat (= 13), apt-repo-selftest-dep")
+        files[".github/apt-packaging.toml"] = DEPENDS.format(url=args.depends, key=args.depends_key)
     if args.legacy:
         files["packaging/deb-version.py"] = LEGACY
     if args.no_changelog:
