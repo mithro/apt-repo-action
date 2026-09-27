@@ -224,6 +224,8 @@ runs:
       env:
         CODENAME: ${{ steps.plan.outputs.raspbian }}
         KEY: ${{ github.action_path }}/raspbian/raspbian.public.key
+        ACTION_YML: ${{ github.action_path }}/action.yml
+        HOOK: ${{ github.action_path }}/raspbian/customize.sh
         # docs: build-deb/raspbian/README.md. Change both together.
         FINGERPRINT: A0DA38D0D76E8B5D638872819165938D90FDDD2E
       run: |
@@ -233,10 +235,12 @@ runs:
           echo "::error::build-deb/raspbian/raspbian.public.key is $got, not the pinned $FINGERPRINT"
           exit 1
         fi
-        keysum=$(sha256sum "$KEY" | cut -c1-16)
+        # The key, this file (which holds the bootstrap's recipe) and the
+        # customize hook: a change to any of them makes a new root.
+        recipe=$(cat "$KEY" "$ACTION_YML" "$HOOK" | sha256sum | cut -c1-16)
         {
           echo "tar=$RUNNER_TEMP/apt-repo-action-raspbian/$CODENAME.tar"
-          echo "cache-key=apt-repo-action-raspbian-$CODENAME-$(date -u +%G-W%V)-$keysum-1"
+          echo "cache-key=apt-repo-action-raspbian-$CODENAME-$(date -u +%G-W%V)-$recipe"
         } >> "$GITHUB_OUTPUT"
 
     - name: Restore the Raspbian root file system
@@ -267,9 +271,13 @@ runs:
         sudo install -D -m 644 "$RUNNER_TEMP/apt-repo-action-raspbian.gpg" "$keyring"
         mkdir -p "$(dirname "$TAR")"
         # minbase follows the archive's priorities, and Raspbian bookworm's
-        # leave apt out, so it is asked for. archive.raspbian.org drops the
-        # odd TLS connection mid-download, so apt retries, here and in
-        # every later apt run in the root (--aptopt stays in its apt.conf.d).
+        # leave apt out, so it is asked for. The archive is fetched over
+        # http, as debian:<suite> images fetch deb.debian.org: apt verifies
+        # every file against the signed InRelease either way, and
+        # archive.raspbian.org's https drops connections mid-download
+        # ("unexpected eof while reading"), which apt doesn't retry. Retries
+        # still cover the transient errors apt does retry, here and in every
+        # later apt run in the root (--aptopt stays in its apt.conf.d).
         sudo mmdebstrap --variant=minbase --architectures=armhf \
           --include=apt,ca-certificates \
           --aptopt='Acquire::Retries "5"' \
@@ -277,7 +285,7 @@ runs:
           --setup-hook="copy-in $keyring /usr/share/keyrings/" \
           --customize-hook="$HOOK" \
           "$CODENAME" "$TAR" \
-          "deb [signed-by=$keyring] https://archive.raspbian.org/raspbian $CODENAME main contrib non-free rpi"
+          "deb [signed-by=$keyring] http://archive.raspbian.org/raspbian $CODENAME main contrib non-free rpi"
         sudo chown "$(id -u):$(id -g)" "$TAR"
         ls -lh "$TAR"
 
