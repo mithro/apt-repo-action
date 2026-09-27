@@ -306,6 +306,22 @@ def workflows_batch(items: list[tuple[str, str]]) -> dict[tuple[str, str], dict]
 def discover(owners: list[str], action_repo: str) -> tuple[list[dict], list[dict]]:
     repos = [r for o in owners for r in list_repos(o)]
     print(f"discover: {len(repos)} repositories", file=sys.stderr)
+    return classify(repos, action_repo)
+
+
+def named(names: list[str]) -> list[dict]:
+    """The repositories `--repo` names, without listing their owners' others."""
+    repos = []
+    for n in names:
+        r = api(f"repos/{n}")
+        if r is None:
+            raise SystemExit(f"error: no repository {n}")
+        repos.append(r)
+    return repos
+
+
+def classify(repos: list[dict], action_repo: str) -> tuple[list[dict], list[dict]]:
+    """The packaging repositories among `repos`, and the sites without packaging."""
     first = workflows_batch([(r["full_name"], "HEAD") for r in repos])
     found, second = {}, []
     for r in repos:
@@ -913,7 +929,8 @@ def main() -> int:
     p.add_argument("--maintainer", help="the Maintainer: every package must have")
     p.add_argument("--action-repo", default=action_repo_default(),
                    help="the repository holding publish-apt.yml (default: this checkout's origin)")
-    p.add_argument("--repo", action="append", default=[], help="check only these repositories (owner/name)")
+    p.add_argument("--repo", action="append", default=[],
+                   help="check only these repositories (owner/name), without scanning their owners' others")
     p.add_argument("--json", type=Path)
     p.add_argument("--markdown", type=Path)
     p.add_argument("--html", type=Path)
@@ -921,18 +938,27 @@ def main() -> int:
     if not args.action_repo:
         p.error("--action-repo is needed: it can't be read from this checkout's origin")
     owners = dict((o.split("=", 1) + [None])[:2] for o in args.owner)
-    packaging, orphans = discover(list(owners), args.action_repo)
-    found = frozenset(d["meta"]["full_name"].lower() for d in packaging)
     if args.repo:
-        packaging = [d for d in packaging if d["meta"]["full_name"] in args.repo]
+        # Only the named repositories: no scan of their owners' others.
+        packaging, orphans = classify(named(args.repo), args.action_repo)
+        for n in sorted(set(args.repo) - {d["meta"]["full_name"] for d in packaging}):
+            print(f"warning: {n} is not a packaging repository", file=sys.stderr)
+    else:
+        packaging, orphans = discover(list(owners), args.action_repo)
+    found = {d["meta"]["full_name"].lower() for d in packaging}
     print(f"discover: {len(packaging)} packaging repositories, {len(orphans)} sites without packaging", file=sys.stderr)
     with ThreadPoolExecutor(6) as ex:
         facts = list(ex.map(lambda d: repo_facts(d, args.action_repo), packaging))
+    targets = [target(f, owners.get(f["repo"].split("/")[0])) for f in facts]
+    if args.repo:
+        # Without a scan, look at each dependency repository itself.
+        deps = sorted({e["repo"] for t in targets for e in t["depends"] if "repo" in e} - found)
+        if deps:
+            found |= {d["meta"]["full_name"].lower() for d in classify(named(deps), args.action_repo)[0]}
     repos = []
-    for f in facts:
+    for f, t in zip(facts, targets):
         tag = owners.get(f["repo"].split("/")[0])
-        t = target(f, tag)
-        checks = check(f, t, args, tag, found)
+        checks = check(f, t, args, tag, frozenset(found))
         repos.append({"repo": f["repo"], "kind": t["kind"], "variant": t["variant"], "declared": t["declared"],
                       "build_ref": f["build_ref"], "build_workflow": f["build_workflow"],
                       "site": (f["site"] or {}).get("site"), "target_suites": t["suites"],
