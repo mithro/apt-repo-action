@@ -169,6 +169,16 @@ jobs:
   | `Install test` | install the built packages into a clean container of the suite and run the smoke test |
   | `Upload` | upload `debs-<suite>-<arch>` (and `dbgsym-<suite>-<arch>`, see [Package contents](#package-contents)) |
 
+- **Anything else the build makes** is a step of its own in the same
+  `build-deb` job, between `Build` and `Install test`, writing its `.deb`s
+  into the same `built-debs/`. They are then install-tested with the rest
+  and uploaded in the one `debs-<suite>-<arch>` artifact. Not a separate
+  job: that would need an artifact of its own, and the install test
+  wouldn't see both. ntrip-rtcm3-to-rtcm2p3's `Build pyrtcm and pynmeagps`
+  step works this way: it builds, from their PyPI sdists, the two Python
+  libraries it needs that Debian lacks (pyrtcm in every suite, pynmeagps
+  in trixie).
+
 - **An `Architecture: all` repository** has `arch: [all]` in its matrix, so
   its jobs read `build-deb (trixie all)` and its artifacts `debs-trixie-all`.
 - **An existing `ci.yml`** (tests in a workflow of their own) becomes the
