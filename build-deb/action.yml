@@ -141,10 +141,17 @@ runs:
         esac
         # 64-bit ARM CPUs may also run 32-bit ARM code natively (GitHub's
         # Neoverse-N2 arm64 runners do), or may not (AArch32 is optional), so
-        # try it instead of assuming either way.
-        if [ "$ARCH" = armhf ] && [ "$RUNNER_ARCH" = ARM64 ] &&
-           docker run --rm --platform linux/arm/v7 debian:trixie true; then
-          native="$native armhf"
+        # try it instead of assuming either way. Pulling an armhf image
+        # points its tag at armhf, and a later docker run without --platform
+        # would then run armhf under QEMU without saying so. So the try uses
+        # the image an armhf Debian build pulls anyway, and a Raspbian build,
+        # which pulls no Debian image, removes the tag again.
+        if [ "$ARCH" = armhf ] && [ "$RUNNER_ARCH" = ARM64 ]; then
+          try="debian:${codename:-$SUITE}"
+          if docker run --rm --platform linux/arm/v7 "$try" true; then
+            native="$native armhf"
+          fi
+          if [ -n "$codename" ]; then docker image rm "$try"; fi
         fi
         emulated=true
         for a in $native; do [ "$a" = "$ARCH" ] && emulated=false; done
