@@ -501,6 +501,38 @@ def arch_for(suite: str, t: dict) -> set[str]:
 
 
 # --------------------------------------------------------------------------
+# Rules that read a workflow's structure.
+
+BUILD_RUN = re.compile(r"\b(dpkg-buildpackage|debuild|dpkg-deb|nfpm)\b")
+
+
+def install_test(jobs: dict, action_repo: str) -> tuple[bool, str]:
+    """PKG-INSTALL-TEST: a job that builds the packages has a step named
+    `Install test` that runs something. A mention elsewhere (a comment, a
+    script in the tree, a step in another job) doesn't count."""
+    shared_step = f"{action_repo}/build-deb".lower()
+    shared_workflow = f"{action_repo}/.github/workflows/build-deb.yml".lower()
+    builders = []
+    for name, j in jobs.items():
+        if not isinstance(j, dict):
+            continue
+        if str(j.get("uses", "")).partition("@")[0].lower() == shared_workflow:
+            return True, f"{name}: the shared build-deb.yml install-tests"
+        steps = [s for s in (j.get("steps") or []) if isinstance(s, dict)]
+        if name == "build-deb" or any(str(s.get("uses", "")).partition("@")[0].lower() == shared_step
+                                      or BUILD_RUN.search(code_lines(str(s.get("run", "")))) for s in steps):
+            builders.append((name, steps))
+    if not builders:
+        return False, "no job builds the packages"
+    for name, steps in builders:
+        for s in steps:
+            if str(s.get("name", "")).strip().startswith("Install test") and \
+                    (code_lines(str(s.get("run", ""))).strip() or str(s.get("uses", "")).strip()):
+                return True, f"`{s['name']}` in {name}"
+    return False, f"no `Install test` step in {', '.join(n for n, _ in builders)}"
+
+
+# --------------------------------------------------------------------------
 # The checks.
 
 def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[str] = frozenset()) -> dict:
@@ -645,11 +677,10 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         put("PKG-SHARED", bool(shared) and not off_main and not local_ver,
             ("; ".join(off_main) if off_main else "shared build" if shared else "own build steps")
             + ("; local deb-version.py" if local_ver else ""))
-    step_names = {str(s.get("name", "")) for j in jobs.values() if isinstance(j, dict)
-                  for s in (j.get("steps") or []) if isinstance(s, dict)}
-    it = "Install test" in step_names or "packaging/install-test.sh" in f["files"]
-    put("PKG-INSTALL-TEST", None if kind == "aggregate" else it,
-        "nothing to build" if kind == "aggregate" else ("install test" if it else "no install test"))
+    if kind == "aggregate":
+        put("PKG-INSTALL-TEST", None, "nothing to build")
+    else:
+        put("PKG-INSTALL-TEST", *install_test(jobs, args.action_repo))
 
     # --- Packages, from the live site
     site = f["site"] or {"suites": {}}
