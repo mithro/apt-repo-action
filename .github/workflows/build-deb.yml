@@ -64,6 +64,27 @@ on:
         required: false
         default: ""
         type: string
+      version-tree:
+        description: >-
+          build-deb's version-tree, relative to the repository's root: the
+          checkout whose vX.Y tags give the version, when source-dir is
+          another git tree. Empty (the default): source-dir's own.
+        required: false
+        default: ""
+        type: string
+      version-args:
+        description: >-
+          build-deb's version-args: extra arguments for the shared
+          scripts/deb-version.py, such as "--epoch 2" under a declared
+          exception.
+        required: false
+        default: ""
+        type: string
+      lintian:
+        description: build-deb's lintian (warn, error or off).
+        required: false
+        default: warn
+        type: string
       dbgsym-limit-mb:
         description: >-
           -dbgsym packages larger than this many MB are uploaded as
@@ -150,7 +171,10 @@ jobs:
           arch-all: ${{ matrix.arch-all }}
           source-dir: source/${{ inputs.source-dir }}
           version-script: ${{ inputs.version-script }}
+          version-tree: ${{ inputs.version-tree != '' && format('source/{0}', inputs.version-tree) || '' }}
+          version-args: ${{ inputs.version-args }}
           build-deps: ${{ inputs.build-deps }}
+          lintian: ${{ inputs.lintian }}
           out-dir: built-debs
 
       - name: Keep large debug symbols out of apt
