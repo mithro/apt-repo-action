@@ -224,6 +224,9 @@ runs:
     # reads another architecture's .debs as they are, so an emulated build
     # doesn't run lintian under QEMU too. As a user, since lintian's authors
     # advise against running it as root.
+    #
+    # In `warn` mode nothing here fails the build: lintian not running at all
+    # (no image, no mirror, a crash) is a warning, like its findings.
     - name: Lintian
       id: lintian
       if: inputs.lintian != 'off'
@@ -234,29 +237,54 @@ runs:
         MODE: ${{ inputs.lintian }}
         ACTION_ROOT: ${{ github.action_path }}/..
       run: |
-        set -eu
-        report=$(mktemp -d "$RUNNER_TEMP/lintian.XXXXXX")
+        set -u
+        # Only for the self-test, to make the install fail: not an input.
+        LINTIAN_PACKAGE=${APT_REPO_ACTION_SELFTEST_LINTIAN_PACKAGE:-lintian}
+        export LINTIAN_PACKAGE
+        case "$MODE" in
+          warn|error) ;;
+          *) echo "::error::lintian must be warn, error or off, not $MODE"; exit 1 ;;
+        esac
+        # A warning in warn mode, a failure in error mode.
+        could_not_run() {
+          if [ "$MODE" = error ]; then
+            echo "::error title=lintian::lintian could not run: $1"
+            exit 1
+          fi
+          echo "::warning title=lintian::lintian could not run: $1"
+          exit 0
+        }
+        report=$(mktemp -d "$RUNNER_TEMP/lintian.XXXXXX") || could_not_run "no temporary directory"
         # Named explicitly: after an emulated build, the local debian:<suite>
         # tag is the build's architecture's image, and would run under QEMU.
         case "$RUNNER_ARCH" in
           X64)   platform=linux/amd64 ;;
           ARM64) platform=linux/arm64 ;;
-          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+          *) could_not_run "unsupported runner architecture $RUNNER_ARCH" ;;
         esac
         docker run --rm --platform "$platform" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/debs:ro" \
           -v "$report:/report" \
+          -e LINTIAN_PACKAGE \
           "debian:${SUITE#raspbian-}" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             echo "lintian runs on $(dpkg --print-architecture)"
             apt-get update
-            apt-get install -y --no-install-recommends lintian
+            apt-get install -y --no-install-recommends "$LINTIAN_PACKAGE"
             useradd -m lintian-runner
             status=0
             runuser -u lintian-runner -- lintian --fail-on none --tag-display-limit 0 \
               /debs/*.deb > /report/lintian.txt || status=$?
             echo "$status" > /report/status
-          '
+          ' || could_not_run "its container failed (exit status $?), see the log above"
         cat "$report/lintian.txt"
+        status=$(cat "$report/status") || could_not_run "it left no exit status"
+        rc=0
         python3 "$ACTION_ROOT/scripts/lintian-report.py" --mode "$MODE" \
-          --status "$(cat "$report/status")" "$report/lintian.txt"
+          --status "$status" "$report/lintian.txt" || rc=$?
+        # In warn mode the report never fails the build, so a failure is a crash.
+        if [ "$rc" != 0 ] && [ "$MODE" = warn ]; then
+          echo "::warning title=lintian::scripts/lintian-report.py failed (exit status $rc)"
+          rc=0
+        fi
+        exit "$rc"
