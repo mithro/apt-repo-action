@@ -114,7 +114,7 @@ def run_artifacts() -> list[dict]:
                 body = json.load(r)
         except urllib.error.HTTPError as e:
             raise Error(f"can't list this run's artifacts ({url}: HTTP {e.code} {e.reason}). "
-                        "A private repository's publish job needs `actions: read`.") from None
+                        "A private repository's publish job may need `actions: read`.") from None
         except (urllib.error.URLError, OSError) as e:
             raise Error(f"can't list this run's artifacts ({url}: {getattr(e, 'reason', e)})") from None
         batch = body.get("artifacts", [])
