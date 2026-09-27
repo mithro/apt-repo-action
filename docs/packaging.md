@@ -135,6 +135,28 @@ jobs:
   runs the default branch's copy of the workflow, so a pull request can't
   change or test its own build. Tests are a job in `deb.yml` that
   `build-deb` needs.
+- **A workflow that follows `deb.yml`** through `workflow_run` (a PyPI
+  publish, say) is the other way round, and allowed: it runs after the
+  build, never instead of it. It:
+  - names the workflow `Debian packages` in `workflows:`, so renaming the
+    build workflow means changing it too (rpi-hwid's and
+    python-netgear-switch-library's followed `CI` until then);
+  - acts only on a successful run that isn't a pull request's. `branches:`
+    is the branch "the triggering workflow must run on", and a pull
+    request from a fork's own `main` has that name too. The workflow it
+    starts "is able to access secrets and write tokens, even if the
+    previous workflow was not" (GitHub's docs), so without the check it
+    would publish the pull request's commit:
+
+    ```yaml
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
+    ```
+  - checks out `${{ github.event.workflow_run.head_sha || github.sha }}`,
+    the commit the build tested, not whatever the default branch has moved
+    on to since.
 - **Job names** are exactly `test`, `build-deb`, `publish-apt` and
   `release`. The matrix job's display name is
   `build-deb (${{ matrix.suite }} ${{ matrix.arch }})`.
@@ -147,11 +169,28 @@ jobs:
   | `Install test` | install the built packages into a clean container of the suite and run the smoke test |
   | `Upload` | upload `debs-<suite>-<arch>` (and `dbgsym-<suite>-<arch>`, see [Package contents](#package-contents)) |
 
+- **Anything else the build makes** is a step of its own in the same
+  `build-deb` job, between `Build` and `Install test`, writing its `.deb`s
+  into the same `built-debs/`. They are then install-tested with the rest
+  and uploaded in the one `debs-<suite>-<arch>` artifact. Not a separate
+  job: that would need an artifact of its own, and the install test
+  wouldn't see both. ntrip-rtcm3-to-rtcm2p3's `Build pyrtcm and pynmeagps`
+  step works this way: it builds, from their PyPI sdists, the two Python
+  libraries it needs that Debian lacks (pyrtcm in every suite, pynmeagps
+  in trixie).
+
 - **An `Architecture: all` repository** has `arch: [all]` in its matrix, so
   its jobs read `build-deb (trixie all)` and its artifacts `debs-trixie-all`.
 - **An existing `ci.yml`** (tests in a workflow of their own) becomes the
   `test` job in `deb.yml`, and the file is deleted. Update the branch
   protection's required checks in the same change: they name the old jobs.
+  - Several jobs become one `test` job. Its matrix is the old test
+    matrix, and a job that needed only one leg becomes steps of one leg:
+    python-netgear-switch-library's `docs` job is now the documentation
+    build in its Python 3.13 leg (`include: - python-version: "3.13"
+    docs: true`, and `if: matrix.docs` on those steps).
+  - Checks that were a `workflow_run` chain before (build only after `CI`
+    went green) are now `build-deb`'s `needs: test`.
 - **Artifacts** are named `debs-<suite>-<arch>`, with an optional further
   `-<part>` (`debs-bookworm-armhf-openocd-stable`), and kept for
   `retention-days: 14`.
@@ -384,6 +423,33 @@ For example, from lowest to highest (checked with `dpkg --compare-versions`):
 0.3.post134~deb14
 0.3.post134                 sid
 0.3.post135~deb12           the next push
+```
+
+### Python packages
+
+`~deb<R>` and `~pr<P>` aren't PEP 440, so a Python build can't be given the
+Debian version as it is. dh-python gives it anyway: when the build
+dependencies include `python3-setuptools-scm`, `python3-flit-scm` or
+`python3-hatch-vcs`, pybuild sets `SETUPTOOLS_SCM_PRETEND_VERSION` to the
+changelog's version, less revision and epoch, with its first `~` turned
+into `-` (`Debian/Debhelper/Buildsystem/pybuild.pm`, dh-python 6.20250414 in
+trixie). ntrip-rtcm3-to-rtcm2p3's first shared build failed that way in
+every suite:
+
+```
+ValueError: Invalid version `0.1.0.post29-deb13~pr5` from source `vcs`
+```
+
+pybuild only sets it when it's unset, so `debian/rules` sets it first, to
+the version up to the first `-` or `~`: the `X.Y[.postN]` hatch-vcs gets
+from git, which the PyPI wheel of the same commit carries. Either form
+does it:
+
+```make
+# ntrip-rtcm3-to-rtcm2p3, sensors2mqtt
+export SETUPTOOLS_SCM_PRETEND_VERSION = $(shell dpkg-parsechangelog -SVersion | sed 's/[-~].*//')
+# rpi-hwid, python-netgear-switch-library (native: no revision)
+export SETUPTOOLS_SCM_PRETEND_VERSION = $(firstword $(subst ~, ,$(shell dpkg-parsechangelog -SVersion)))
 ```
 
 ### The changelog
