@@ -362,6 +362,37 @@ def classify(repos: list[dict], action_repo: str) -> tuple[list[dict], list[dict
     return sorted(packaging, key=lambda d: d["meta"]["full_name"].lower()), sites
 
 
+def local_files(path: Path) -> list[str]:
+    """The files of a checkout that a commit of everything would hold:
+    tracked ones and untracked ones git doesn't ignore."""
+    r = subprocess.run(["git", "-C", str(path), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                       capture_output=True, text=True, check=True)
+    return sorted({p for p in r.stdout.split("\0") if p and (path / p).is_file()})
+
+
+def local_entry(name: str, path: Path, action_repo: str) -> dict:
+    """`name` as GitHub has it (default branch, what publishes, the live
+    site), but with the workflows of the checkout at `path`."""
+    meta = named([name])[0]
+    found = classify([meta], action_repo)[0]
+    if found:
+        d = found[0]
+    else:  # not publishing yet: a new repository's first pull request
+        r = workflows_batch([(name, "HEAD")])[(name, "HEAD")]
+        if not r["default"]:
+            raise SystemExit(f"error: {name} is empty")
+        d = {"meta": meta, "default": r["default"]["name"], "default_oid": r["default"]["target"]["oid"],
+             "deploy": None, "deploy_oid": None}
+        d["build_ref"], d["build_oid"] = d["default"], d["default_oid"]
+    files = local_files(path)
+    d["local"] = path
+    d["workflows"] = {p.rpartition("/")[2]: (path / p).read_text(errors="replace") for p in files
+                      if re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", p)}
+    if not is_packaging(d["workflows"], action_repo):
+        print(f"warning: {path}'s workflows don't publish an apt repository", file=sys.stderr)
+    return d
+
+
 # --------------------------------------------------------------------------
 # Facts about one packaging repository.
 
@@ -397,14 +428,22 @@ def repo_facts(d: dict, action_repo: str) -> dict:
     f["fork"], f["parent"] = info["fork"], (info.get("parent") or {}).get("full_name")
     f["created_at"] = info["created_at"]
     f["branches"] = [b["name"] for b in api_pages(f"repos/{full}/branches?per_page=100")]
-    tree = api(f"repos/{full}/git/trees/{oid}?recursive=1")
-    f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
-    f["tree_truncated"] = tree.get("truncated", False)
-    f["declaration"] = file_at(full, oid, DECLARATION)
+    if d.get("local"):
+        # --local: the checkout's files, as they would be pushed.
+        f["files"], f["tree_truncated"] = local_files(d["local"]), False
+        def read(p):
+            return (d["local"] / p).read_text(errors="replace") if p in f["files"] else None
+    else:
+        tree = api(f"repos/{full}/git/trees/{oid}?recursive=1")
+        f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
+        f["tree_truncated"] = tree.get("truncated", False)
+        def read(p):
+            return file_at(full, oid, p) if p in f["files"] else None
+    f["declaration"] = read(DECLARATION)
     for p in ("README.md", "packaging/README.md", "debian/control", ".gitignore"):
-        f[p] = file_at(full, oid, p) if p in f["files"] else None
+        f[p] = read(p)
     ctl = [p for p in f["files"] if re.fullmatch(r"packaging/debian/[^/]+/control(\.in)?", p)]
-    f["other_controls"] = {p: file_at(full, oid, p) for p in ctl[:3]}
+    f["other_controls"] = {p: read(p) for p in ctl[:3]}
     # History imported from upstream: commits by other people, older than the
     # repository itself. (A snapshot has only its importer's commits.)
     ours = our_people(full.split("/")[0])
@@ -1098,11 +1137,15 @@ def to_html(report: dict) -> str:
 
 # --------------------------------------------------------------------------
 
-def action_repo_default() -> str | None:
-    r = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "remote", "get-url", "origin"],
-                       capture_output=True, text=True)
-    m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(\.git)?$", r.stdout.strip())
+def origin_repo(path: Path) -> str | None:
+    """owner/name of a checkout's GitHub origin."""
+    r = subprocess.run(["git", "-C", str(path), "remote", "get-url", "origin"], capture_output=True, text=True)
+    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$", r.stdout.strip())
     return m.group(1) if m else None
+
+
+def action_repo_default() -> str | None:
+    return origin_repo(Path(__file__).resolve().parent)
 
 
 def main() -> int:
@@ -1114,6 +1157,10 @@ def main() -> int:
                    help="the repository holding publish-apt.yml (default: this checkout's origin)")
     p.add_argument("--repo", action="append", default=[],
                    help="check only these repositories (owner/name), without scanning their owners' others")
+    p.add_argument("--local", type=Path, metavar="PATH",
+                   help="check the checkout at PATH (its workflows, declaration, debian/, README) instead of what "
+                        "GitHub has; the branch, history and live site still come from GitHub. The repository is "
+                        "--repo, or PATH's origin")
     p.add_argument("--json", type=Path)
     p.add_argument("--markdown", type=Path)
     p.add_argument("--html", type=Path)
@@ -1121,7 +1168,15 @@ def main() -> int:
     if not args.action_repo:
         p.error("--action-repo is needed: it can't be read from this checkout's origin")
     owners = dict((o.split("=", 1) + [None])[:2] for o in args.owner)
-    if args.repo:
+    if args.local:
+        if len(args.repo) > 1:
+            p.error("--local checks one repository: give at most one --repo")
+        name = args.repo[0] if args.repo else origin_repo(args.local)
+        if not name:
+            p.error(f"--repo is needed: {args.local} has no GitHub origin")
+        args.repo = [name]
+        packaging, orphans = [local_entry(name, args.local.resolve(), args.action_repo)], []
+    elif args.repo:
         # Only the named repositories: no scan of their owners' others.
         packaging, orphans = classify(named(args.repo), args.action_repo)
         for n in sorted(set(args.repo) - {d["meta"]["full_name"] for d in packaging}):
@@ -1145,7 +1200,8 @@ def main() -> int:
         repos.append({"repo": f["repo"], "kind": t["kind"], "variant": t["variant"], "declared": t["declared"],
                       "build_ref": f["build_ref"], "build_workflow": f["build_workflow"],
                       "site": (f["site"] or {}).get("site"), "target_suites": t["suites"],
-                      "target_architectures": t["archs"] or ["all"], "checks": checks})
+                      "target_architectures": t["archs"] or ["all"], "checks": checks,
+                      **({"local": str(f["local"])} if f.get("local") else {})})
     import datetime
     report = {"date": datetime.date.today().isoformat(), "owners": list(owners), "action_repo": args.action_repo,
               "repos": repos, "sites_without_packaging": orphans}

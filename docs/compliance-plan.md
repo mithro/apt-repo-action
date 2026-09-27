@@ -80,6 +80,14 @@ live sites, checks each rule, and writes the tables and per-repository todo
 lists (HTML), one checklist per repository (Markdown, the body of the
 repository's issue in section 4), and everything as JSON.
 
+- `--repo owner/name` (repeatable) checks only those repositories, with no
+  scan of the owners' others: seconds, not minutes.
+- `--local PATH` checks a checkout before it is pushed: its workflows,
+  declaration, `debian/`, README and `.gitignore` as they would be
+  committed (tracked files, and untracked ones git doesn't ignore). The
+  branch, the history and the live site still come from GitHub. The
+  repository is `--repo`, or the checkout's origin.
+
 | ID | rule | how it's checked |
 |---|---|---|
 | PKG-DECLARED | the kind is declared | `.github/apt-packaging.toml` parses |
