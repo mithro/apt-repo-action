@@ -396,6 +396,70 @@ jobs:
               dpkg-query -W apt-repo-selftest-dep apt-repo-selftest-src
             '
 
+  reusable-build:
+    # The reusable build-deb.yml, as a repository calls it, on the committed
+    # tests/fixtures/hello tree: an Architecture: all package and an
+    # architecture-dependent command. Debian trixie on three architectures
+    # (amd64 builds the Architecture: all package; arm64 and armhf don't)
+    # and raspbian-trixie. dbgsym-limit-mb: 0 sends every -dbgsym to the
+    # dbgsym artifacts.
+    uses: ./.github/workflows/build-deb.yml
+    with:
+      source-dir: tests/fixtures/hello
+      suites: trixie raspbian-trixie
+      architectures: amd64 arm64 armhf
+      dbgsym-limit-mb: 0
+
+  reusable-build-check:
+    needs: reusable-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # the fixture's version is this repository's git describe
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Check the outputs and the artifacts
+        env:
+          SUITES: ${{ needs.reusable-build.outputs.suites }}
+          ARCHITECTURES: ${{ needs.reusable-build.outputs.architectures }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          echo "suites: $SUITES"
+          echo "architectures: $ARCHITECTURES"
+          test "$SUITES" = "trixie raspbian-trixie"
+          test "$ARCHITECTURES" = "amd64 arm64 armhf all"
+          ver() {
+            (cd tests/fixtures/hello &&
+             python3 ../../../scripts/deb-version.py --suite "$1" ${PR:+--pr "$PR"})
+          }
+          t=$(ver trixie)
+          r=$(ver raspbian-trixie)
+          echo "want versions: trixie $t, raspbian-trixie $r"
+          find artifacts -type f | sort
+          want=$(sort <<EOF
+          artifacts/dbgsym-raspbian-trixie-armhf/apt-repo-selftest-hello-dbgsym_${r}_armhf.deb
+          artifacts/dbgsym-trixie-amd64/apt-repo-selftest-hello-dbgsym_${t}_amd64.deb
+          artifacts/dbgsym-trixie-arm64/apt-repo-selftest-hello-dbgsym_${t}_arm64.deb
+          artifacts/dbgsym-trixie-armhf/apt-repo-selftest-hello-dbgsym_${t}_armhf.deb
+          artifacts/debs-raspbian-trixie-armhf/apt-repo-selftest-hello_${r}_armhf.deb
+          artifacts/debs-raspbian-trixie-armhf/apt-repo-selftest-src_${r}_all.deb
+          artifacts/debs-trixie-amd64/apt-repo-selftest-hello_${t}_amd64.deb
+          artifacts/debs-trixie-amd64/apt-repo-selftest-src_${t}_all.deb
+          artifacts/debs-trixie-arm64/apt-repo-selftest-hello_${t}_arm64.deb
+          artifacts/debs-trixie-armhf/apt-repo-selftest-hello_${t}_armhf.deb
+          EOF
+          )
+          want=$(echo "$want" | sed 's/^ *//')
+          got=$(find artifacts -type f | sort)
+          if [ "$got" != "$want" ]; then
+            diff <(echo "$want") <(echo "$got") || true
+            echo "::error::the artifacts are not the ones expected"
+            exit 1
+          fi
+
   apt-sources-pages:
     # The `repo = "owner/name"` form against the real GitHub API, with the
     # workflow's own read-only token: all build-deb has. Only the URLs are
