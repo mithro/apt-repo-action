@@ -114,7 +114,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
 | PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
-| PKG-DOCS | a `## Install` section (that exact heading) holding the setup block for the site, the key's fingerprint (read from the live key) and each dependency repository's setup; nothing conventions.md forbids | README, live key |
+| PKG-DOCS | a `## Install` section (that exact heading) holding the setup block for one suite, the name of every published suite, the key's fingerprint (read from the live key) and each dependency repository's setup; nothing conventions.md forbids | README, live key |
 | REPO-PAGES | Pages from Actions, HTTPS enforced | GitHub API |
 | REPO-KEYS | `<repo>.gpg` binary, `<repo>.asc` armoured | live site |
 | REPO-LAYOUT | flat signed suites, nothing at the root | live site |

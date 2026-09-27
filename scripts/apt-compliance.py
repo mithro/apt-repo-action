@@ -120,8 +120,8 @@ RULES = [
     ("PKG-DBGSYM", "Packages", "no `-dbgsym` over 10 MB in the apt repository",
      "Keep debug symbols over 10 MB out of apt (artifact and GitHub Release only)."),
     ("PKG-MAINTAINER", "Metadata", "`Maintainer:` is the expected maintainer", "Set Maintainer: in debian/control."),
-    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block, the key's fingerprint, and each dependency repository's setup",
-     "Give README.md (packaging/README.md for Set A) an `## Install` section with docs/conventions.md's setup block, the key's fingerprint, and each dependency repository's setup."),
+    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block for one suite, every published suite named, the key's fingerprint, and each dependency repository's setup",
+     "Give README.md (packaging/README.md for Set A) an `## Install` section with docs/conventions.md's setup block for one suite, a sentence naming every published suite to put in its place, the key's fingerprint, and each dependency repository's setup."),
     ("REPO-PAGES", "Published repository", "Pages built by GitHub Actions, HTTPS enforced",
      "Build Pages from GitHub Actions with HTTPS enforced."),
     ("REPO-KEYS", "Published repository", "`<repo>.gpg` (binary) and `<repo>.asc` (armoured) at the site root",
@@ -711,14 +711,21 @@ def pages_site(repo: str) -> str:
     return ((api(f"repos/{repo}/pages") or {}).get("html_url") or "").rstrip("/")
 
 
-def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list[dict]) -> tuple[bool, str]:
+def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list[dict],
+         suites: list[str] = ()) -> tuple[bool, str]:
     """PKG-DOCS (docs/packaging.md, "Documentation"): an `## Install` section
-    with this repository's setup block, its key's fingerprint, and the setup
-    of each dependency repository, and nothing conventions.md forbids."""
+    with this repository's setup block (for one suite; the reader puts in
+    their own), naming every published suite, with its key's fingerprint and
+    the setup of each dependency repository, and nothing conventions.md
+    forbids."""
     section = install_section(doc or "")
     if section is None:
         return False, "no `## Install` section"
     probs = setup_problems(section, name, site, key_fingerprints(key)) if site else ["no Pages site to set up"]
+    # A suite name, but not `trixie` inside `raspbian-trixie`.
+    unnamed = [x for x in suites if not re.search(rf"(?<![\w-]){re.escape(x)}(?![\w-])", section)]
+    if unnamed:
+        probs.append(f"doesn't name the published suite{'s' if len(unnamed) > 1 else ''} {' '.join(unnamed)}")
     for e in depends:
         if "repo" in e:
             dep_site = pages_site(e["repo"])
@@ -976,7 +983,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     doc_path = "packaging/README.md" if kind == "A" else "README.md"
     site_url = (f["site"] or {}).get("site")
     key = ((f["site"] or {}).get("root") or {}).get(f"{f['name']}.gpg", (0, b""))[1]
-    ok, detail = docs(f[doc_path], f["name"], site_url, key, t["depends"])
+    ok, detail = docs(f[doc_path], f["name"], site_url, key, t["depends"],
+                      sorted((f["site"] or {}).get("suites") or {}, key=KNOWN_SUITES.index))
     put("PKG-DOCS", ok, f"{doc_path}: {detail}")
 
     # --- Published repository

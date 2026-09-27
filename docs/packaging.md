@@ -590,9 +590,14 @@ Optional. A repository that also publishes its builds as GitHub Releases:
 ## Documentation
 
 - **README.md** (Set B) or **packaging/README.md** (Set A) has an
-  `## Install` section with the setup block from
-  [conventions.md](conventions.md#one-setup), for each suite. It shows the
-  real site URL and key fingerprint.
+  `## Install` section (that exact heading) with:
+  - the setup block from [conventions.md](conventions.md#one-setup), once,
+    for one named suite, with the real site URL;
+  - a sentence telling the reader to put their suite in place of that one,
+    naming every suite the repository publishes;
+  - the key's fingerprint.
+
+  `PKG-DOCS` checks each of these against the live site and key.
 - **A package that needs a dependency repository** says so there too: the
   `## Install` section gives the setup for each
   [dependency repository](#dependency-repositories), for the suites it is

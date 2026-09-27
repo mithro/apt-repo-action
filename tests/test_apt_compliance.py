@@ -324,6 +324,18 @@ class Docs(unittest.TestCase):
         self.assertIn("\\\n    https://", doc)
         self.assertTrue(self.docs(doc)[0])
 
+    def test_published_suites_named(self):
+        doc = README.replace(
+            "The signing key", "Suites: bookworm, trixie and raspbian-trixie; put yours in place of trixie.\n\nThe signing key")
+        with unittest.mock.patch.object(apc, "key_fingerprints", lambda key: [FPR]):
+            self.assertTrue(apc.docs(doc, "widget", SITE, b"", [], ["bookworm", "trixie", "raspbian-trixie"])[0])
+            self.assertEqual(apc.docs(doc, "widget", SITE, b"", [], ["trixie", "forky", "sid"]),
+                             (False, "doesn't name the published suites forky sid"))
+            # raspbian-forky doesn't name forky
+            doc2 = doc.replace("raspbian-trixie", "raspbian-forky")
+            self.assertEqual(apc.docs(doc2, "widget", SITE, b"", [], ["forky"]),
+                             (False, "doesn't name the published suite forky"))
+
     def test_forbidden(self):
         doc = README.replace("sudo apt update", "sudo apt update\nlsb_release -cs")
         self.assertEqual(self.docs(doc), (False, "mentions lsb_release"))
