@@ -135,6 +135,28 @@ jobs:
   runs the default branch's copy of the workflow, so a pull request can't
   change or test its own build. Tests are a job in `deb.yml` that
   `build-deb` needs.
+- **A workflow that follows `deb.yml`** through `workflow_run` (a PyPI
+  publish, say) is the other way round, and allowed: it runs after the
+  build, never instead of it. It:
+  - names the workflow `Debian packages` in `workflows:`, so renaming the
+    build workflow means changing it too (rpi-hwid's and
+    python-netgear-switch-library's followed `CI` until then);
+  - acts only on a successful run that isn't a pull request's. `branches:`
+    is the branch "the triggering workflow must run on", and a pull
+    request from a fork's own `main` has that name too. The workflow it
+    starts "is able to access secrets and write tokens, even if the
+    previous workflow was not" (GitHub's docs), so without the check it
+    would publish the pull request's commit:
+
+    ```yaml
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
+    ```
+  - checks out `${{ github.event.workflow_run.head_sha || github.sha }}`,
+    the commit the build tested, not whatever the default branch has moved
+    on to since.
 - **Job names** are exactly `test`, `build-deb`, `publish-apt` and
   `release`. The matrix job's display name is
   `build-deb (${{ matrix.suite }} ${{ matrix.arch }})`.
