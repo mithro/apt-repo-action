@@ -92,7 +92,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
-| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else | parse YAML |
+| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else; every `workflow_run` job guarded against pull requests | parse YAML, every workflow |
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
 | PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |

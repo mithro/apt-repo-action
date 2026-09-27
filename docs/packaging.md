@@ -154,6 +154,8 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event != 'pull_request')
     ```
+
+    `PKG-TRIGGERS` checks every workflow for this.
   - checks out `${{ github.event.workflow_run.head_sha || github.sha }}`,
     the commit the build tested, not whatever the default branch has moved
     on to since.

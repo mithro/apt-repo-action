@@ -87,5 +87,57 @@ jobs:
                          (False, "no job builds the packages"))
 
 
+PYPI = """
+name: Publish to PyPI
+on:
+  workflow_run:
+    workflows: ["Debian packages"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
+    runs-on: ubuntu-latest
+    steps: [{run: uv build}]
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps: [{uses: pypa/gh-action-pypi-publish@release/v1}]
+"""
+
+
+class WorkflowRun(unittest.TestCase):
+    def check(self, text: str) -> list:
+        return apc.unguarded_workflow_runs({"publish-pypi.yml": yaml.safe_load(text)})
+
+    def test_guarded_and_its_dependents(self):
+        # rpi-hwid's publish-pypi.yml, as merged in rpi-hwid#42.
+        self.assertEqual(self.check(PYPI), [])
+
+    def test_success_only_is_not_enough(self):
+        text = PYPI.replace(" &&\n       github.event.workflow_run.event != 'pull_request'", "")
+        self.assertEqual(self.check(text),
+                         ["publish-pypi.yml: workflow_run jobs build publish not guarded against pull requests"])
+
+    def test_a_dependent_that_runs_anyway(self):
+        text = PYPI.replace("    needs: build\n", "    needs: build\n    if: always()\n")
+        self.assertEqual(self.check(text),
+                         ["publish-pypi.yml: workflow_run job publish not guarded against pull requests"])
+
+    def test_double_quotes_and_other_workflows(self):
+        text = PYPI.replace("'pull_request')", '"pull_request")')
+        self.assertEqual(self.check(text), [])
+        self.assertEqual(apc.unguarded_workflow_runs({"ci.yml": {True: ["push"], "jobs": {"a": {}}}}), [])
+
+    def test_triggers_forms(self):
+        self.assertEqual(apc.triggers({True: "push"}), {"push": None})
+        self.assertEqual(apc.triggers({"on": ["push", "pull_request"]}), {"push": None, "pull_request": None})
+        self.assertIn("workflow_run", apc.triggers(yaml.safe_load(PYPI)))
+
+
 if __name__ == "__main__":
     unittest.main()

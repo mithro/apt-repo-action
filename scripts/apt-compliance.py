@@ -96,8 +96,8 @@ RULES = [
      f"Rename the build workflow to .github/workflows/{WORKFLOW_FILE} with `name: {WORKFLOW_NAME}`."),
     ("PKG-JOBS", "Workflow", "jobs are only `test`, `build-deb`, `publish-apt`, `release`",
      "Rename the jobs to test / build-deb / publish-apt / release."),
-    ("PKG-TRIGGERS", "Workflow", "push to the default branch, pull_request, workflow_dispatch; nothing else",
-     "Set the triggers to push (default branch), pull_request and workflow_dispatch."),
+    ("PKG-TRIGGERS", "Workflow", "push to the default branch, pull_request, workflow_dispatch; nothing else; any `workflow_run` workflow ignores pull requests",
+     "Set the triggers to push (default branch), pull_request and workflow_dispatch; guard every workflow_run job with `github.event.workflow_run.event != 'pull_request'`."),
     ("PKG-PREVIEW", "Workflow", "pull requests build, and `publish-apt` never runs for them",
      "Build on pull_request and guard publish-apt with the default-branch `if:`."),
     ("PKG-CONCURRENCY", "Workflow", "concurrency group `deb-${{ github.ref }}`, cancelling only pull requests",
@@ -504,6 +504,48 @@ def arch_for(suite: str, t: dict) -> set[str]:
 # Rules that read a workflow's structure.
 
 BUILD_RUN = re.compile(r"\b(dpkg-buildpackage|debuild|dpkg-deb|nfpm)\b")
+WORKFLOW_RUN_GUARD = re.compile(r"github\.event\.workflow_run\.event\s*!=\s*['\"]pull_request['\"]")
+# An `if:` with one of these runs even when a job it needs was skipped.
+RUNS_ANYWAY = re.compile(r"\b(always|failure|cancelled)\(\)")
+
+
+def triggers(w: dict) -> dict:
+    """A workflow's `on:`, as a dict whatever form it was written in."""
+    on = w.get(True, w.get("on", {}))  # YAML 1.1 reads a bare `on` as True
+    if isinstance(on, str):
+        return {on: None}
+    if isinstance(on, list):
+        return {k: None for k in on}
+    return on if isinstance(on, dict) else {}
+
+
+def unguarded_workflow_runs(parsed: dict[str, dict]) -> list[str]:
+    """PKG-TRIGGERS, in every workflow: one chained by `workflow_run` must not
+    act on a run that a pull request triggered. `branches: [main]` there
+    matches the triggering run's branch *name*, which a pull request from a
+    fork's own `main` has too; so each job needs
+    `github.event.workflow_run.event != 'pull_request'` in its `if:`, or
+    needs a job that has it (and doesn't run anyway, `always()`)."""
+    out = []
+    for n, w in sorted(parsed.items()):
+        if not isinstance(w, dict) or "workflow_run" not in triggers(w):
+            continue
+        jobs = {k: j for k, j in (w.get("jobs") or {}).items() if isinstance(j, dict)}
+
+        @functools.cache
+        def guarded(name: str) -> bool:
+            cond = str(jobs[name].get("if", ""))
+            if WORKFLOW_RUN_GUARD.search(cond):
+                return True
+            needs = jobs[name].get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            return not RUNS_ANYWAY.search(cond) and any(guarded(x) for x in needs if x in jobs)
+
+        bad = [name for name in jobs if not guarded(name)]
+        if bad:
+            out.append(f"{n}: workflow_run job{'s' if len(bad) > 1 else ''} {' '.join(bad)} "
+                       "not guarded against pull requests")
+    return out
 
 
 def install_test(jobs: dict, action_repo: str) -> tuple[bool, str]:
@@ -632,8 +674,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     jobs = w.get("jobs") or {}
     need = {"publish-apt"} if kind == "aggregate" else {"build-deb", "publish-apt"}
     put("PKG-JOBS", need <= set(jobs) and set(jobs) <= JOBS, " ".join(jobs) or "none")
-    on = w.get(True, w.get("on", {}))
-    on = {on: None} if isinstance(on, str) else {k: None for k in on} if isinstance(on, list) else (on or {})
+    on = triggers(w)
     bad = []
     push = on.get("push") or {}
     if "push" not in on:
@@ -650,6 +691,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         bad.append("schedule")
     if any(isinstance(v, dict) and ({"paths", "paths-ignore"} & set(v)) for v in on.values()):
         bad.append("paths filter")
+    # The other workflows too: one chained to this one by workflow_run.
+    bad += unguarded_workflow_runs({n: x for n, x in parsed.items() if n != wf_name})
     put("PKG-TRIGGERS", not bad, " ".join(str(k) for k in on) + (f" — {'; '.join(bad)}" if bad else ""))
     pub = next((j for j in jobs.values() if isinstance(j, dict) and str(j.get("uses", "")).startswith(publish_uses)), {})
     cond = str(pub.get("if", ""))
