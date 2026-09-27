@@ -425,7 +425,9 @@ that sorts wrongly. Each one is a recorded exception.
   `deb-version.py`.
 - **`build-deb`** (`uses: mithro/apt-repo-action/build-deb@main`, as the
   `Build` step):
-  - builds in `debian:<suite>`, installing the build dependencies from
+  - builds in `debian:<suite>`, or for `raspbian-<codename>` in a Raspbian
+    root bootstrapped from archive.raspbian.org (see
+    [`build-deb/raspbian/`](../build-deb/raspbian/README.md)), installing the build dependencies from
     `debian/control`, after adding the suite's
     [dependency repositories](#dependency-repositories);
   - takes `arch: all` for a repository whose packages are all
