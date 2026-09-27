@@ -51,6 +51,16 @@ inputs:
     required: false
     default: ${{ github.token }}
 
+outputs:
+  apt-sources:
+    description: >-
+      A directory on the runner holding the dependency repositories this
+      build used, as scripts/apt-sources.py writes them. An install test
+      mounts it into its container and runs `sh <dir>/install.sh` (as root)
+      before installing the built packages; with none declared for the
+      suite, install.sh does nothing.
+    value: ${{ steps.depends.outputs.path }}
+
 runs:
   using: composite
   steps:
@@ -130,6 +140,9 @@ runs:
         dest=$(mktemp -d "$RUNNER_TEMP/apt-sources.XXXXXX")
         n=$(python3 "$ACTION_ROOT/scripts/apt-sources.py" write --suite "$SUITE" \
               --declaration "$GITHUB_WORKSPACE/$SOURCE_DIR/.github/apt-packaging.toml" --dest "$dest")
+        # path: always, for an install test. dir: only when there is
+        # something to install, so the build is unchanged without it.
+        echo "path=$dest" >> "$GITHUB_OUTPUT"
         if [ "$n" = 0 ]; then dest=; fi
         echo "dir=$dest" >> "$GITHUB_OUTPUT"
 
