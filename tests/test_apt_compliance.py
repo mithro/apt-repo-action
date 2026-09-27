@@ -369,7 +369,12 @@ class Matrix(unittest.TestCase):
         self.assertFalse(m["arch_default"] or m["suites_default"])
 
     def test_undeclared_infers_all_from_control(self):
-        self.assertEqual(apc.declared_matrix(None, {"amd64"}, CONTROL_ALL)["architectures"], "all")
+        self.assertEqual(apc.declared_matrix(None, set(), CONTROL_ALL)["architectures"], "all")
+
+    def test_undeclared_published_must_agree(self):
+        # paramiko-insecure: an all-`all` debian/control, but it also
+        # publishes an architecture-dependent package built from elsewhere.
+        self.assertEqual(apc.declared_matrix(None, {"all", "amd64"}, CONTROL_ALL)["architectures"], "any")
 
     def test_declared_without_architectures_is_the_default(self):
         m = apc.declared_matrix({"kind": "B"}, {"all"}, None)

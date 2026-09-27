@@ -556,8 +556,10 @@ def declared_matrix(decl: dict | None, published: set[str], control: str | None)
     (scripts/build-matrix.py), so the checker expects what the build makes.
     A declaration without `architectures` means the default set, as it does
     to build-matrix.py. With no declaration (None), the target is inferred:
-    "all" when debian/control's packages, or failing that the published
-    ones, are all Architecture: all.
+    "all" when debian/control's packages and the published ones are all
+    Architecture: all. Both have to agree, since a repository can publish
+    packages built outside its debian/control (paramiko-insecure's
+    python3-cryptography-insecure).
 
     `problems` are what build-matrix.py would refuse the declaration for,
     failing every build; an unknown name or a wrong type is one of them,
@@ -568,7 +570,7 @@ def declared_matrix(decl: dict | None, published: set[str], control: str | None)
     in_control = control_architectures(control) if control is not None else []
     arch = decl.get("architectures", None if inferred else "any")
     if arch is None:
-        seen = set(in_control) or published
+        seen = set(in_control) | published
         arch = "all" if seen and seen <= {"all"} else "any"
     if arch == "default":
         arch = "any"
