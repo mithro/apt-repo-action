@@ -258,7 +258,8 @@ runs:
       run: |
         set -eux
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends mmdebstrap
+        # arch-test: how mmdebstrap finds out armhf runs (natively or not).
+        sudo apt-get install -y --no-install-recommends mmdebstrap arch-test
         # signed-by names a path that is the same outside the root (apt's
         # update during the bootstrap) and inside it (every later update).
         keyring=/usr/share/keyrings/apt-repo-action-raspbian.gpg
