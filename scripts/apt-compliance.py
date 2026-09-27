@@ -786,12 +786,15 @@ def to_markdown(report: dict) -> str:
 
 CSS = """
 :root{--ground:#f4f7f6;--surface:#ffffff;--ink:#17211e;--muted:#5a6964;--line:#d3dcd8;--accent:#2c5a86;
---pass:#2e7d4f;--pass-bg:#e3f2e8;--fail:#b3261e;--fail-bg:#fbe5e3;--exc:#9a5b00;--exc-bg:#fcefd9;--na:#8a9793;--na-bg:transparent}
+--pass:#2e7d4f;--pass-bg:#e3f2e8;--fail:#b3261e;--fail-bg:#fbe5e3;--exc:#9a5b00;--exc-bg:#fcefd9;--na:#8a9793;--na-bg:transparent;
+--kind-A:#2f5f9e;--kind-A-bg:#e8f0fa;--kind-B:#6a4a9c;--kind-B-bg:#f1ebf8;--kind-aggregate:#4d5d66;--kind-aggregate-bg:#eceff1}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--ground:#101615;--surface:#172020;
 --ink:#e2ebe8;--muted:#98a8a2;--line:#2c3936;--accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;
---fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570}}
+--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570;
+--kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427}}
 :root[data-theme="dark"]{color-scheme:dark;--ground:#101615;--surface:#172020;--ink:#e2ebe8;--muted:#98a8a2;--line:#2c3936;
---accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570}
+--accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570;
+--kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427}
 body{background:var(--ground);color:var(--ink);font:15px/1.55 "IBM Plex Sans",system-ui,sans-serif;padding:32px 20px 64px}
 main{max-width:1280px;margin:0 auto;display:grid;gap:36px}
 h1,h2,h3{text-wrap:balance;line-height:1.2;margin:0}h1{font-size:28px;font-weight:600}h2{font-size:20px;font-weight:600}
@@ -816,8 +819,17 @@ td.num{font-variant-numeric:tabular-nums;font-weight:600}
 .todo{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px;display:grid;gap:8px;align-content:start}
 .todo .meta{color:var(--muted);font-size:13px}.todo ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:14px}
 .todo li b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:600}
+tr.kind-A td{background:var(--kind-A-bg)}tr.kind-B td{background:var(--kind-B-bg)}
+tr.kind-aggregate td{background:var(--kind-aggregate-bg)}
+tr.kind-A td.repo{box-shadow:inset 4px 0 var(--kind-A)}tr.kind-B td.repo{box-shadow:inset 4px 0 var(--kind-B)}
+tr.kind-aggregate td.repo{box-shadow:inset 4px 0 var(--kind-aggregate)}
+tr[class^="kind-"] td.kind{font-weight:600}tr.kind-A td.kind{color:var(--kind-A)}tr.kind-B td.kind{color:var(--kind-B)}
+tr.kind-aggregate td.kind{color:var(--kind-aggregate)}
+.k{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:4px}
+.k-A{background:var(--kind-A)}.k-B{background:var(--kind-B)}.k-aggregate{background:var(--kind-aggregate)}
 .rules{font-size:14px}.rules td{text-align:left;white-space:normal}.rules td:first-child{white-space:nowrap}
 """
+KIND_ORDER = {"A": 0, "B": 1, "aggregate": 2}
 SYMBOL = {"pass": "✓", "fail": "✗", "exception": "E", "na": "·"}
 
 
@@ -841,18 +853,21 @@ def to_html(report: dict) -> str:
            f'<div><b>{len(report["sites_without_packaging"])}</b><span>sites without packaging</span></div></div>',
            '<div class="legend"><span><span class="s pass">✓</span> passes</span><span><span class="s fail">✗</span> fails</span>'
            '<span><span class="s exception">E</span> declared exception</span><span><span class="s na">·</span> does not apply</span></div>'
+           '<div class="legend">Rows by kind: <span><span class="k k-A"></span>Set A, someone else\'s code</span>'
+           '<span><span class="k k-B"></span>Set B, our code</span>'
+           '<span><span class="k k-aggregate"></span>aggregate, collects other repositories\' packages</span></div>'
            "</section>"]
     for g in groups:
         ids = [r[0] for r in RULES if r[1] == g]
         out.append(f"<section><h2>{e(g)}</h2><div class=\"scroll\"><table><thead><tr><th class=\"repo\">repository</th>"
                    "<th class=\"repo\">kind</th><th class=\"repo\">fails</th>"
                    + "".join(f'<th title="{e(RULE[i][2])}">{e(i)}</th>' for i in ids) + "</tr></thead><tbody>")
-        for r in repos:
+        for r in sorted(repos, key=lambda r: (KIND_ORDER.get(r["kind"], len(KIND_ORDER)), r["repo"])):
             n = sum(r["checks"][i]["status"] == "fail" for i in ids)
             cells = "".join(f'<td><span class="s {r["checks"][i]["status"]}" title="{e(i)}: {e(r["checks"][i]["detail"])}">'
                             f'{SYMBOL[r["checks"][i]["status"]]}</span></td>' for i in ids)
             kind = r["kind"] + (f" · {r['variant']}" if r["variant"] else "")
-            out.append(f'<tr><td class="repo"><a href="#todo-{e(r["repo"])}">{e(r["repo"])}</a></td>'
+            out.append(f'<tr class="kind-{e(r["kind"])}"><td class="repo"><a href="#todo-{e(r["repo"])}">{e(r["repo"])}</a></td>'
                        f'<td class="kind">{e(kind)}</td><td class="num">{n or ""}</td>{cells}</tr>')
         out.append("</tbody></table></div></section>")
     out.append('<section><h2>What to do, per repository</h2><div class="todos">')
