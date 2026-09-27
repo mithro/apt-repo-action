@@ -120,9 +120,10 @@ further suffixes are allowed (`debs-bookworm-armhf-openocd-stable`). The publish
 workflow regroups each artifact under the longest suite in `suites` that its
 name starts with, so a suite may contain a dash (`debs-raspbian-trixie-armhf`).
 It does so with [`collect-debs/`](collect-debs/action.yml), which lists the run's
-artifacts through the API before downloading them. A public repository's
-workflow token can do that (the self-test checks it); a private one's
-publish job may also need `actions: read`.
+artifacts through the API before downloading them. publish-apt's token has no
+`actions: read`, and that works because the repository is public (the
+self-test checks it with a `contents: read` token). A private repository
+can't publish through it as it is (see docs/packaging.md, "Workflows").
 
 The index page is generated for every repository. To say something about the
 packages, put an HTML fragment in `packaging/apt-intro.html`.

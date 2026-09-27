@@ -175,6 +175,15 @@ jobs:
         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
   ```
 
+  **Only public repositories can publish this way.** publish-apt lists the
+  run's artifacts through the API with its token, which has no
+  `actions: read`; a public repository's artifacts can be listed without
+  it. Adding `actions: read` to the job above changes nothing: a called
+  workflow's token "can be only downgraded (not elevated)" (GitHub's docs),
+  and publish-apt.yml's own `permissions:` doesn't include it. A private
+  repository needs publish-apt.yml to ask for `actions: read`, and then
+  every caller must grant it, or its run ends in `startup_failure`.
+
 **`sync-upstream.yml`** (Set A) runs weekly and on `workflow_dispatch`:
 1. Fast-forward `upstream` from the upstream repository.
 2. If `packaging` doesn't already contain it, open (or update) a pull

@@ -28,7 +28,8 @@ inputs:
   github-token:
     description: >-
       Token that can list this run's artifacts. The workflow's own token can
-      in a public repository; a private one may need `actions: read`.
+      in a public repository, without `actions: read`; in a private one it
+      needs `actions: read`.
     required: false
     default: ${{ github.token }}
 
