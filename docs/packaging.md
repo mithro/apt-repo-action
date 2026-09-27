@@ -508,6 +508,14 @@ To check it worked, look at any `build-deb` job of that commit:
   artifacts and published only on the GitHub Release.
 - `lintian` runs on every build. Errors SHOULD be fixed; they don't fail the
   build yet.
+  - `build-deb` runs it after the build and shows each error and warning as
+    a warning annotation, and all of them in the job summary.
+  - Its `lintian` input is `warn` by default. `error` makes a lintian error
+    fail the build, for a repository that has fixed its errors and wants to
+    keep them fixed. `off` is for a build whose packages are checked
+    elsewhere, and needs a reason like any other exception.
+  - It runs in `debian:<codename>` on the runner's own architecture, not
+    under QEMU, whatever the build's architecture.
 
 ## GitHub Releases
 
