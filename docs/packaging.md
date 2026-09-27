@@ -149,6 +149,13 @@ jobs:
       uses: mithro/apt-repo-action/.github/workflows/build-deb.yml@main
   ```
 
+  A patch series has its own job because the workflow runs nothing before
+  the build, and a patch series must first fetch the pinned project and
+  render its `debian/` into it. The workflow's `version-tree`,
+  `version-args` and `lintian` inputs pass straight through to
+  `build-deb`, for a repository that builds its own tree but needs them
+  (an epoch under a declared exception, say).
+
   It reads the suites and architectures from
   [the declaration](#the-declaration), so the workflow lists neither, and
   gives them to `publish-apt` as its outputs `suites` and `architectures`.
