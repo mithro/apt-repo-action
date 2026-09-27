@@ -636,6 +636,49 @@ def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) ->
     return False, f"no `Install test` step in {', '.join(builders)}"
 
 
+def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, variant: str) -> tuple[bool, str]:
+    """PKG-SHARED (docs/packaging.md, "The shared actions"): the build is the
+    shared one, at `@main`, and the repository carries no deb-version.py.
+
+    Shared is the reusable build-deb.yml workflow (a job's `uses:`), the
+    build-deb action (a step's `uses:`), or, for a build that can't go
+    through build-deb, the deb-version action giving the shared version: an
+    nfpm build or a patch series' own job. Every use of any of them must be
+    at `@main`, the release job's included, since each repository runs
+    exactly what's on apt-repo-action's main."""
+    repo = action_repo.lower()
+    workflow, action, version = (f"{repo}/.github/workflows/build-deb.yml", f"{repo}/build-deb",
+                                 f"{repo}/deb-version")
+    uses = []
+    for j in jobs.values():
+        if not isinstance(j, dict):
+            continue
+        uses.append(str(j.get("uses", "")))
+        uses += [str(s.get("uses", "")) for s in (j.get("steps") or []) if isinstance(s, dict)]
+    found = {}
+    for u in uses:
+        path, _, ref = u.partition("@")
+        if path.lower() in (workflow, action, version):
+            found.setdefault(path.lower(), set()).add(ref)
+    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)"
+                for path, refs in sorted(found.items()) for ref in sorted(refs) if ref != "main"]
+    if workflow in found:
+        what = "the reusable build-deb.yml"
+    elif action in found:
+        what = "the build-deb action"
+    elif version in found and (nfpm or variant == "patch-series"):
+        what = "nfpm with the deb-version action" if nfpm else "the deb-version action in its own job"
+    elif version in found:
+        what = None
+        off_main.insert(0, "deb-version without build-deb, but neither nfpm nor a patch series")
+    else:
+        what = None
+    detail = "; ".join(off_main) if off_main else what or "own build steps"
+    if local_ver:
+        detail += "; local deb-version.py"
+    return bool(what) and not off_main and not local_ver, detail
+
+
 def key_fingerprints(data: bytes) -> list[str]:
     """The fingerprints of the primary keys in a binary OpenPGP keyring, as
     40 (v4) or 64 (v6) upper-case hex digits (RFC 9580, 5.5.4)."""
@@ -890,19 +933,11 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         (f"group {conc.get('group') if isinstance(conc, dict) else conc}" if conc else "none"))
     ref = str(pub.get("uses", "")).rpartition("@")[2] if pub else None
     put("PKG-PUBLISHER", ref == "main", f"publish-apt.yml@{ref}" if ref else "not through publish-apt.yml")
-    all_uses = [str(s.get("uses", "")) for j in jobs.values() if isinstance(j, dict)
-                for s in (j.get("steps") or []) if isinstance(s, dict)] + \
-        [str(j.get("uses", "")) for j in jobs.values() if isinstance(j, dict)]
-    shared_builds = {f"{args.action_repo}/build-deb".lower(), f"{args.action_repo}/.github/workflows/build-deb.yml".lower()}
-    shared = [u.partition("@") for u in all_uses if u.partition("@")[0].lower() in shared_builds]
-    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)" for path, _, ref in shared if ref != "main"]
-    local_ver = "packaging/deb-version.py" in f["files"]
     if kind == "aggregate":
         put("PKG-SHARED", None, "nothing to build")
     else:
-        put("PKG-SHARED", bool(shared) and not off_main and not local_ver,
-            ("; ".join(off_main) if off_main else "shared build" if shared else "own build steps")
-            + ("; local deb-version.py" if local_ver else ""))
+        put("PKG-SHARED", *shared_build(jobs, args.action_repo, "packaging/deb-version.py" in f["files"],
+                                        t["nfpm"], variant))
     if kind == "aggregate":
         put("PKG-INSTALL-TEST", None, "nothing to build")
     else:

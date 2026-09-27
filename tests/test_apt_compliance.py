@@ -197,6 +197,130 @@ class WorkflowRun(unittest.TestCase):
         self.assertIn("workflow_run", apc.triggers(yaml.safe_load(PYPI)))
 
 
+# A caller of the reusable workflow, as README.md shows it.
+REUSABLE = """
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make check
+  build-deb:
+    needs: test
+    uses: someone/apt-repo-action/.github/workflows/build-deb.yml@main
+  publish-apt:
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    needs: build-deb
+    uses: someone/apt-repo-action/.github/workflows/publish-apt.yml@main
+    with:
+      suites: ${{ needs.build-deb.outputs.suites }}
+      architectures: ${{ needs.build-deb.outputs.architectures }}
+"""
+
+# An nfpm build versioned by the deb-version action, as go-tmux-saver's.
+NFPM = """
+jobs:
+  build-deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Version (trixie)
+        id: v-trixie
+        uses: someone/apt-repo-action/deb-version@REF
+        with:
+          suite: trixie
+      - name: Build
+        run: |
+          go build -o dist/x ./cmd/x
+          VERSION="$V" nfpm package -p deb -f nfpm.yaml -t built-debs/trixie/
+      - name: Install test
+        run: docker run --rm debian:trixie true
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Version
+        uses: someone/apt-repo-action/deb-version@RELEASE_REF
+        with:
+          suite: sid
+"""
+
+
+def nfpm(ref="main", release_ref="main"):
+    return jobs(NFPM.replace("RELEASE_REF", release_ref).replace("@REF", "@" + ref))
+
+
+class Shared(unittest.TestCase):
+    def shared(self, j, local_ver=False, nfpm_build=False, variant=""):
+        return apc.shared_build(j, ACTION, local_ver, nfpm_build, variant)
+
+    def test_reusable_workflow(self):
+        self.assertEqual(self.shared(jobs(REUSABLE)), (True, "the reusable build-deb.yml"))
+
+    def test_reusable_workflow_off_main(self):
+        ok, detail = self.shared(jobs(REUSABLE.replace("build-deb.yml@main", "build-deb.yml@v1")))
+        self.assertFalse(ok)
+        self.assertIn("build-deb.yml@v1 (want @main)", detail)
+
+    def test_reusable_workflow_is_an_install_test(self):
+        self.assertTrue(apc.install_test(jobs(REUSABLE), ACTION)[0])
+
+    def test_build_deb_action(self):
+        j = jobs("""
+jobs:
+  build-deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: someone/apt-repo-action/build-deb@main
+        with: {suite: trixie, arch: all}
+""")
+        self.assertEqual(self.shared(j), (True, "the build-deb action"))
+
+    def test_nfpm_with_deb_version(self):
+        self.assertEqual(self.shared(nfpm(), nfpm_build=True), (True, "nfpm with the deb-version action"))
+
+    def test_nfpm_deb_version_off_main(self):
+        ok, detail = self.shared(nfpm("deb-version/patch-series"), nfpm_build=True)
+        self.assertFalse(ok)
+        self.assertEqual(detail, "deb-version@deb-version/patch-series (want @main)")
+
+    def test_release_job_counts(self):
+        # The release job's version must be the same script as the build's.
+        ok, detail = self.shared(nfpm(release_ref="v2"), nfpm_build=True)
+        self.assertFalse(ok)
+        self.assertEqual(detail, "deb-version@v2 (want @main)")
+
+    def test_deb_version_alone_is_not_a_shared_build(self):
+        # dpkg-buildpackage with only the version from deb-version: that is
+        # what build-deb is for.
+        ok, detail = self.shared(nfpm())
+        self.assertFalse(ok)
+        self.assertIn("neither nfpm nor a patch series", detail)
+
+    def test_patch_series_own_job(self):
+        self.assertEqual(self.shared(nfpm(), variant="patch-series"),
+                         (True, "the deb-version action in its own job"))
+
+    def test_local_deb_version(self):
+        ok, detail = self.shared(jobs(REUSABLE), local_ver=True)
+        self.assertFalse(ok)
+        self.assertEqual(detail, "the reusable build-deb.yml; local deb-version.py")
+
+    def test_own_build(self):
+        j = jobs("""
+jobs:
+  build-deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: dpkg-buildpackage -b
+""")
+        self.assertEqual(self.shared(j), (False, "own build steps"))
+
+    def test_another_repositorys_actions_dont_count(self):
+        self.assertEqual(self.shared(jobs(REUSABLE.replace("someone/", "else/"))), (False, "own build steps"))
+
+    def test_nfpm_install_test(self):
+        self.assertTrue(apc.install_test(nfpm(), ACTION)[0])
+
+
 class Changelog(unittest.TestCase):
     ROOT = ["debian/control", "debian/rules", ".gitignore"]
 
