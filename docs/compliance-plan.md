@@ -163,12 +163,27 @@ what a repository gets by default.
 ## 4. Continuous checking
 
 - **Nightly `compliance.yml` in apt-repo-action** runs
-  `scripts/apt-compliance.py`, then:
-  - publishes the report on apt-repo-action's own Pages site: the tables
-    and todo lists of the compliance report, from live data;
-  - keeps **one issue per non-compliant repository**, in that repository,
-    titled `apt conventions: N rules failing`. The body is the todo list as
-    checkboxes, and it closes itself when the repository passes.
+  `scripts/apt-compliance.py` over the owners named in the workflow (and on
+  `workflow_dispatch`, with owners and maintainer as inputs). It exists, and
+  so far only:
+  - keeps `report.{html,md,json}` as the run's `compliance-report`
+    artifact;
+  - writes the Markdown checklists into the run's job summary.
+
+  It changes nothing anywhere. The run's own token suffices: a scan makes
+  about 250 API requests, and every packaging repository is public. That
+  token sees only an organisation's *public* members, though, so in an
+  organisation whose members are all private, an undeclared repository's
+  commits by its own people look like upstream's and its kind is inferred
+  as Set A. A declaration settles the kind, so this ends once every
+  repository has one.
+
+  Still to come:
+  - publishing the report on apt-repo-action's own Pages site;
+  - keeping **one issue per non-compliant repository**, in that
+    repository, titled `apt conventions: N rules failing`. The body is the
+    todo list as checkboxes, and it closes itself when the repository
+    passes. Whether to do this is still to be decided.
 - **Every build checks itself.** `build-deb.yml` runs `--self` first. A pull
   request that renames a job, drops a trigger or adds an unregistered suite
   gets a warning, or a failure once that rule is enforced, before it
