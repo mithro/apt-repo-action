@@ -76,7 +76,7 @@ ARMOUR = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 
 # (id, group, what compliance means, what to do when it fails)
 RULES = [
-    ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}",
+    ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}, and the build accepts it",
      f"Add {DECLARATION}: kind, and a reason for every exception."),
     ("PKG-BRANCH", "Repository", "default branch is `packaging` (Set A) or `main` (Set B), and it is what publishes",
      "Make the conventional branch the default branch and publish from it."),
@@ -106,8 +106,10 @@ RULES = [
      "Add the conventional concurrency block."),
     ("PKG-PUBLISHER", "Workflow", "publishes only through `publish-apt.yml@main`",
      "Publish through <action-repo>/.github/workflows/publish-apt.yml@main."),
-    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main`; no local `deb-version.py`",
-     "Build with <action-repo>/build-deb@main and drop packaging/deb-version.py."),
+    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main` (build-deb.yml, build-deb, or deb-version for nfpm "
+     "and a patch series' own job); no local `deb-version.py`",
+     "Build with <action-repo>/.github/workflows/build-deb.yml@main (or the build-deb action, or deb-version for an nfpm "
+     "build) and drop packaging/deb-version.py."),
     ("PKG-INSTALL-TEST", "Workflow", "an `Install test` step installs the packages in a clean container",
      "Add an `Install test` step."),
     ("PKG-SUITES", "Packages", "the default suites, or the declared ones with a reason",
