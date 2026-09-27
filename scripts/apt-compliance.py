@@ -76,7 +76,7 @@ ARMOUR = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 
 # (id, group, what compliance means, what to do when it fails)
 RULES = [
-    ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}",
+    ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}, and the build accepts it",
      f"Add {DECLARATION}: kind, and a reason for every exception."),
     ("PKG-BRANCH", "Repository", "default branch is `packaging` (Set A) or `main` (Set B), and it is what publishes",
      "Make the conventional branch the default branch and publish from it."),
@@ -106,8 +106,10 @@ RULES = [
      "Add the conventional concurrency block."),
     ("PKG-PUBLISHER", "Workflow", "publishes only through `publish-apt.yml@main`",
      "Publish through <action-repo>/.github/workflows/publish-apt.yml@main."),
-    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main`; no local `deb-version.py`",
-     "Build with <action-repo>/build-deb@main and drop packaging/deb-version.py."),
+    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main` (build-deb.yml, build-deb, or deb-version for nfpm "
+     "and a patch series' own job); no local `deb-version.py`",
+     "Build with <action-repo>/.github/workflows/build-deb.yml@main (or the build-deb action, or deb-version for an nfpm "
+     "build) and drop packaging/deb-version.py."),
     ("PKG-INSTALL-TEST", "Workflow", "an `Install test` step installs the packages in a clean container",
      "Add an `Install test` step."),
     ("PKG-SUITES", "Packages", "the default suites, or the declared ones with a reason",
@@ -505,22 +507,7 @@ def target(f: dict, owner_tag: str | None) -> dict:
             variant = "patch-series"
     t["variant"] = variant or ""
     t["nfpm"] = "nfpm" in wf
-    arch = decl.get("architectures")
-    if arch is None:
-        arch = "all" if all_arch and all_arch <= {"all"} else "any"
-    t["architectures"] = arch
-    archs = [] if arch == "all" else (DEFAULT_ARCH if arch == "any" else list(arch))
-    t["arch_default"] = arch in ("any", "all")
-    suites = decl.get("suites", "default")
-    debian = DEFAULT_DEBIAN if suites == "default" else [s for s in suites if not s.startswith("raspbian-")]
-    t["suites_default"] = suites == "default"
-    want = list(debian)
-    if "armhf" in archs:  # Raspbian is armhf only, and has no sid
-        want += [f"raspbian-{s}" for s in debian if s != "sid"]
-    if suites != "default":
-        want = list(suites)
-    t["suites"] = sorted(want, key=KNOWN_SUITES.index)
-    t["archs"] = archs
+    t.update(declared_matrix(decl if t["declared"] else None, all_arch, f.get("debian/control")))
     t["exceptions"] = dict(decl.get("exceptions", {}))
     t["upstream"] = decl.get("upstream")
     raw = decl.get("depends", [])
@@ -531,6 +518,106 @@ def target(f: dict, owner_tag: str | None) -> dict:
     except apt_sources.Error as e:
         t["depends"], t["depends_error"] = [], str(e)
     return t
+
+
+def words(value, what: str) -> list[str]:
+    """A TOML list of strings, or a space-separated string, as the reusable
+    build-deb.yml's scripts/build-matrix.py reads `suites` and
+    `architectures`."""
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        out = list(value)
+    elif isinstance(value, str):
+        out = value.split()
+    else:
+        raise ValueError(f"{what} must be a string or a list of strings, not {value!r}")
+    dups = sorted({v for v in out if out.count(v) > 1})
+    if dups:
+        raise ValueError(f"{what} lists {', '.join(dups)} twice")
+    return out
+
+
+def control_architectures(text: str) -> list[str]:
+    """The Architecture: of each binary package in a debian/control."""
+    archs = []
+    for stanza in re.split(r"\n\s*\n", text):
+        fields = {}
+        for line in stanza.splitlines():
+            if line[:1] in (" ", "\t", "#") or ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            fields[name.strip().lower()] = value.strip()
+        if "package" in fields and "architecture" in fields:
+            archs.append(fields["architecture"])
+    return archs
+
+
+def declared_matrix(decl: dict | None, published: set[str], control: str | None) -> dict:
+    """The suites and architectures a repository should publish: its
+    declaration's `suites` and `architectures` (docs/packaging.md, "The
+    declaration"), read as the reusable build-deb.yml plans its builds
+    (scripts/build-matrix.py), so the checker expects what the build makes.
+    A declaration without `architectures` means the default set, as it does
+    to build-matrix.py. With no declaration (None), the target is inferred:
+    "all" when debian/control's packages and the published ones are all
+    Architecture: all. Both have to agree, since a repository can publish
+    packages built outside its debian/control (paramiko-insecure's
+    python3-cryptography-insecure).
+
+    `problems` are what build-matrix.py would refuse the declaration for,
+    failing every build; an unknown name or a wrong type is one of them,
+    and is then left out, so the rest can still be checked."""
+    inferred = decl is None
+    decl = decl or {}
+    problems = []
+    in_control = control_architectures(control) if control is not None else []
+    arch = decl.get("architectures", None if inferred else "any")
+    if arch is None:
+        seen = set(in_control) | published
+        arch = "all" if seen and seen <= {"all"} else "any"
+    if arch == "default":
+        arch = "any"
+    if arch in ("any", "all"):
+        archs = [] if arch == "all" else list(DEFAULT_ARCH)
+    else:
+        try:
+            archs = words(arch, "architectures")
+        except ValueError as e:
+            problems.append(str(e))
+            archs = []
+        unknown = [a for a in archs if a not in DEFAULT_ARCH]
+        if unknown:
+            problems.append(f"unknown architecture {', '.join(unknown)}")
+            archs = [a for a in archs if a in DEFAULT_ARCH]
+    if in_control:
+        dependent = any(a != "all" for a in in_control)
+        if arch == "all" and dependent:
+            problems.append('architectures = "all", but debian/control has architecture-dependent packages')
+        elif arch != "all" and not dependent:
+            problems.append('every package in debian/control is Architecture: all: declare architectures = "all"')
+    suites = decl.get("suites", "default")
+    if suites == "default":
+        want = list(DEFAULT_DEBIAN)
+        if "armhf" in archs:  # Raspbian is armhf only, and has no sid
+            want += [f"raspbian-{s}" for s in DEFAULT_DEBIAN if s != "sid"]
+    else:
+        try:
+            want = words(suites, "suites")
+        except ValueError as e:
+            problems.append(str(e))
+            want = []
+        unknown = [x for x in want if x not in KNOWN_SUITES]
+        if unknown:
+            problems.append(f"unknown suite {', '.join(unknown)}")
+            want = [x for x in want if x in KNOWN_SUITES]
+        raspbian = [x for x in want if x.startswith("raspbian-")]
+        if raspbian and arch == "all":
+            problems.append(f"{' '.join(raspbian)}: an Architecture: all repository publishes only the Debian suites")
+        elif raspbian and "armhf" not in archs:
+            problems.append(f"{' '.join(raspbian)}: the Raspbian suites are armhf only, and the architectures "
+                            "leave armhf out")
+    return {"architectures": arch, "archs": archs, "arch_default": arch in ("any", "all"),
+            "suites": sorted(want, key=KNOWN_SUITES.index), "suites_default": suites == "default",
+            "matrix_problems": problems}
 
 
 def arch_for(suite: str, t: dict) -> set[str]:
@@ -634,6 +721,49 @@ def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) ->
                     (code_lines(str(s.get("run", ""))).strip() or str(s.get("uses", "")).strip()):
                 return True, f"`{s['name']}` in {path}"
     return False, f"no `Install test` step in {', '.join(builders)}"
+
+
+def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, variant: str) -> tuple[bool, str]:
+    """PKG-SHARED (docs/packaging.md, "The shared actions"): the build is the
+    shared one, at `@main`, and the repository carries no deb-version.py.
+
+    Shared is the reusable build-deb.yml workflow (a job's `uses:`), the
+    build-deb action (a step's `uses:`), or, for a build that can't go
+    through build-deb, the deb-version action giving the shared version: an
+    nfpm build or a patch series' own job. Every use of any of them must be
+    at `@main`, the release job's included, since each repository runs
+    exactly what's on apt-repo-action's main."""
+    repo = action_repo.lower()
+    workflow, action, version = (f"{repo}/.github/workflows/build-deb.yml", f"{repo}/build-deb",
+                                 f"{repo}/deb-version")
+    uses = []
+    for j in jobs.values():
+        if not isinstance(j, dict):
+            continue
+        uses.append(str(j.get("uses", "")))
+        uses += [str(s.get("uses", "")) for s in (j.get("steps") or []) if isinstance(s, dict)]
+    found = {}
+    for u in uses:
+        path, _, ref = u.partition("@")
+        if path.lower() in (workflow, action, version):
+            found.setdefault(path.lower(), set()).add(ref)
+    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)"
+                for path, refs in sorted(found.items()) for ref in sorted(refs) if ref != "main"]
+    if workflow in found:
+        what = "the reusable build-deb.yml"
+    elif action in found:
+        what = "the build-deb action"
+    elif version in found and (nfpm or variant == "patch-series"):
+        what = "nfpm with the deb-version action" if nfpm else "the deb-version action in its own job"
+    elif version in found:
+        what = None
+        off_main.insert(0, "deb-version without build-deb, but neither nfpm nor a patch series")
+    else:
+        what = None
+    detail = "; ".join(off_main) if off_main else what or "own build steps"
+    if local_ver:
+        detail += "; local deb-version.py"
+    return bool(what) and not off_main and not local_ver, detail
 
 
 def key_fingerprints(data: bytes) -> list[str]:
@@ -782,6 +912,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     # --- Repository
     if t.get("declaration_error"):
         put("PKG-DECLARED", False, f"{DECLARATION} doesn't parse: {t['declaration_error']}")
+    elif t["declared"] and t["matrix_problems"]:
+        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(t["matrix_problems"]))
     else:
         put("PKG-DECLARED", t["declared"], f"kind {kind}" + (f" ({variant})" if variant else "")
             + ("" if t["declared"] else " — inferred"))
@@ -890,19 +1022,11 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         (f"group {conc.get('group') if isinstance(conc, dict) else conc}" if conc else "none"))
     ref = str(pub.get("uses", "")).rpartition("@")[2] if pub else None
     put("PKG-PUBLISHER", ref == "main", f"publish-apt.yml@{ref}" if ref else "not through publish-apt.yml")
-    all_uses = [str(s.get("uses", "")) for j in jobs.values() if isinstance(j, dict)
-                for s in (j.get("steps") or []) if isinstance(s, dict)] + \
-        [str(j.get("uses", "")) for j in jobs.values() if isinstance(j, dict)]
-    shared_builds = {f"{args.action_repo}/build-deb".lower(), f"{args.action_repo}/.github/workflows/build-deb.yml".lower()}
-    shared = [u.partition("@") for u in all_uses if u.partition("@")[0].lower() in shared_builds]
-    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)" for path, _, ref in shared if ref != "main"]
-    local_ver = "packaging/deb-version.py" in f["files"]
     if kind == "aggregate":
         put("PKG-SHARED", None, "nothing to build")
     else:
-        put("PKG-SHARED", bool(shared) and not off_main and not local_ver,
-            ("; ".join(off_main) if off_main else "shared build" if shared else "own build steps")
-            + ("; local deb-version.py" if local_ver else ""))
+        put("PKG-SHARED", *shared_build(jobs, args.action_repo, "packaging/deb-version.py" in f["files"],
+                                        t["nfpm"], variant))
     if kind == "aggregate":
         put("PKG-INSTALL-TEST", None, "nothing to build")
     else:

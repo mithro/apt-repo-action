@@ -90,7 +90,7 @@ repository's issue in section 4), and everything as JSON.
 
 | ID | rule | how it's checked |
 |---|---|---|
-| PKG-DECLARED | the kind is declared | `.github/apt-packaging.toml` parses |
+| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, and `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures` |
 | PKG-BRANCH | default branch `packaging` (A) or `main` (B), and it publishes | GitHub API, last Pages deployment |
 | PKG-HISTORY | Set A carries upstream's history | fork, or commits by others before the repository existed |
 | PKG-UPSTREAM | Set A has an `upstream` branch | GitHub API |
@@ -105,10 +105,10 @@ repository's issue in section 4), and everything as JSON.
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
 | PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |
-| PKG-SHARED | shared build at `@main`; no local `deb-version.py` | YAML + tree |
+| PKG-SHARED | shared build at `@main`: the reusable `build-deb.yml`, the `build-deb` action, or the `deb-version` action for an nfpm build or a patch series' own job; every use at `@main`; no local `deb-version.py` | YAML + tree |
 | PKG-INSTALL-TEST | an `Install test` step that runs something, in the job that builds (or the shared `build-deb.yml`) | YAML |
-| PKG-SUITES | default suites, or declared with a reason | live site |
-| PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site |
+| PKG-SUITES | default suites, or declared with a reason | live site, against the declaration read as `build-deb.yml` plans its builds |
+| PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site, against the declaration read as `build-deb.yml` plans its builds |
 | PKG-NODATES | no date in a version | live `Packages` |
 | PKG-VERSION | version matches its kind's form; no epoch | live `Packages` |
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
