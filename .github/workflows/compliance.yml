@@ -11,8 +11,6 @@ name: Compliance report
 on:
   schedule:
     - cron: "17 3 * * *"
-  push:  # TEMPORARY: to prove the workflow before merge; reverted next commit
-    branches: [compliance/nightly]
   workflow_dispatch:
     inputs:
       owners:
