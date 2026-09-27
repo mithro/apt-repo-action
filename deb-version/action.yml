@@ -1,0 +1,59 @@
+name: The package version for one suite
+description: >-
+  The shared scripts/deb-version.py version of one build, as the `version`
+  output, for a build that doesn't go through build-deb: a Go program
+  packaged with nfpm, or a patch series' own build job. Writes nothing.
+
+# docs/packaging.md, "The shared actions". Set B:
+#   <X.Y[.Z]>[.post<N>][~deb<R>][~pr<P>]
+# and with version-args, the patch series form and an epoch.
+
+inputs:
+  suite:
+    description: The suite being built (bookworm, trixie, forky, sid, raspbian-<codename>).
+    required: true
+  source-dir:
+    description: >-
+      This repository's checkout, relative to the workspace, with full
+      history and tags (actions/checkout's `fetch-depth: 0`).
+    required: false
+    default: "."
+  version-args:
+    description: >-
+      Extra arguments for scripts/deb-version.py, space-separated: a patch
+      series' "--owner-tag fpgasonline --upstream-version 1.1.1" or
+      "--upstream-dir <path>" (relative to source-dir), and "--epoch N"
+      under a declared exception.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: >-
+      The version, ~pr<P> included on a pull request. An nfpm config takes
+      it as `version: ${VERSION}` with `version_schema: none`, so nfpm keeps
+      it as it is.
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Version
+      id: version
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        VERSION_ARGS: ${{ inputs.version-args }}
+        PR: ${{ github.event.pull_request.number }}
+        ACTION_ROOT: ${{ github.action_path }}/..
+      run: |
+        set -eu
+        read -ra version_args <<< "$VERSION_ARGS"
+        # From the checkout, so relative paths in version-args mean the
+        # same as in build-deb's.
+        cd "$GITHUB_WORKSPACE/$SOURCE_DIR"
+        v=$(python3 "$ACTION_ROOT/scripts/deb-version.py" --suite "$SUITE" ${PR:+--pr "$PR"} \
+              "${version_args[@]}")
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+        echo "::notice title=version::$SUITE: $v"
