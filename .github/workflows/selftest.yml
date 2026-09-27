@@ -458,6 +458,49 @@ jobs:
           fpr=$(gpg --show-keys --with-colons apt-repo/apt-repo-action.gpg | awk -F: '/^fpr/ {print $10; exit}')
           grep -q "$fpr" apt-repo/index.html
 
+      # Suites holding different architectures, published with a caller's
+      # usual list: each Release advertises only what its suite holds
+      # (docs/packaging.md, "Architectures").
+      - name: Build suites with different architectures
+        run: |
+          set -eu
+          deb() {  # deb <suite> <arch>
+            d=$(mktemp -d)
+            mkdir -p "$d/DEBIAN"
+            printf 'Package: apt-repo-selftest-%s\nVersion: 1.0\nArchitecture: %s\nMaintainer: apt-repo-action self-test <selftest@invalid>\nDescription: apt-repo-action self-test fixture\n' \
+              "$2" "$2" > "$d/DEBIAN/control"
+            mkdir -p "apt-repo-arches/$1"
+            dpkg-deb --build --root-owner-group "$d" "apt-repo-arches/$1/apt-repo-selftest-$2_1.0_$2.deb"
+          }
+          deb bookworm all
+          deb bookworm amd64
+          deb bookworm arm64
+          deb raspbian-trixie armhf
+
+      - name: Index and sign suites with different architectures
+        uses: ./
+        with:
+          apt-root: apt-repo-arches
+          suites: bookworm raspbian-trixie
+          architectures: amd64 arm64 armhf riscv64 all
+          gpg-private-key: ${{ steps.fixture.outputs.private-key }}
+
+      - name: Each Release advertises only its suite's architectures
+        run: |
+          set -eu
+          for want in "bookworm:all amd64 arm64" "raspbian-trixie:armhf"; do
+            suite=${want%%:*}
+            got=$(sed -n 's/^Architectures: //p' "apt-repo-arches/$suite/Release")
+            echo "$suite: Architectures: $got"
+            if [ "$got" != "${want#*:}" ]; then
+              echo "::error::$suite's Release advertises '$got', not '${want#*:}'"
+              exit 1
+            fi
+            grep -q "^Architectures: $got\$" "apt-repo-arches/$suite/InRelease"
+          done
+          # The all-only suites above still say all.
+          grep -q '^Architectures: all$' apt-repo/trixie/Release
+
       - name: carry-over.py copies a live repository byte for byte
         run: |
           set -eu

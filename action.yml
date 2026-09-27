@@ -16,10 +16,12 @@ inputs:
     required: true
   architectures:
     description: >-
-      Space-separated architectures to advertise in each Release file
-      (e.g. "amd64 arm64 armhf riscv64"). Use "all" for arch-independent
-      packages. Note riscv64 is only an official Debian architecture from
-      trixie onwards -- do not advertise it for bookworm.
+      Deprecated: each suite's Release advertises exactly the architectures
+      its packages have (docs/packaging.md, "Architectures"), read from the
+      suite's own Packages index, so a Raspbian suite says armhf and bookworm
+      never says riscv64. A value other than "all" is still checked: a suite
+      holding packages of an architecture it doesn't list gets a warning,
+      since the caller's list is then out of date ("all" needn't be listed).
     required: false
     default: all
   origin:
@@ -99,12 +101,27 @@ runs:
             cd "$dir"
             dpkg-scanpackages --multiversion . > Packages
             gzip -k -f Packages
+            # Advertise exactly what this suite holds, "all" included, never
+            # an architecture with no packages (docs/packaging.md,
+            # "Architectures"). Read from Packages, so versions kept from
+            # earlier builds count too.
+            arches=$(sed -n 's/^Architecture: //p' Packages | sort -u | tr '\n' ' ')
+            arches=${arches% }
+            if [ "$ARCHES" != all ]; then
+              for a in $arches; do
+                # "all" never needed listing to be published.
+                case " $ARCHES all " in
+                  *" $a "*) ;;
+                  *) echo "::warning::$suite has $a packages, which the architectures input ($ARCHES) doesn't list. The input is deprecated: Release now lists what each suite holds." ;;
+                esac
+              done
+            fi
             {
               echo "Origin: $origin"
               echo "Label: $origin"
               echo "Suite: stable"
               echo "Codename: $suite"
-              echo "Architectures: $ARCHES"
+              echo "Architectures: $arches"
               echo "Components: main"
               echo "Description: $desc ($suite)"
             } > Release

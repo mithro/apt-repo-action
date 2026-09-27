@@ -210,7 +210,6 @@ jobs:
       uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
       with:
         suites: "<suites>"
-        architectures: "<architectures>"
         description: "<one line: what these packages are>"
       secrets:
         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
@@ -352,9 +351,12 @@ Debian has:
   architectures, and the exception names the hardware:
   - Traverse Ten64 (NXP LS1088A): `arm64`;
   - Raspberry Pi: `arm64`, `armhf`, and the `raspbian-*` suites.
-- `architectures:` passed to `publish-apt` lists exactly the architectures
-  built, plus `all` when some package is architecture-independent. It never
-  lists an architecture that has no packages in a suite.
+- Each suite's `Release` advertises exactly the architectures that have
+  packages in that suite, plus `all` when some package is
+  architecture-independent, and never one with no packages: `publish-apt`
+  reads them from the suite's own `Packages`. So a `raspbian-*` suite says
+  `armhf`, and bookworm never says `riscv64`. Its `architectures:` input is
+  deprecated and doesn't change `Release`.
 
 ## Versions
 
