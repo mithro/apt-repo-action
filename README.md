@@ -20,7 +20,9 @@ versions. This README covers using the workflow.
 | `action.yml` | composite | Index and sign a tree of per-suite `.deb` directories |
 | `.github/workflows/publish-apt.yml` | reusable workflow | Collect build artifacts → index+sign → deploy to Pages |
 | `build-deb/action.yml` | composite | `dpkg-buildpackage` in `debian:<suite>` for one architecture |
+| `collect-debs/action.yml` | composite | Download a run's `debs-<suite>-<arch>` artifacts into one directory per suite (publish-apt's first step) |
 | `scripts/make-index.py` | script | Generate the repository landing page |
+| `scripts/collect-debs.py` | script | List the run's artifacts for `collect-debs`, and regroup their `.deb`s by suite |
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
 | `scripts/keep-history.py` | script | Keep earlier package versions from the live site, up to `size-limit-mb` |
