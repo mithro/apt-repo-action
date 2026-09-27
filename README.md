@@ -25,6 +25,7 @@ versions. This README covers using the workflow.
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
 | `scripts/keep-history.py` | script | Keep earlier package versions from the live site, up to `size-limit-mb` |
 | `scripts/apt-sources.py` | script | The dependency repositories a declaration's `[[depends]]` names: resolve, fetch the keys, write an apt setup for `build-deb` and install tests |
+| `scripts/lintian-report.py` | script | Turn `build-deb`'s lintian run into annotations, a job-summary table and counts |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |
 
 Most callers want the **reusable workflow** — it owns the `pages: write` /
@@ -164,6 +165,12 @@ and `~pr<P>` suffixes of [docs/packaging.md](docs/packaging.md#versions)). A
 repository that still carries its own `packaging/deb-version.py` keeps using
 it, with a warning, until it is migrated: see
 [Moving a repository to the shared build](docs/packaging.md#moving-a-repository-to-the-shared-build).
+
+`build-deb` then runs `lintian` on the packages it built. Its errors and
+warnings become annotations and a table in the job summary, and don't fail
+the build: set `lintian: error` to make errors fail it, or `lintian: off` to
+skip it. lintian not being able to run at all fails the build in either mode
+(see [Package contents](docs/packaging.md#package-contents)).
 
 A build dependency Debian doesn't have for a suite comes from a dependency
 repository, ours or anyone else's, declared as a `[[depends]]` in the

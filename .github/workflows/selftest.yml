@@ -35,6 +35,7 @@ jobs:
           - {suite: trixie, arch: all, want: "0.3.post1~deb13"}
           - {suite: sid, arch: amd64, want: "0.3.post1"}
           - {suite: bookworm, arch: arm64, want: "0.3.post1~deb12"}    # under QEMU
+          - {suite: trixie, arch: armhf, want: "0.3.post1~deb13"}      # under QEMU
           # A repository still carrying its own packaging/deb-version.py
           # keeps using it (tmux, scanbd) until it is migrated.
           - {suite: trixie, arch: all, legacy: true, want: "9.9"}
@@ -65,6 +66,16 @@ jobs:
           set -eu
           test -z "$(cat "$APT_SOURCES/checks")"
           sh "$APT_SOURCES/install.sh" | grep -q 'no extra apt repositories'
+
+      - name: lintian ran, and found the fixture's missing copyright file
+        env:
+          ERRORS: ${{ steps.build.outputs.lintian-errors }}
+          WARNINGS: ${{ steps.build.outputs.lintian-warnings }}
+        run: |
+          set -eu
+          echo "lintian: $ERRORS errors, $WARNINGS warnings"
+          # The fixture has no debian/copyright: lintian's no-copyright-file.
+          test "$ERRORS" -ge 1
 
       - name: Check the version and changelog
         env:
@@ -128,6 +139,87 @@ jobs:
             echo "::error::a package was built without its version"
             exit 1
           fi
+
+  build-deb-lintian:
+    # `lintian: error` fails a build with a lintian error (the fixture has
+    # no debian/copyright), and `lintian: off` doesn't run it at all. The
+    # default, `warn`, is what every build-deb job above runs.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Make two fixture source trees, one per build
+        run: |
+          python3 tests/make-source-fixture.py fixture-src
+          python3 tests/make-source-fixture.py fixture-off
+      - name: lintian errors fail the build with lintian error
+        id: error
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+          lintian: error
+      - name: lintian off
+        id: off
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-off
+          out-dir: built-debs-off
+          lintian: "off"
+      - name: Check the outcomes
+        env:
+          OUTCOME: ${{ steps.error.outcome }}
+          ERRORS: ${{ steps.error.outputs.lintian-errors }}
+          OFF_ERRORS: ${{ steps.off.outputs.lintian-errors }}
+        run: |
+          set -eu
+          echo "lintian: error: $OUTCOME with $ERRORS errors; off: '$OFF_ERRORS'"
+          test "$OUTCOME" = failure
+          test "$ERRORS" -ge 1
+          test -z "$OFF_ERRORS"
+          ls built-debs-off/*.deb
+
+  build-deb-lintian-cannot-run:
+    # lintian failing to run at all (here: its package can't be installed)
+    # fails the build in warn mode as well as error mode: warn only forgives
+    # lintian's findings.
+    name: build-deb-lintian-cannot-run (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: warn, want: failure}
+          - {mode: error, want: failure}
+    env:
+      APT_REPO_ACTION_SELFTEST_LINTIAN_PACKAGE: no-such-package-apt-repo-selftest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: Build, with lintian uninstallable
+        id: build
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+          lintian: ${{ matrix.mode }}
+      - name: Check the outcome
+        env:
+          OUTCOME: ${{ steps.build.outcome }}
+          WANT: ${{ matrix.want }}
+          ERRORS: ${{ steps.build.outputs.lintian-errors }}
+        run: |
+          set -eu
+          echo "outcome: $OUTCOME (want $WANT); lintian errors: '$ERRORS'"
+          test "$OUTCOME" = "$WANT"
+          # lintian never ran, so there are no counts.
+          test -z "$ERRORS"
+          ls built-debs/*.deb
 
   build-deb-depends:
     # A build dependency only a declared [[depends]] repository has
