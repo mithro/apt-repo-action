@@ -28,10 +28,10 @@ W: foo source: odd-tag 100% done, really
 """
 
 
-def run(text: str, mode: str, status: str = "0") -> tuple[int, str, str, dict]:
+def run(text: str | bytes, mode: str, status: str = "0") -> tuple[int, str, str, dict]:
     with tempfile.TemporaryDirectory() as d:
         log = Path(d, "lintian.txt")
-        log.write_text(text)
+        log.write_bytes(text if isinstance(text, bytes) else text.encode())
         summary, outputs = Path(d, "summary.md"), Path(d, "outputs")
         out = io.StringIO()
         rc = lr.main(["--mode", mode, "--status", status, "--summary", str(summary),
@@ -93,6 +93,11 @@ class Report(unittest.TestCase):
         rc, out, _, _ = run("", "error", status="2")
         self.assertEqual(rc, 1)
         self.assertIn("::error title=lintian::lintian itself failed", out)
+
+    def test_unexpected_input(self):
+        # Not lintian's format, or not text: ignored, never a crash.
+        rc, out, summary, got = run(b"garbage\nE:\nE: :\nW: p:\n\x00\xff\xfe\n", "warn")
+        self.assertEqual((rc, got), (0, {"errors": "0", "warnings": "0"}))
 
     def test_bad_mode(self):
         with self.assertRaises(SystemExit):

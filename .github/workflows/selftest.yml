@@ -182,6 +182,45 @@ jobs:
           test -z "$OFF_ERRORS"
           ls built-debs-off/*.deb
 
+  build-deb-lintian-cannot-run:
+    # lintian failing to run at all (here: its package can't be installed)
+    # is a warning in warn mode, where the build must still succeed and so
+    # still publish, and a failure in error mode.
+    name: build-deb-lintian-cannot-run (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: warn, want: success}
+          - {mode: error, want: failure}
+    env:
+      APT_REPO_ACTION_SELFTEST_LINTIAN_PACKAGE: no-such-package-apt-repo-selftest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: Build, with lintian uninstallable
+        id: build
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+          lintian: ${{ matrix.mode }}
+      - name: Check the outcome
+        env:
+          OUTCOME: ${{ steps.build.outcome }}
+          WANT: ${{ matrix.want }}
+          ERRORS: ${{ steps.build.outputs.lintian-errors }}
+        run: |
+          set -eu
+          echo "outcome: $OUTCOME (want $WANT); lintian errors: '$ERRORS'"
+          test "$OUTCOME" = "$WANT"
+          # lintian never ran, so there are no counts.
+          test -z "$ERRORS"
+          ls built-debs/*.deb
+
   build-deb-depends:
     # A build dependency only a declared [[depends]] repository has
     # (docs/packaging.md, "The declaration"). The repository is a throwaway,
