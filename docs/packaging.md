@@ -198,6 +198,13 @@ A backport's sync checks Debian's archive for a newer source version instead.
   Raspbian root file system for `raspbian-<codename>`. Build dependencies
   come from `debian/control` (`apt-get build-dep ./`), never from a list in
   the workflow.
+- **A build dependency Debian doesn't have for a suite** comes from a
+  *dependency repository*: another apt repository, ours or someone else's,
+  declared under [`[[depends]]`](#dependency-repositories) with the reason.
+  The build adds the ones declared for its suite before `apt-get build-dep`,
+  and fails if any of them can't be fetched and verified. sensors2mqtt's
+  bookworm build gets `python3-paho-mqtt (>= 2)` from paho-mqtt-bookworm
+  this way.
 - **Architectures the runner can't execute build under QEMU user emulation.**
   arm64 and armhf run on `ubuntu-24.04-arm`; amd64 and i386 on
   `ubuntu-24.04`.
@@ -208,8 +215,27 @@ A backport's sync checks Debian's archive for a newer source version instead.
   committer time, and the generated changelog entry uses that time too.
 - **The install test** installs the built `.deb`s into a clean container of
   each suite, on at least one native architecture, with dependencies from
-  the Debian archive. It then runs `packaging/install-test.sh` if present,
-  otherwise `<command> --version` for each package that ships a command.
+  the Debian archive and from the suite's dependency repositories. It then
+  runs `packaging/install-test.sh` if present, otherwise
+  `<command> --version` for each package that ships a command.
+  - The dependency repositories are the ones the build used: `build-deb`'s
+    `apt-sources` output is a directory holding them, and its `install.sh`
+    adds them to the container. It needs only apt, and does nothing when
+    the suite has none:
+
+    ```yaml
+          - name: Install test
+            env:
+              SUITE: ${{ matrix.suite }}
+              APT_SOURCES: ${{ steps.build.outputs.apt-sources }}   # the Build step's id: build
+            run: |
+              docker run --rm -v "$APT_SOURCES:/apt-sources:ro" -v "$PWD/built-debs:/debs:ro" \
+                "debian:$SUITE" sh -ec '
+                  sh /apt-sources/install.sh
+                  apt-get update
+                  apt-get install -y /debs/*.deb
+                  ...'
+    ```
 
 ## Suites
 
@@ -400,7 +426,8 @@ that sorts wrongly. Each one is a recorded exception.
 - **`build-deb`** (`uses: mithro/apt-repo-action/build-deb@main`, as the
   `Build` step):
   - builds in `debian:<suite>`, installing the build dependencies from
-    `debian/control`;
+    `debian/control`, after adding the suite's
+    [dependency repositories](#dependency-repositories);
   - takes `arch: all` for a repository whose packages are all
     `Architecture: all`: one build per suite, on the runner's own
     architecture;
@@ -498,6 +525,11 @@ Optional. A repository that also publishes its builds as GitHub Releases:
   `## Install` section with the setup block from
   [conventions.md](conventions.md#one-setup), for each suite. It shows the
   real site URL and key fingerprint.
+- **A package that needs a dependency repository** says so there too: the
+  `## Install` section gives the setup for each
+  [dependency repository](#dependency-repositories), for the suites it is
+  declared for, before its own. For one of ours that is the same setup
+  block with its name and site.
 - `packaging/apt-intro.html` is optional: prose for the index page.
 - The GitHub repository description says what the packages are. For Set A
   it names the upstream: "tmux, with …, packaged for Debian".
@@ -514,9 +546,12 @@ Optional. A repository that also publishes its builds as GitHub Releases:
 ## The declaration
 
 Every packaging repository has `.github/apt-packaging.toml` on its default
-branch. It says what kind of repository it is, and gives the reason for
-every exception. `scripts/apt-compliance.py` reads it; nothing else about a
-repository is recorded outside the repository.
+branch. It says what kind of repository it is, gives the reason for every
+exception, and names the repository's
+[dependency repositories](#dependency-repositories).
+`scripts/apt-compliance.py` reads it, and `build-deb` reads its
+`[[depends]]`; nothing else about a repository is recorded outside the
+repository.
 
 ```toml
 kind = "A"                  # "A": someone else's code; "B": ours;
@@ -529,6 +564,11 @@ suites = "default"          # "default", or the full list:
 
 [exceptions]                # rule ID = reason, for every rule not followed
 PKG-SUITES = "fpgas.online uses it"
+
+[[depends]]                 # optional, one per dependency repository:
+repo = "mithro/paho-mqtt-bookworm"             # see "Dependency repositories"
+suites = ["bookworm"]
+reason = "python3-paho-mqtt (>= 2) is not in bookworm"
 ```
 
 - `architectures` and `suites` other than the defaults need an entry under
@@ -537,6 +577,66 @@ PKG-SUITES = "fpgas.online uses it"
   built. A listed `suites` is taken exactly.
 - The rule IDs are the ones in
   [compliance-plan.md](compliance-plan.md#2-the-checker-scriptsapt-compliancepy).
+
+### Dependency repositories
+
+A package that needs something Debian doesn't have for a suite, to build
+or to install, names the apt repository it comes from, one `[[depends]]`
+table each. There are two forms.
+
+**One of ours**, any repository that follows
+[conventions.md](conventions.md), by its GitHub name:
+
+```toml
+[[depends]]
+repo = "mithro/paho-mqtt-bookworm"
+suites = ["bookworm"]       # optional: only these suites; left out, every suite
+reason = "python3-paho-mqtt (>= 2) is not in bookworm"
+```
+
+- Its site is what GitHub reports for it (the Pages API's `html_url`,
+  read with the workflow's token), so a custom domain needs nothing here.
+- The source is `<site>/<suite>/ ./`, `<suite>` being the suite being
+  built, and the key `<site>/<name>.gpg`, installed as
+  `/etc/apt/keyrings/<name>.gpg`: the [one setup](conventions.md#one-setup).
+- A repository of ours MUST use this form, so its URL and key are never
+  written down twice.
+
+**Anyone else's**, spelled out:
+
+```toml
+[[depends]]
+name = "example"                      # the keyring and sources file: /etc/apt/keyrings/example.gpg
+url = "https://example.org/debian"
+suite = "{codename}"                  # the distribution; "./" for a flat repository
+components = ["main"]                 # left out for a flat repository
+key = "https://example.org/key.asc"   # binary or armoured; https
+suites = ["trixie", "forky"]
+reason = "libexample 3 is not in Debian"
+```
+
+- `{suite}` in `url` or `suite` is the suite being built
+  (`raspbian-trixie`), `{codename}` its Debian codename (`trixie`). A flat
+  repository with one directory per suite, like ours, is
+  `url = "https://example.org/{suite}/"`, `suite = "./"`.
+- The key MUST be `https://`: it is what apt trusts. (`http://` is
+  accepted only for a loopback or private address, for the self-test's
+  throwaway repository.) An armoured key is dearmoured.
+
+For both:
+- **`reason`** is required, as for an exception.
+- **`suites`** names only suites from [Suites](#suites).
+- Each source is added with `signed-by=` its own keyring. Never
+  `[trusted=yes]`.
+- The build fails, rather than building without it, if a dependency
+  repository's key can't be fetched or isn't an OpenPGP public key, if its
+  Release can't be fetched, or if apt can't verify its signature with that
+  key.
+- [`scripts/apt-sources.py`](../scripts/apt-sources.py) does all of this,
+  for `build-deb` and for [install tests](#builds). `check` validates a
+  declaration; `write --suite <suite> --dest <dir>` resolves it, fetches
+  the keys and writes `<dir>/install.sh`, which adds them in any Debian
+  container with nothing but apt.
 
 The exceptions agreed on 2026-09-25, which each repository's declaration
 should carry:
@@ -551,7 +651,7 @@ should carry:
 | mithro/python-netgear-switch-library | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"` |
 | mithro/rpi-hwid | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "NeTV2 (the rpi5-netv2 host)"` |
 | mithro/scanbd | `kind = "A"`; `PKG-VERSION = "epoch 1: the count-based version sorts below the published 1.5.1+welland4"` |
-| mithro/sensors2mqtt | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"` |
+| mithro/sensors2mqtt | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"`; `[[depends]]` `repo = "mithro/paho-mqtt-bookworm"`, `suites = ["bookworm"]` |
 | mithro/ten64-microcontroller-utility | `kind = "A"`, `architectures = ["arm64"]`; `PKG-ARCH = "hardware-specific: Traverse Ten64"` |
 
 Every other repository declares only its `kind` (and `upstream` or
