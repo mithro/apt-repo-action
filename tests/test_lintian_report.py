@@ -6,6 +6,8 @@ Run: python3 -m unittest discover -s tests -p 'test_*.py'
 import importlib.machinery
 import importlib.util
 import io
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,12 +89,20 @@ class Report(unittest.TestCase):
         self.assertIn("no errors or warnings", summary)
 
     def test_lintian_itself_failed(self):
-        rc, out, _, _ = run("", "warn", status="2")
-        self.assertEqual(rc, 0)
-        self.assertIn("::warning title=lintian::lintian itself failed (exit status 2)", out)
-        rc, out, _, _ = run("", "error", status="2")
-        self.assertEqual(rc, 1)
-        self.assertIn("::error title=lintian::lintian itself failed", out)
+        # Fatal in both modes: warn only forgives lintian's findings.
+        for mode in ("warn", "error"):
+            rc, out, _, _ = run("", mode, status="2")
+            self.assertEqual(rc, 1, mode)
+            self.assertIn("::error title=lintian::lintian could not run: it failed (exit status 2)", out)
+
+    def test_crash_is_status_2(self):
+        # A missing log file: the script crashes, and says so with 2.
+        with tempfile.TemporaryDirectory() as d:
+            p = subprocess.run([sys.executable, str(SCRIPT), "--mode", "warn", "--summary", "",
+                                "--outputs", "", str(Path(d, "missing.txt"))],
+                               capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("FileNotFoundError", p.stderr)
 
     def test_unexpected_input(self):
         # Not lintian's format, or not text: ignored, never a crash.

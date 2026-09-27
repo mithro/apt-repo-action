@@ -46,9 +46,11 @@ inputs:
   lintian:
     description: >-
       Run lintian on the built packages (docs/packaging.md, "Package
-      contents"). "warn" (the default): every error and warning becomes a
-      warning annotation, and the build never fails on them. "error": lintian
-      errors, or lintian itself failing, fail the build. "off": don't run it.
+      contents"). "warn" (the default): every error and warning lintian finds
+      becomes a warning annotation, and its findings never fail the build.
+      "error": lintian's errors fail the build. "off": don't run it. In both
+      warn and error, lintian not being able to run at all (image, apt,
+      install, a crash) fails the build.
     required: false
     default: warn
   github-token:
@@ -225,8 +227,9 @@ runs:
     # doesn't run lintian under QEMU too. As a user, since lintian's authors
     # advise against running it as root.
     #
-    # In `warn` mode nothing here fails the build: lintian not running at all
-    # (no image, no mirror, a crash) is a warning, like its findings.
+    # `warn` only means lintian's findings don't fail the build. lintian not
+    # being able to run (no image, no mirror, a crash) fails it in every mode:
+    # a build that says it was checked must have been.
     - name: Lintian
       id: lintian
       if: inputs.lintian != 'off'
@@ -245,14 +248,10 @@ runs:
           warn|error) ;;
           *) echo "::error::lintian must be warn, error or off, not $MODE"; exit 1 ;;
         esac
-        # A warning in warn mode, a failure in error mode.
+        # Fatal in warn and error mode alike.
         could_not_run() {
-          if [ "$MODE" = error ]; then
-            echo "::error title=lintian::lintian could not run: $1"
-            exit 1
-          fi
-          echo "::warning title=lintian::lintian could not run: $1"
-          exit 0
+          echo "::error title=lintian::lintian could not run: $1"
+          exit 1
         }
         report=$(mktemp -d "$RUNNER_TEMP/lintian.XXXXXX") || could_not_run "no temporary directory"
         # Named explicitly: after an emulated build, the local debian:<suite>
@@ -269,6 +268,8 @@ runs:
           "debian:${SUITE#raspbian-}" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             echo "lintian runs on $(dpkg --print-architecture)"
+            # A mirror blip is retried rather than failing the build.
+            echo "Acquire::Retries \"3\";" > /etc/apt/apt.conf.d/80-retries
             apt-get update
             apt-get install -y --no-install-recommends "$LINTIAN_PACKAGE"
             useradd -m lintian-runner
@@ -279,12 +280,13 @@ runs:
           ' || could_not_run "its container failed (exit status $?), see the log above"
         cat "$report/lintian.txt"
         status=$(cat "$report/status") || could_not_run "it left no exit status"
+        # Status 1: lintian itself failed (any mode) or, in error mode, found
+        # errors; the annotations say which. Anything else is the script
+        # crashing.
         rc=0
         python3 "$ACTION_ROOT/scripts/lintian-report.py" --mode "$MODE" \
           --status "$status" "$report/lintian.txt" || rc=$?
-        # In warn mode the report never fails the build, so a failure is a crash.
-        if [ "$rc" != 0 ] && [ "$MODE" = warn ]; then
-          echo "::warning title=lintian::scripts/lintian-report.py failed (exit status $rc)"
-          rc=0
-        fi
-        exit "$rc"
+        case "$rc" in
+          0|1) exit "$rc" ;;
+          *) could_not_run "scripts/lintian-report.py failed (exit status $rc)" ;;
+        esac

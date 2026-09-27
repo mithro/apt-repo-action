@@ -5,19 +5,24 @@
     lintian-report.py --mode warn|error [--status N] [--summary F]
                       [--outputs F] LINTIAN_OUTPUT
 
---mode warn:  every E: and W: tag is a warning annotation; never fails.
+--mode warn:  every E: and W: tag is a warning annotation; findings never
+              fail.
 --mode error: E: tags are error annotations, and the exit status is 1 when
               there is one.
 --status is lintian's own exit status (run with --fail-on none, so anything
-but 0 means lintian itself failed). --summary and --outputs default to
-$GITHUB_STEP_SUMMARY and $GITHUB_OUTPUT; the outputs are `errors` and
-`warnings`, the number of E: and W: tags.
+but 0 means lintian itself failed): an error, and exit status 1, in either
+mode, since a build that says it was checked must have been. --summary and
+--outputs default to $GITHUB_STEP_SUMMARY and $GITHUB_OUTPUT; the outputs are
+`errors` and `warnings`, the number of E: and W: tags.
+
+Exit status: 0 passed, 1 failed as above, 2 this script itself failed.
 """
 import argparse
 import collections
 import os
 import re
 import sys
+import traceback
 from dataclasses import dataclass
 
 # "E: <package>[ source]: <tag>[ <detail>]", lintian 2.116 (bookworm) on.
@@ -70,9 +75,8 @@ def main(argv: list[str] | None = None, out=sys.stdout) -> int:
         msg = f"{t.package}: {t.tag}" + (f" {t.detail}" if t.detail else "")
         print(f"::{kind} title={_prop(f'lintian {t.level}: {t.tag}')}::{_data(msg)}", file=out)
     if args.status != "0":
-        kind = "error" if args.mode == "error" else "warning"
-        failed |= kind == "error"
-        print(f"::{kind} title=lintian::lintian itself failed (exit status {args.status})", file=out)
+        failed = True
+        print(f"::error title=lintian::lintian could not run: it failed (exit status {args.status})", file=out)
 
     if args.summary:
         counts = collections.Counter((t.level, t.package, t.tag) for t in tags)
@@ -93,4 +97,9 @@ def main(argv: list[str] | None = None, out=sys.stdout) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A crash is 2, not Python's 1, so build-deb can tell it from a verdict.
+    try:
+        sys.exit(main())
+    except Exception:  # noqa: BLE001 - any crash
+        traceback.print_exc()
+        sys.exit(2)
