@@ -87,6 +87,59 @@ jobs:
 """), ACTION)
         self.assertFalse(ok)
 
+    def test_name_must_match(self):
+        # nfsroot-watchdog's test job extracts a .deb (dpkg-deb -x: not a
+        # build) in a step named "Install test dependencies".
+        text = """
+jobs:
+  test:
+    steps:
+      - name: Install test dependencies
+        run: apt-get download busybox-static && dpkg-deb -x busybox-static_*.deb /tmp/bbs
+  build-deb:
+    steps:
+      - uses: someone/apt-repo-action/build-deb@main
+"""
+        self.assertEqual(apc.install_test(jobs(text), ACTION), (False, "no `Install test` step in build-deb"))
+        text += "      - name: Install test (${{ matrix.suite }})\n        run: true\n"
+        self.assertEqual(apc.install_test(jobs(text), ACTION),
+                         (True, "`Install test (${{ matrix.suite }})` in build-deb"))
+
+    def test_local_reusable_workflow(self):
+        # fpgas.online-fpga-tools: debs.yml's build job calls build-debs.yml.
+        caller = jobs("""
+jobs:
+  build:
+    uses: ./.github/workflows/build-debs.yml
+  publish:
+    uses: someone/apt-repo-action/.github/workflows/publish-apt.yml@main
+""")
+        inner = {"jobs": jobs("""
+jobs:
+  debs:
+    steps:
+      - run: dpkg-buildpackage -b -us -uc
+      - name: Install test
+        run: apt-get install -y ./*.deb
+""")}
+        self.assertEqual(apc.install_test(caller, ACTION, {"build-debs.yml": inner}),
+                         (True, "`Install test` in build/debs"))
+        del inner["jobs"]["debs"]["steps"][1]
+        self.assertEqual(apc.install_test(caller, ACTION, {"build-debs.yml": inner}),
+                         (False, "no `Install test` step in build/debs"))
+
+    def test_build_in_a_script(self):
+        # netplan: the build runs in packaging/ci-build-raspbian.sh.
+        self.assertEqual(apc.install_test(jobs("""
+jobs:
+  test:
+    steps: [{run: make check}]
+  build-raspbian:
+    steps: [{run: bash packaging/ci-build-raspbian.sh}]
+  publish:
+    uses: someone/apt-repo-action/.github/workflows/publish-apt.yml@main
+"""), ACTION), (False, "no `Install test` step in build-raspbian"))
+
     def test_no_build_job(self):
         self.assertEqual(apc.install_test(jobs("jobs:\n  test:\n    steps:\n      - run: make\n"), ACTION),
                          (False, "no job builds the packages"))

@@ -544,7 +544,7 @@ def arch_for(suite: str, t: dict) -> set[str]:
 # --------------------------------------------------------------------------
 # Rules that read a workflow's structure.
 
-BUILD_RUN = re.compile(r"\b(dpkg-buildpackage|debuild|dpkg-deb|nfpm)\b")
+BUILD_RUN = re.compile(r"\b(dpkg-buildpackage|debuild|dpkg-deb\s+(-b|--build)|nfpm)\b")
 WORKFLOW_RUN_GUARD = re.compile(r"github\.event\.workflow_run\.event\s*!=\s*['\"]pull_request['\"]")
 # An `if:` with one of these runs even when a job it needs was skipped.
 RUNS_ANYWAY = re.compile(r"\b(always|failure|cancelled)\(\)")
@@ -589,30 +589,51 @@ def unguarded_workflow_runs(parsed: dict[str, dict]) -> list[str]:
     return out
 
 
-def install_test(jobs: dict, action_repo: str) -> tuple[bool, str]:
+def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) -> tuple[bool, str]:
     """PKG-INSTALL-TEST: a job that builds the packages has a step named
     `Install test` that runs something. A mention elsewhere (a comment, a
-    script in the tree, a step in another job) doesn't count."""
+    script in the tree, a step in another job) doesn't count.
+
+    A job that builds is the build-deb job, one using the shared build-deb
+    action, or one running dpkg-buildpackage, debuild, dpkg-deb --build or
+    nfpm; a job calling a local reusable workflow is read through, from
+    `workflows` (file name -> parsed). When none of those shows (a build in
+    a script), every job but test, release and the publish is taken as a
+    build job."""
     shared_step = f"{action_repo}/build-deb".lower()
     shared_workflow = f"{action_repo}/.github/workflows/build-deb.yml".lower()
-    builders = []
-    for name, j in jobs.items():
-        if not isinstance(j, dict):
-            continue
+    workflows = workflows or {}
+
+    def flatten(jobs, prefix="", depth=0):
+        for name, j in jobs.items():
+            if not isinstance(j, dict):
+                continue
+            local = re.fullmatch(r"\./\.github/workflows/([^/@]+\.ya?ml)", str(j.get("uses", "")))
+            inner = workflows.get(local.group(1)) if local else None
+            if isinstance(inner, dict) and depth < 3:
+                yield from flatten(inner.get("jobs") or {}, f"{prefix}{name}/", depth + 1)
+            else:
+                yield f"{prefix}{name}", name, j
+
+    all_jobs = list(flatten(jobs))
+    for path, _, j in all_jobs:
         if str(j.get("uses", "")).partition("@")[0].lower() == shared_workflow:
-            return True, f"{name}: the shared build-deb.yml install-tests"
-        steps = [s for s in (j.get("steps") or []) if isinstance(s, dict)]
-        if name == "build-deb" or any(str(s.get("uses", "")).partition("@")[0].lower() == shared_step
-                                      or BUILD_RUN.search(code_lines(str(s.get("run", "")))) for s in steps):
-            builders.append((name, steps))
+            return True, f"{path}: the shared build-deb.yml install-tests"
+    steps = {path: [s for s in (j.get("steps") or []) if isinstance(s, dict)] for path, _, j in all_jobs}
+    builders = [path for path, name, _ in all_jobs if name == "build-deb" or any(
+        str(s.get("uses", "")).partition("@")[0].lower() == shared_step
+        or BUILD_RUN.search(code_lines(str(s.get("run", "")))) for s in steps[path])]
+    if not builders:
+        builders = [path for path, name, j in all_jobs if name not in ("test", "release")
+                    and "/publish-apt.yml@" not in str(j.get("uses", ""))]
     if not builders:
         return False, "no job builds the packages"
-    for name, steps in builders:
-        for s in steps:
-            if str(s.get("name", "")).strip().startswith("Install test") and \
+    for path in builders:
+        for s in steps[path]:
+            if re.fullmatch(r"Install test( \(.*\))?", str(s.get("name", "")).strip()) and \
                     (code_lines(str(s.get("run", ""))).strip() or str(s.get("uses", "")).strip()):
-                return True, f"`{s['name']}` in {name}"
-    return False, f"no `Install test` step in {', '.join(n for n, _ in builders)}"
+                return True, f"`{s['name']}` in {path}"
+    return False, f"no `Install test` step in {', '.join(builders)}"
 
 
 def key_fingerprints(data: bytes) -> list[str]:
@@ -878,7 +899,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     if kind == "aggregate":
         put("PKG-INSTALL-TEST", None, "nothing to build")
     else:
-        put("PKG-INSTALL-TEST", *install_test(jobs, args.action_repo))
+        put("PKG-INSTALL-TEST", *install_test(jobs, args.action_repo, parsed))
 
     # --- Packages, from the live site
     site = f["site"] or {"suites": {}}
