@@ -56,6 +56,14 @@ inputs:
       the committed changelog's version is used as it is.
     required: false
     default: auto
+  build:
+    description: >-
+      "true" (the default) builds. "false" only prepares what an install test
+      needs: the image (bootstrapping the Raspbian root when the suite is
+      raspbian-<codename>), QEMU when the architecture needs it, and the
+      dependency repositories (the image, platform and apt-sources outputs).
+    required: false
+    default: "true"
   github-token:
     description: >-
       Token for the GitHub API, which gives the site of each `repo = ...`
@@ -98,11 +106,16 @@ runs:
         SOURCE_DIR: ${{ inputs.source-dir }}
         VERSION_SCRIPT: ${{ inputs.version-script }}
         ARCH_ALL: ${{ inputs.arch-all }}
+        BUILD: ${{ inputs.build }}
       run: |
         set -eu
         case "$ARCH_ALL" in
           true|false) ;;
           *) echo "::error::arch-all is \"$ARCH_ALL\": it takes true or false"; exit 1 ;;
+        esac
+        case "$BUILD" in
+          true|false) ;;
+          *) echo "::error::build is \"$BUILD\": it takes true or false"; exit 1 ;;
         esac
         if [ "$ARCH" = "riscv64" ] && [ "$SUITE" = "bookworm" ]; then
           echo "::error::riscv64 is not an official Debian architecture in bookworm"
@@ -298,6 +311,7 @@ runs:
       run: docker import --platform linux/arm/v6 "$TAR" "$IMAGE"
 
     - name: Build
+      if: inputs.build == 'true'
       shell: bash
       env:
         SUITE: ${{ inputs.suite }}
