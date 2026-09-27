@@ -154,6 +154,8 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event != 'pull_request')
     ```
+
+    `PKG-TRIGGERS` checks every workflow for this.
   - checks out `${{ github.event.workflow_run.head_sha || github.sha }}`,
     the commit the build tested, not whatever the default branch has moved
     on to since.
@@ -471,8 +473,8 @@ an entry:
 - the build commit's committer time as its date.
 
 **Set B commits no `debian/changelog`**, and lists `debian/changelog` in
-`.gitignore`, so a local build doesn't dirty the tree. The build's entry is
-the whole file. Why:
+`.gitignore`, so a local build doesn't dirty the tree (`PKG-CHANGELOG`
+checks both). The build's entry is the whole file. Why:
 - each package's changelog is one true entry, the build's, not the build's
   entry on top of a stale `0.0.post0 unstable` placeholder;
 - a plain `dpkg-buildpackage`, run without the version script, fails for
@@ -597,9 +599,14 @@ Optional. A repository that also publishes its builds as GitHub Releases:
 ## Documentation
 
 - **README.md** (Set B) or **packaging/README.md** (Set A) has an
-  `## Install` section with the setup block from
-  [conventions.md](conventions.md#one-setup), for each suite. It shows the
-  real site URL and key fingerprint.
+  `## Install` section (that exact heading) with:
+  - the setup block from [conventions.md](conventions.md#one-setup), once,
+    for one named suite, with the real site URL;
+  - a sentence telling the reader to put their suite in place of that one,
+    naming every suite the repository publishes;
+  - the key's fingerprint.
+
+  `PKG-DOCS` checks each of these against the live site and key.
 - **A package that needs a dependency repository** says so there too: the
   `## Install` section gives the setup for each
   [dependency repository](#dependency-repositories), for the suites it is

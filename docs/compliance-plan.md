@@ -80,6 +80,14 @@ live sites, checks each rule, and writes the tables and per-repository todo
 lists (HTML), one checklist per repository (Markdown, the body of the
 repository's issue in section 4), and everything as JSON.
 
+- `--repo owner/name` (repeatable) checks only those repositories, with no
+  scan of the owners' others: seconds, not minutes.
+- `--local PATH` checks a checkout before it is pushed: its workflows,
+  declaration, `debian/`, README and `.gitignore` as they would be
+  committed (tracked files, and untracked ones git doesn't ignore). The
+  branch, the history and the live site still come from GitHub. The
+  repository is `--repo`, or the checkout's origin.
+
 | ID | rule | how it's checked |
 |---|---|---|
 | PKG-DECLARED | the kind is declared | `.github/apt-packaging.toml` parses |
@@ -89,15 +97,16 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule) | files on the publishing branch |
 | PKG-README | Set A has `packaging/README.md` | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
+| PKG-CHANGELOG | Set B commits no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |
 | PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
-| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else | parse YAML |
+| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else; every `workflow_run` job guarded against pull requests | parse YAML, every workflow |
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
 | PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |
 | PKG-SHARED | shared build at `@main`; no local `deb-version.py` | YAML + tree |
-| PKG-INSTALL-TEST | an `Install test` step | YAML |
+| PKG-INSTALL-TEST | an `Install test` step that runs something, in the job that builds (or the shared `build-deb.yml`) | YAML |
 | PKG-SUITES | default suites, or declared with a reason | live site |
 | PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site |
 | PKG-NODATES | no date in a version | live `Packages` |
@@ -105,7 +114,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
 | PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
-| PKG-DOCS | `## Install` with the setup lines, and each dependency repository's | README |
+| PKG-DOCS | a `## Install` section (that exact heading) holding the setup block for one suite, the name of every published suite, the key's fingerprint (read from the live key) and each dependency repository's setup; nothing conventions.md forbids | README, live key |
 | REPO-PAGES | Pages from Actions, HTTPS enforced | GitHub API |
 | REPO-KEYS | `<repo>.gpg` binary, `<repo>.asc` armoured | live site |
 | REPO-LAYOUT | flat signed suites, nothing at the root | live site |

@@ -90,14 +90,16 @@ RULES = [
      "Write packaging/README.md: upstream, what we change, how to update."),
     ("PKG-DEBIAN", "Repository", "`debian/` at the root of the default branch (a patch series: `packaging/debian/<name>/`)",
      "Move the packaging to debian/ at the root of the default branch."),
+    ("PKG-CHANGELOG", "Repository", "Set B commits no `debian/changelog`, and `.gitignore` lists it",
+     "Delete the committed debian/changelog and add `debian/changelog` to .gitignore (the build writes it)."),
     ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites",
      f"Fix the [[depends]] entries in {DECLARATION} (docs/packaging.md, \"The declaration\")."),
     ("PKG-WORKFLOW", "Workflow", f"`.github/workflows/{WORKFLOW_FILE}` named `{WORKFLOW_NAME}`",
      f"Rename the build workflow to .github/workflows/{WORKFLOW_FILE} with `name: {WORKFLOW_NAME}`."),
     ("PKG-JOBS", "Workflow", "jobs are only `test`, `build-deb`, `publish-apt`, `release`",
      "Rename the jobs to test / build-deb / publish-apt / release."),
-    ("PKG-TRIGGERS", "Workflow", "push to the default branch, pull_request, workflow_dispatch; nothing else",
-     "Set the triggers to push (default branch), pull_request and workflow_dispatch."),
+    ("PKG-TRIGGERS", "Workflow", "push to the default branch, pull_request, workflow_dispatch; nothing else; any `workflow_run` workflow ignores pull requests",
+     "Set the triggers to push (default branch), pull_request and workflow_dispatch; guard every workflow_run job with `github.event.workflow_run.event != 'pull_request'`."),
     ("PKG-PREVIEW", "Workflow", "pull requests build, and `publish-apt` never runs for them",
      "Build on pull_request and guard publish-apt with the default-branch `if:`."),
     ("PKG-CONCURRENCY", "Workflow", "concurrency group `deb-${{ github.ref }}`, cancelling only pull requests",
@@ -118,8 +120,8 @@ RULES = [
     ("PKG-DBGSYM", "Packages", "no `-dbgsym` over 10 MB in the apt repository",
      "Keep debug symbols over 10 MB out of apt (artifact and GitHub Release only)."),
     ("PKG-MAINTAINER", "Metadata", "`Maintainer:` is the expected maintainer", "Set Maintainer: in debian/control."),
-    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup lines",
-     "Add an `## Install` section with the setup lines (README.md, or packaging/README.md for Set A)."),
+    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block for one suite, every published suite named, the key's fingerprint, and each dependency repository's setup",
+     "Give README.md (packaging/README.md for Set A) an `## Install` section with docs/conventions.md's setup block for one suite, a sentence naming every published suite to put in its place, the key's fingerprint, and each dependency repository's setup."),
     ("REPO-PAGES", "Published repository", "Pages built by GitHub Actions, HTTPS enforced",
      "Build Pages from GitHub Actions with HTTPS enforced."),
     ("REPO-KEYS", "Published repository", "`<repo>.gpg` (binary) and `<repo>.asc` (armoured) at the site root",
@@ -306,6 +308,22 @@ def workflows_batch(items: list[tuple[str, str]]) -> dict[tuple[str, str], dict]
 def discover(owners: list[str], action_repo: str) -> tuple[list[dict], list[dict]]:
     repos = [r for o in owners for r in list_repos(o)]
     print(f"discover: {len(repos)} repositories", file=sys.stderr)
+    return classify(repos, action_repo)
+
+
+def named(names: list[str]) -> list[dict]:
+    """The repositories `--repo` names, without listing their owners' others."""
+    repos = []
+    for n in names:
+        r = api(f"repos/{n}")
+        if r is None:
+            raise SystemExit(f"error: no repository {n}")
+        repos.append(r)
+    return repos
+
+
+def classify(repos: list[dict], action_repo: str) -> tuple[list[dict], list[dict]]:
+    """The packaging repositories among `repos`, and the sites without packaging."""
     first = workflows_batch([(r["full_name"], "HEAD") for r in repos])
     found, second = {}, []
     for r in repos:
@@ -344,6 +362,37 @@ def discover(owners: list[str], action_repo: str) -> tuple[list[dict], list[dict
     return sorted(packaging, key=lambda d: d["meta"]["full_name"].lower()), sites
 
 
+def local_files(path: Path) -> list[str]:
+    """The files of a checkout that a commit of everything would hold:
+    tracked ones and untracked ones git doesn't ignore."""
+    r = subprocess.run(["git", "-C", str(path), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                       capture_output=True, text=True, check=True)
+    return sorted({p for p in r.stdout.split("\0") if p and (path / p).is_file()})
+
+
+def local_entry(name: str, path: Path, action_repo: str) -> dict:
+    """`name` as GitHub has it (default branch, what publishes, the live
+    site), but with the workflows of the checkout at `path`."""
+    meta = named([name])[0]
+    found = classify([meta], action_repo)[0]
+    if found:
+        d = found[0]
+    else:  # not publishing yet: a new repository's first pull request
+        r = workflows_batch([(name, "HEAD")])[(name, "HEAD")]
+        if not r["default"]:
+            raise SystemExit(f"error: {name} is empty")
+        d = {"meta": meta, "default": r["default"]["name"], "default_oid": r["default"]["target"]["oid"],
+             "deploy": None, "deploy_oid": None}
+        d["build_ref"], d["build_oid"] = d["default"], d["default_oid"]
+    files = local_files(path)
+    d["local"] = path
+    d["workflows"] = {p.rpartition("/")[2]: (path / p).read_text(errors="replace") for p in files
+                      if re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", p)}
+    if not is_packaging(d["workflows"], action_repo):
+        print(f"warning: {path}'s workflows don't publish an apt repository", file=sys.stderr)
+    return d
+
+
 # --------------------------------------------------------------------------
 # Facts about one packaging repository.
 
@@ -379,14 +428,22 @@ def repo_facts(d: dict, action_repo: str) -> dict:
     f["fork"], f["parent"] = info["fork"], (info.get("parent") or {}).get("full_name")
     f["created_at"] = info["created_at"]
     f["branches"] = [b["name"] for b in api_pages(f"repos/{full}/branches?per_page=100")]
-    tree = api(f"repos/{full}/git/trees/{oid}?recursive=1")
-    f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
-    f["tree_truncated"] = tree.get("truncated", False)
-    f["declaration"] = file_at(full, oid, DECLARATION)
-    for p in ("README.md", "packaging/README.md", "debian/control"):
-        f[p] = file_at(full, oid, p) if p in f["files"] else None
+    if d.get("local"):
+        # --local: the checkout's files, as they would be pushed.
+        f["files"], f["tree_truncated"] = local_files(d["local"]), False
+        def read(p):
+            return (d["local"] / p).read_text(errors="replace") if p in f["files"] else None
+    else:
+        tree = api(f"repos/{full}/git/trees/{oid}?recursive=1")
+        f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
+        f["tree_truncated"] = tree.get("truncated", False)
+        def read(p):
+            return file_at(full, oid, p) if p in f["files"] else None
+    f["declaration"] = read(DECLARATION)
+    for p in ("README.md", "packaging/README.md", "debian/control", ".gitignore"):
+        f[p] = read(p)
     ctl = [p for p in f["files"] if re.fullmatch(r"packaging/debian/[^/]+/control(\.in)?", p)]
-    f["other_controls"] = {p: file_at(full, oid, p) for p in ctl[:3]}
+    f["other_controls"] = {p: read(p) for p in ctl[:3]}
     # History imported from upstream: commits by other people, older than the
     # repository itself. (A snapshot has only its importer's commits.)
     ours = our_people(full.split("/")[0])
@@ -485,6 +542,221 @@ def arch_for(suite: str, t: dict) -> set[str]:
 
 
 # --------------------------------------------------------------------------
+# Rules that read a workflow's structure.
+
+BUILD_RUN = re.compile(r"\b(dpkg-buildpackage|debuild|dpkg-deb\s+(-b|--build)|nfpm)\b")
+WORKFLOW_RUN_GUARD = re.compile(r"github\.event\.workflow_run\.event\s*!=\s*['\"]pull_request['\"]")
+# An `if:` with one of these runs even when a job it needs was skipped.
+RUNS_ANYWAY = re.compile(r"\b(always|failure|cancelled)\(\)")
+
+
+def triggers(w: dict) -> dict:
+    """A workflow's `on:`, as a dict whatever form it was written in."""
+    on = w.get(True, w.get("on", {}))  # YAML 1.1 reads a bare `on` as True
+    if isinstance(on, str):
+        return {on: None}
+    if isinstance(on, list):
+        return {k: None for k in on}
+    return on if isinstance(on, dict) else {}
+
+
+def unguarded_workflow_runs(parsed: dict[str, dict]) -> list[str]:
+    """PKG-TRIGGERS, in every workflow: one chained by `workflow_run` must not
+    act on a run that a pull request triggered. `branches: [main]` there
+    matches the triggering run's branch *name*, which a pull request from a
+    fork's own `main` has too; so each job needs
+    `github.event.workflow_run.event != 'pull_request'` in its `if:`, or
+    needs a job that has it (and doesn't run anyway, `always()`)."""
+    out = []
+    for n, w in sorted(parsed.items()):
+        if not isinstance(w, dict) or "workflow_run" not in triggers(w):
+            continue
+        jobs = {k: j for k, j in (w.get("jobs") or {}).items() if isinstance(j, dict)}
+
+        @functools.cache
+        def guarded(name: str) -> bool:
+            cond = str(jobs[name].get("if", ""))
+            if WORKFLOW_RUN_GUARD.search(cond):
+                return True
+            needs = jobs[name].get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            return not RUNS_ANYWAY.search(cond) and any(guarded(x) for x in needs if x in jobs)
+
+        bad = [name for name in jobs if not guarded(name)]
+        if bad:
+            out.append(f"{n}: workflow_run job{'s' if len(bad) > 1 else ''} {' '.join(bad)} "
+                       "not guarded against pull requests")
+    return out
+
+
+def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) -> tuple[bool, str]:
+    """PKG-INSTALL-TEST: a job that builds the packages has a step named
+    `Install test` that runs something. A mention elsewhere (a comment, a
+    script in the tree, a step in another job) doesn't count.
+
+    A job that builds is the build-deb job, one using the shared build-deb
+    action, or one running dpkg-buildpackage, debuild, dpkg-deb --build or
+    nfpm; a job calling a local reusable workflow is read through, from
+    `workflows` (file name -> parsed). When none of those shows (a build in
+    a script), every job but test, release and the publish is taken as a
+    build job."""
+    shared_step = f"{action_repo}/build-deb".lower()
+    shared_workflow = f"{action_repo}/.github/workflows/build-deb.yml".lower()
+    workflows = workflows or {}
+
+    def flatten(jobs, prefix="", depth=0):
+        for name, j in jobs.items():
+            if not isinstance(j, dict):
+                continue
+            local = re.fullmatch(r"\./\.github/workflows/([^/@]+\.ya?ml)", str(j.get("uses", "")))
+            inner = workflows.get(local.group(1)) if local else None
+            if isinstance(inner, dict) and depth < 3:
+                yield from flatten(inner.get("jobs") or {}, f"{prefix}{name}/", depth + 1)
+            else:
+                yield f"{prefix}{name}", name, j
+
+    all_jobs = list(flatten(jobs))
+    for path, _, j in all_jobs:
+        if str(j.get("uses", "")).partition("@")[0].lower() == shared_workflow:
+            return True, f"{path}: the shared build-deb.yml install-tests"
+    steps = {path: [s for s in (j.get("steps") or []) if isinstance(s, dict)] for path, _, j in all_jobs}
+    builders = [path for path, name, _ in all_jobs if name == "build-deb" or any(
+        str(s.get("uses", "")).partition("@")[0].lower() == shared_step
+        or BUILD_RUN.search(code_lines(str(s.get("run", "")))) for s in steps[path])]
+    if not builders:
+        builders = [path for path, name, j in all_jobs if name not in ("test", "release")
+                    and "/publish-apt.yml@" not in str(j.get("uses", ""))]
+    if not builders:
+        return False, "no job builds the packages"
+    for path in builders:
+        for s in steps[path]:
+            if re.fullmatch(r"Install test( \(.*\))?", str(s.get("name", "")).strip()) and \
+                    (code_lines(str(s.get("run", ""))).strip() or str(s.get("uses", "")).strip()):
+                return True, f"`{s['name']}` in {path}"
+    return False, f"no `Install test` step in {', '.join(builders)}"
+
+
+def key_fingerprints(data: bytes) -> list[str]:
+    """The fingerprints of the primary keys in a binary OpenPGP keyring, as
+    40 (v4) or 64 (v6) upper-case hex digits (RFC 9580, 5.5.4)."""
+    import hashlib
+    out, i = [], 0
+    while i < len(data):
+        b = data[i]
+        if not b & 0x80:
+            break  # not a packet: armoured, or garbage
+        if b & 0x40:  # new format
+            tag, o = b & 0x3F, data[i + 1]
+            if o < 192:
+                n, h = o, 2
+            elif o < 224:
+                n, h = ((o - 192) << 8) + data[i + 2] + 192, 3
+            elif o == 255:
+                n, h = int.from_bytes(data[i + 2:i + 6], "big"), 6
+            else:
+                break  # partial lengths: not in a key
+        else:  # old format
+            tag, lt = (b >> 2) & 0x0F, b & 3
+            if lt == 3:
+                break
+            size = 1 << lt
+            n, h = int.from_bytes(data[i + 1:i + 1 + size], "big"), 1 + size
+        body = data[i + h:i + h + n]
+        if tag == 6 and body:
+            if body[0] == 4:
+                out.append(hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper())
+            elif body[0] == 6:
+                out.append(hashlib.sha256(b"\x9b" + len(body).to_bytes(4, "big") + body).hexdigest().upper())
+        i += h + n
+    return out
+
+
+def install_section(doc: str) -> str | None:
+    """The `## Install` section of a README: from a heading that is exactly
+    `## Install` to the next level-2 heading, ignoring `#` lines in code
+    blocks (a shell comment isn't a heading)."""
+    lines, start, fence = doc.splitlines(), None, False
+    for n, l in enumerate(lines):
+        if l.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if start is None and re.fullmatch(r"## Install[ \t]*#*[ \t]*", l):
+            start = n + 1
+        elif start is not None and re.match(r"##(?!#)", l):
+            return "\n".join(lines[start:n])
+    return None if start is None else "\n".join(lines[start:])
+
+
+def setup_problems(section: str, name: str, site: str, fingerprints: list[str]) -> list[str]:
+    """What the setup block of docs/conventions.md ("One setup") for `name` at
+    `site` is missing from `section`."""
+    # A shell line continuation, inside quotes or not, is one line.
+    section = re.sub(r"[ \t]*\\\n[ \t]*", " ", section)
+    probs = []
+    if f"{site}/{name}.gpg" not in section or f"/etc/apt/keyrings/{name}.gpg" not in section:
+        probs.append(f"no key download from {site}/{name}.gpg into /etc/apt/keyrings")
+    if not re.search(rf"deb \[signed-by=/etc/apt/keyrings/{re.escape(name)}\.gpg\] {re.escape(site)}/[^\s/]+/ \./",
+                     section):
+        probs.append(f"no sources line for {site}/<suite>/")
+    flat = re.sub(r"\s", "", section).upper()
+    if fingerprints and not any(fp in flat for fp in fingerprints):
+        probs.append("no key fingerprint")
+    return probs
+
+
+@functools.cache
+def pages_site(repo: str) -> str:
+    return ((api(f"repos/{repo}/pages") or {}).get("html_url") or "").rstrip("/")
+
+
+def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list[dict],
+         suites: list[str] = ()) -> tuple[bool, str]:
+    """PKG-DOCS (docs/packaging.md, "Documentation"): an `## Install` section
+    with this repository's setup block (for one suite; the reader puts in
+    their own), naming every published suite, with its key's fingerprint and
+    the setup of each dependency repository, and nothing conventions.md
+    forbids."""
+    section = install_section(doc or "")
+    if section is None:
+        return False, "no `## Install` section"
+    probs = setup_problems(section, name, site, key_fingerprints(key)) if site else ["no Pages site to set up"]
+    # A suite name, but not `trixie` inside `raspbian-trixie`.
+    unnamed = [x for x in suites if not re.search(rf"(?<![\w-]){re.escape(x)}(?![\w-])", section)]
+    if unnamed:
+        probs.append(f"doesn't name the published suite{'s' if len(unnamed) > 1 else ''} {' '.join(unnamed)}")
+    for e in depends:
+        if "repo" in e:
+            dep_site = pages_site(e["repo"])
+            probs += [f"dependency {e['name']}: {p}" for p in
+                      (setup_problems(section, e["name"], dep_site, []) if dep_site else ["no Pages site"])]
+        else:
+            url = e["url"].partition("{")[0]
+            if e["key"] not in section or f"/etc/apt/keyrings/{e['name']}." not in section or url not in section:
+                probs.append(f"dependency {e['name']}: no setup for {url} with {e['key']}")
+    probs += [f"mentions {p}" for p in INDEX_FORBIDDEN if p in section]
+    return not probs, "; ".join(probs) if probs else "Install section with the setup and the key fingerprint"
+
+
+def changelog(files: list[str], gitignore: str | None, kind: str, nfpm: bool) -> tuple[bool | None, str]:
+    """PKG-CHANGELOG (docs/packaging.md, "The changelog"): Set B commits no
+    changelog, a patch series' templates included, and with `debian/` at the
+    root lists `debian/changelog` in .gitignore, so a local build doesn't
+    dirty the tree. Set A keeps its committed one."""
+    if kind != "B":
+        return None, "Set A keeps its changelog" if kind == "A" else "no build of its own"
+    tracked = sorted(p for p in files if p == "debian/changelog" or p.endswith("/debian/changelog")
+                     or re.fullmatch(r"packaging/debian/[^/]+/changelog", p))
+    if tracked:
+        return False, f"commits {', '.join(tracked[:2])}"
+    if "debian/control" not in files:
+        return (None, "nfpm build") if nfpm else (True, "no committed changelog")
+    ignored = {l.strip() for l in (gitignore or "").splitlines()} & {"debian/changelog", "/debian/changelog"}
+    return (True, "not committed; ignored") if ignored else (False, "not committed, but not in .gitignore")
+
+
+# --------------------------------------------------------------------------
 # The checks.
 
 def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[str] = frozenset()) -> dict:
@@ -551,6 +823,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     else:
         where = sorted({p.rsplit("/control", 1)[0] for p in f["files"] if p.endswith("debian/control")})
         put("PKG-DEBIAN", False, "no debian/ at the root" + (f" (found {', '.join(where)})" if where else ""))
+    put("PKG-CHANGELOG", *changelog(f["files"], f[".gitignore"], kind, t["nfpm"]))
     if t["depends_error"]:
         put("PKG-DEPENDS", False, t["depends_error"])
     elif not t["depends"]:
@@ -584,8 +857,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     jobs = w.get("jobs") or {}
     need = {"publish-apt"} if kind == "aggregate" else {"build-deb", "publish-apt"}
     put("PKG-JOBS", need <= set(jobs) and set(jobs) <= JOBS, " ".join(jobs) or "none")
-    on = w.get(True, w.get("on", {}))
-    on = {on: None} if isinstance(on, str) else {k: None for k in on} if isinstance(on, list) else (on or {})
+    on = triggers(w)
     bad = []
     push = on.get("push") or {}
     if "push" not in on:
@@ -602,6 +874,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         bad.append("schedule")
     if any(isinstance(v, dict) and ({"paths", "paths-ignore"} & set(v)) for v in on.values()):
         bad.append("paths filter")
+    # The other workflows too: one chained to this one by workflow_run.
+    bad += unguarded_workflow_runs({n: x for n, x in parsed.items() if n != wf_name})
     put("PKG-TRIGGERS", not bad, " ".join(str(k) for k in on) + (f" — {'; '.join(bad)}" if bad else ""))
     pub = next((j for j in jobs.values() if isinstance(j, dict) and str(j.get("uses", "")).startswith(publish_uses)), {})
     cond = str(pub.get("if", ""))
@@ -629,11 +903,10 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         put("PKG-SHARED", bool(shared) and not off_main and not local_ver,
             ("; ".join(off_main) if off_main else "shared build" if shared else "own build steps")
             + ("; local deb-version.py" if local_ver else ""))
-    step_names = {str(s.get("name", "")) for j in jobs.values() if isinstance(j, dict)
-                  for s in (j.get("steps") or []) if isinstance(s, dict)}
-    it = "Install test" in step_names or "packaging/install-test.sh" in f["files"]
-    put("PKG-INSTALL-TEST", None if kind == "aggregate" else it,
-        "nothing to build" if kind == "aggregate" else ("install test" if it else "no install test"))
+    if kind == "aggregate":
+        put("PKG-INSTALL-TEST", None, "nothing to build")
+    else:
+        put("PKG-INSTALL-TEST", *install_test(jobs, args.action_repo, parsed))
 
     # --- Packages, from the live site
     site = f["site"] or {"suites": {}}
@@ -708,15 +981,11 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         found = m.group(1).strip() if m else "none"
         put("PKG-MAINTAINER", found == args.maintainer, found)
     doc_path = "packaging/README.md" if kind == "A" else "README.md"
-    doc = f[doc_path] or ""
-    line = f"signed-by=/etc/apt/keyrings/{f['name']}.gpg]"
-    heading = bool(re.search(r"^##+ Install", doc, re.M))
-    # Installing needs each dependency repository too, on its suites.
-    no_dep = [e["name"] for e in t["depends"] if f"signed-by=/etc/apt/keyrings/{e['name']}.gpg]" not in doc]
-    put("PKG-DOCS", heading and line in doc and not no_dep,
-        f"{doc_path}: " + ("Install section with the setup" if heading and line in doc else
-                           "setup lines but no `## Install`" if line in doc else "no setup lines")
-        + (f"; no setup for dependency repository {', '.join(no_dep)}" if no_dep else ""))
+    site_url = (f["site"] or {}).get("site")
+    key = ((f["site"] or {}).get("root") or {}).get(f"{f['name']}.gpg", (0, b""))[1]
+    ok, detail = docs(f[doc_path], f["name"], site_url, key, t["depends"],
+                      sorted((f["site"] or {}).get("suites") or {}, key=KNOWN_SUITES.index))
+    put("PKG-DOCS", ok, f"{doc_path}: {detail}")
 
     # --- Published repository
     pages = f["pages"]
@@ -899,11 +1168,15 @@ def to_html(report: dict) -> str:
 
 # --------------------------------------------------------------------------
 
-def action_repo_default() -> str | None:
-    r = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "remote", "get-url", "origin"],
-                       capture_output=True, text=True)
-    m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(\.git)?$", r.stdout.strip())
+def origin_repo(path: Path) -> str | None:
+    """owner/name of a checkout's GitHub origin."""
+    r = subprocess.run(["git", "-C", str(path), "remote", "get-url", "origin"], capture_output=True, text=True)
+    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$", r.stdout.strip())
     return m.group(1) if m else None
+
+
+def action_repo_default() -> str | None:
+    return origin_repo(Path(__file__).resolve().parent)
 
 
 def main() -> int:
@@ -913,7 +1186,12 @@ def main() -> int:
     p.add_argument("--maintainer", help="the Maintainer: every package must have")
     p.add_argument("--action-repo", default=action_repo_default(),
                    help="the repository holding publish-apt.yml (default: this checkout's origin)")
-    p.add_argument("--repo", action="append", default=[], help="check only these repositories (owner/name)")
+    p.add_argument("--repo", action="append", default=[],
+                   help="check only these repositories (owner/name), without scanning their owners' others")
+    p.add_argument("--local", type=Path, metavar="PATH",
+                   help="check the checkout at PATH (its workflows, declaration, debian/, README) instead of what "
+                        "GitHub has; the branch, history and live site still come from GitHub. The repository is "
+                        "--repo, or PATH's origin")
     p.add_argument("--json", type=Path)
     p.add_argument("--markdown", type=Path)
     p.add_argument("--html", type=Path)
@@ -921,22 +1199,40 @@ def main() -> int:
     if not args.action_repo:
         p.error("--action-repo is needed: it can't be read from this checkout's origin")
     owners = dict((o.split("=", 1) + [None])[:2] for o in args.owner)
-    packaging, orphans = discover(list(owners), args.action_repo)
-    found = frozenset(d["meta"]["full_name"].lower() for d in packaging)
-    if args.repo:
-        packaging = [d for d in packaging if d["meta"]["full_name"] in args.repo]
+    if args.local:
+        if len(args.repo) > 1:
+            p.error("--local checks one repository: give at most one --repo")
+        name = args.repo[0] if args.repo else origin_repo(args.local)
+        if not name:
+            p.error(f"--repo is needed: {args.local} has no GitHub origin")
+        args.repo = [name]
+        packaging, orphans = [local_entry(name, args.local.resolve(), args.action_repo)], []
+    elif args.repo:
+        # Only the named repositories: no scan of their owners' others.
+        packaging, orphans = classify(named(args.repo), args.action_repo)
+        for n in sorted(set(args.repo) - {d["meta"]["full_name"] for d in packaging}):
+            print(f"warning: {n} is not a packaging repository", file=sys.stderr)
+    else:
+        packaging, orphans = discover(list(owners), args.action_repo)
+    found = {d["meta"]["full_name"].lower() for d in packaging}
     print(f"discover: {len(packaging)} packaging repositories, {len(orphans)} sites without packaging", file=sys.stderr)
     with ThreadPoolExecutor(6) as ex:
         facts = list(ex.map(lambda d: repo_facts(d, args.action_repo), packaging))
+    targets = [target(f, owners.get(f["repo"].split("/")[0])) for f in facts]
+    if args.repo:
+        # Without a scan, look at each dependency repository itself.
+        deps = sorted({e["repo"] for t in targets for e in t["depends"] if "repo" in e} - found)
+        if deps:
+            found |= {d["meta"]["full_name"].lower() for d in classify(named(deps), args.action_repo)[0]}
     repos = []
-    for f in facts:
+    for f, t in zip(facts, targets):
         tag = owners.get(f["repo"].split("/")[0])
-        t = target(f, tag)
-        checks = check(f, t, args, tag, found)
+        checks = check(f, t, args, tag, frozenset(found))
         repos.append({"repo": f["repo"], "kind": t["kind"], "variant": t["variant"], "declared": t["declared"],
                       "build_ref": f["build_ref"], "build_workflow": f["build_workflow"],
                       "site": (f["site"] or {}).get("site"), "target_suites": t["suites"],
-                      "target_architectures": t["archs"] or ["all"], "checks": checks})
+                      "target_architectures": t["archs"] or ["all"], "checks": checks,
+                      **({"local": str(f["local"])} if f.get("local") else {})})
     import datetime
     report = {"date": datetime.date.today().isoformat(), "owners": list(owners), "action_repo": args.action_repo,
               "repos": repos, "sites_without_packaging": orphans}
