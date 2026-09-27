@@ -51,11 +51,20 @@ jobs:
           ${{ matrix.no-changelog && '--no-changelog' || '' }}
 
       - name: Build with this checkout of build-deb
+        id: build
         uses: ./build-deb
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
           source-dir: fixture-src
+
+      - name: No declaration, so no dependency repositories
+        env:
+          APT_SOURCES: ${{ steps.build.outputs.apt-sources }}
+        run: |
+          set -eu
+          test -z "$(cat "$APT_SOURCES/checks")"
+          sh "$APT_SOURCES/install.sh" | grep -q 'no extra apt repositories'
 
       - name: Check the version and changelog
         env:
@@ -222,6 +231,19 @@ jobs:
             echo "::error::a package was built without its dependency repository"
             exit 1
           fi
+
+      - name: Install test, with the build's dependency repositories
+        if: matrix.want == 'success'
+        env:
+          SUITE: ${{ matrix.suite }}
+          APT_SOURCES: ${{ steps.build.outputs.apt-sources }}
+        run: |
+          docker run --rm -v "$APT_SOURCES:/apt-sources:ro" -v "$PWD/built-debs:/debs:ro" \
+            "debian:$SUITE" sh -ec '
+              sh /apt-sources/install.sh
+              apt-get install -y apt-repo-selftest-dep /debs/apt-repo-selftest-src_*.deb
+              dpkg-query -W apt-repo-selftest-dep apt-repo-selftest-src
+            '
 
   apt-sources-pages:
     # The `repo = "owner/name"` form against the real GitHub API, with the
