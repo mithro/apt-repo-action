@@ -108,6 +108,14 @@ class Tree(unittest.TestCase):
         self.commit("two")
         self.assertEqual(self.run_script("--suite", "sid", "--pr", "7").stdout.strip(), "0.3.post1~pr7")
 
+    def test_generated_tags_are_not_releases(self):
+        # rpi-qemu's old release job tagged every build v0.1.<N>.g<sha>; only
+        # vX.Y and vX.Y.Z are releases.
+        self.git("tag", "-a", "v0.1", "-m", "v0.1")
+        self.commit("two")
+        self.git("tag", "v0.1.1.gdeadbee")
+        self.assertEqual(self.run_script("--suite", "sid").stdout.strip(), "0.1.post1")
+
     def test_changelog_entry(self):
         sha = self.git("rev-parse", "HEAD")
         self.run_script("--suite", "trixie", "--write-changelog")

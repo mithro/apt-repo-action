@@ -62,8 +62,12 @@ def base_version(src: Path) -> str:
     if git(src, "rev-parse", "--is-shallow-repository") == "true":
         fail("this is a shallow clone, so the commit count would be wrong and the "
              "version would go backwards. Check out with `fetch-depth: 0`.")
+    # Only vX.Y[.Z] are releases: the exclude drops any tag with something
+    # other than digits and dots after the v, such as the v0.1.112.g91e6fbe
+    # tags rpi-qemu's old release job made for every build.
     r = subprocess.run(["git", "-C", str(src), "describe", "--tags", "--long",
-                        "--match", "v[0-9]*"], capture_output=True, text=True)
+                        "--match", "v[0-9]*", "--exclude", "v*[!0-9.]*"],
+                       capture_output=True, text=True)
     if r.returncode == 0:
         m = re.fullmatch(r"v(\d+\.\d+(?:\.\d+)?)-(\d+)-g[0-9a-f]+", r.stdout.strip())
         if not m:
