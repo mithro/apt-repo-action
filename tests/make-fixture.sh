@@ -1,13 +1,16 @@
 #!/bin/bash
 # Build the self-test's inputs: one throwaway Architecture: all package in
-# <apt-root>/<suite>/ for each suite, and a throwaway signing key.
+# <apt-root>/<suite>/ for each suite, and a throwaway signing key. The
+# package is apt-repo-selftest unless <package> names another (build-deb's
+# dependency repository self-test serves apt-repo-selftest-dep).
 #
-# Usage: tests/make-fixture.sh <apt-root> "<suite> ..." <private-key-out>
+# Usage: tests/make-fixture.sh <apt-root> "<suite> ..." <private-key-out> [<package>]
 set -euo pipefail
 
 root=$1
 suites=$2
 key_out=$3
+package=${4:-apt-repo-selftest}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -15,8 +18,8 @@ trap 'rm -rf "$work"' EXIT
 pkg=$work/pkg
 mkdir -p "$pkg/DEBIAN" "$pkg/usr/share/apt-repo-selftest"
 echo "apt-repo-action self-test fixture" > "$pkg/usr/share/apt-repo-selftest/README"
-cat > "$pkg/DEBIAN/control" <<'EOF'
-Package: apt-repo-selftest
+cat > "$pkg/DEBIAN/control" <<EOF
+Package: $package
 Version: 1.0
 Architecture: all
 Maintainer: apt-repo-action self-test <selftest@invalid>
@@ -26,7 +29,7 @@ EOF
 
 for suite in $suites; do
   mkdir -p "$root/$suite"
-  dpkg-deb --build --root-owner-group "$pkg" "$root/$suite/apt-repo-selftest_1.0_all.deb"
+  dpkg-deb --build --root-owner-group "$pkg" "$root/$suite/${package}_1.0_all.deb"
 done
 
 # RSA 4096, like the real repositories' keys.

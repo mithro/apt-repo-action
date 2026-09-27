@@ -43,6 +43,23 @@ inputs:
       the committed changelog's version is used as it is.
     required: false
     default: auto
+  github-token:
+    description: >-
+      Token for the GitHub API, which gives the site of each `repo = ...`
+      dependency repository declared in the source tree's
+      .github/apt-packaging.toml (docs/packaging.md, "The declaration").
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  apt-sources:
+    description: >-
+      A directory on the runner holding the dependency repositories this
+      build used, as scripts/apt-sources.py writes them. An install test
+      mounts it into its container and runs `sh <dir>/install.sh` (as root)
+      before installing the built packages; with none declared for the
+      suite, install.sh does nothing.
+    value: ${{ steps.depends.outputs.path }}
 
 runs:
   using: composite
@@ -106,6 +123,29 @@ runs:
           echo "version-script=$script"
         } >> "$GITHUB_OUTPUT"
 
+    # Build dependencies Debian doesn't have for this suite come from the
+    # repositories declared as [[depends]] (docs/packaging.md, "The
+    # declaration"). Resolved and their keys fetched here, on the runner,
+    # which has the token; the container only installs what this writes.
+    - name: Resolve the dependency repositories
+      id: depends
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        ACTION_ROOT: ${{ github.action_path }}/..
+      run: |
+        set -eu
+        dest=$(mktemp -d "$RUNNER_TEMP/apt-sources.XXXXXX")
+        n=$(python3 "$ACTION_ROOT/scripts/apt-sources.py" write --suite "$SUITE" \
+              --declaration "$GITHUB_WORKSPACE/$SOURCE_DIR/.github/apt-packaging.toml" --dest "$dest")
+        # path: always, for an install test. dir: only when there is
+        # something to install, so the build is unchanged without it.
+        echo "path=$dest" >> "$GITHUB_OUTPUT"
+        if [ "$n" = 0 ]; then dest=; fi
+        echo "dir=$dest" >> "$GITHUB_OUTPUT"
+
     - name: Enable binfmt for cross-architecture containers
       if: steps.plan.outputs.emulated == 'true'
       shell: bash
@@ -124,13 +164,17 @@ runs:
         VERSION_SCRIPT: ${{ steps.plan.outputs.version-script }}
         PR: ${{ github.event.pull_request.number }}
         ACTION_ROOT: ${{ github.action_path }}/..
+        DEPENDS_DIR: ${{ steps.depends.outputs.dir }}
       run: |
         set -eux
         mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
+        depends=()
+        if [ -n "$DEPENDS_DIR" ]; then depends=(-v "$DEPENDS_DIR:/work/apt-sources:ro"); fi
         docker run --rm --platform "$PLATFORM" \
           -v "$GITHUB_WORKSPACE/$SOURCE_DIR:/work/src" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
+          "${depends[@]}" \
           -w /work/src \
           -e SUITE -e ARCH -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
           -e GITHUB_REPOSITORY \
@@ -139,6 +183,9 @@ runs:
             apt-get update
             apt-get install -y --no-install-recommends \
               build-essential ca-certificates debhelper dpkg-dev fakeroot git python3 $BUILD_DEPS
+            # The declared dependency repositories, if any: fails unless
+            # each one is fetched and its signature verified.
+            if [ -e /work/apt-sources/install.sh ]; then sh /work/apt-sources/install.sh; fi
             # Build dependencies come from debian/control (docs/packaging.md, "Builds").
             apt-get build-dep -y ./
             # git refuses to read a tree owned by another user.

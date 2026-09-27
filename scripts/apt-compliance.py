@@ -90,6 +90,8 @@ RULES = [
      "Write packaging/README.md: upstream, what we change, how to update."),
     ("PKG-DEBIAN", "Repository", "`debian/` at the root of the default branch (a patch series: `packaging/debian/<name>/`)",
      "Move the packaging to debian/ at the root of the default branch."),
+    ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites",
+     f"Fix the [[depends]] entries in {DECLARATION} (docs/packaging.md, \"The declaration\")."),
     ("PKG-WORKFLOW", "Workflow", f"`.github/workflows/{WORKFLOW_FILE}` named `{WORKFLOW_NAME}`",
      f"Rename the build workflow to .github/workflows/{WORKFLOW_FILE} with `name: {WORKFLOW_NAME}`."),
     ("PKG-JOBS", "Workflow", "jobs are only `test`, `build-deb`, `publish-apt`, `release`",
@@ -130,6 +132,19 @@ RULES = [
      "Let publish-apt.yml generate index.html."),
 ]
 RULE = {r[0]: r for r in RULES}
+
+
+def _load_apt_sources():
+    """scripts/apt-sources.py, whose validation of [[depends]] build-deb uses."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("apt_sources", str(Path(__file__).with_name("apt-sources.py")))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("apt_sources", loader))
+    loader.exec_module(module)
+    return module
+
+
+apt_sources = _load_apt_sources()
 
 
 # --------------------------------------------------------------------------
@@ -451,6 +466,13 @@ def target(f: dict, owner_tag: str | None) -> dict:
     t["archs"] = archs
     t["exceptions"] = dict(decl.get("exceptions", {}))
     t["upstream"] = decl.get("upstream")
+    raw = decl.get("depends", [])
+    try:
+        if not isinstance(raw, list) or not all(isinstance(d, dict) for d in raw):
+            raise apt_sources.Error("`depends` must be an array of tables, [[depends]]")
+        t["depends"], t["depends_error"] = apt_sources.validate(raw), None
+    except apt_sources.Error as e:
+        t["depends"], t["depends_error"] = [], str(e)
     return t
 
 
@@ -465,7 +487,7 @@ def arch_for(suite: str, t: dict) -> set[str]:
 # --------------------------------------------------------------------------
 # The checks.
 
-def check(f: dict, t: dict, args, owner_tag: str | None) -> dict:
+def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[str] = frozenset()) -> dict:
     C = {}
     kind, variant = t["kind"], t["variant"]
 
@@ -529,6 +551,17 @@ def check(f: dict, t: dict, args, owner_tag: str | None) -> dict:
     else:
         where = sorted({p.rsplit("/control", 1)[0] for p in f["files"] if p.endswith("debian/control")})
         put("PKG-DEBIAN", False, "no debian/ at the root" + (f" (found {', '.join(where)})" if where else ""))
+    if t["depends_error"]:
+        put("PKG-DEPENDS", False, t["depends_error"])
+    elif not t["depends"]:
+        put("PKG-DEPENDS", None, "no [[depends]]")
+    else:
+        # A `repo` dependency is one of ours; say whether it was found as a
+        # packaging repository in this scan (it may be another owner's).
+        put("PKG-DEPENDS", True, "; ".join(
+            (f"{e['repo']} ({'packaging repository' if e['repo'].lower() in packaging else 'not found in this scan'})"
+             if "repo" in e else e["url"]) + (f" for {' '.join(e['suites'])}" if e["suites"] else "")
+            for e in t["depends"]))
 
     # --- Workflow
     publish_uses = f"{args.action_repo}/.github/workflows/publish-apt.yml@"
@@ -678,9 +711,12 @@ def check(f: dict, t: dict, args, owner_tag: str | None) -> dict:
     doc = f[doc_path] or ""
     line = f"signed-by=/etc/apt/keyrings/{f['name']}.gpg]"
     heading = bool(re.search(r"^##+ Install", doc, re.M))
-    put("PKG-DOCS", heading and line in doc,
+    # Installing needs each dependency repository too, on its suites.
+    no_dep = [e["name"] for e in t["depends"] if f"signed-by=/etc/apt/keyrings/{e['name']}.gpg]" not in doc]
+    put("PKG-DOCS", heading and line in doc and not no_dep,
         f"{doc_path}: " + ("Install section with the setup" if heading and line in doc else
-                           "setup lines but no `## Install`" if line in doc else "no setup lines"))
+                           "setup lines but no `## Install`" if line in doc else "no setup lines")
+        + (f"; no setup for dependency repository {', '.join(no_dep)}" if no_dep else ""))
 
     # --- Published repository
     pages = f["pages"]
@@ -871,6 +907,7 @@ def main() -> int:
         p.error("--action-repo is needed: it can't be read from this checkout's origin")
     owners = dict((o.split("=", 1) + [None])[:2] for o in args.owner)
     packaging, orphans = discover(list(owners), args.action_repo)
+    found = frozenset(d["meta"]["full_name"].lower() for d in packaging)
     if args.repo:
         packaging = [d for d in packaging if d["meta"]["full_name"] in args.repo]
     print(f"discover: {len(packaging)} packaging repositories, {len(orphans)} sites without packaging", file=sys.stderr)
@@ -880,7 +917,7 @@ def main() -> int:
     for f in facts:
         tag = owners.get(f["repo"].split("/")[0])
         t = target(f, tag)
-        checks = check(f, t, args, tag)
+        checks = check(f, t, args, tag, found)
         repos.append({"repo": f["repo"], "kind": t["kind"], "variant": t["variant"], "declared": t["declared"],
                       "build_ref": f["build_ref"], "build_workflow": f["build_workflow"],
                       "site": (f["site"] or {}).get("site"), "target_suites": t["suites"],

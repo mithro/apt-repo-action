@@ -24,6 +24,7 @@ versions. This README covers using the workflow.
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
 | `scripts/keep-history.py` | script | Keep earlier package versions from the live site, up to `size-limit-mb` |
+| `scripts/apt-sources.py` | script | The dependency repositories a declaration's `[[depends]]` names: resolve, fetch the keys, write an apt setup for `build-deb` and install tests |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |
 
 Most callers want the **reusable workflow** — it owns the `pages: write` /
@@ -163,6 +164,23 @@ and `~pr<P>` suffixes of [docs/packaging.md](docs/packaging.md#versions)). A
 repository that still carries its own `packaging/deb-version.py` keeps using
 it, with a warning, until it is migrated: see
 [Moving a repository to the shared build](docs/packaging.md#moving-a-repository-to-the-shared-build).
+
+A build dependency Debian doesn't have for a suite comes from a dependency
+repository, ours or anyone else's, declared as a `[[depends]]` in the
+repository's `.github/apt-packaging.toml`:
+
+```toml
+[[depends]]
+repo = "mithro/paho-mqtt-bookworm"   # one of ours: site and key from GitHub
+suites = ["bookworm"]
+reason = "python3-paho-mqtt (>= 2) is not in bookworm"
+```
+
+`build-deb` adds each one declared for the suite, signed-by its own key,
+before `apt-get build-dep`, and fails if one can't be fetched and verified.
+Its `apt-sources` output gives the install test the same repositories. See
+[Dependency repositories](docs/packaging.md#dependency-repositories) for
+the explicit form, for a repository that isn't ours.
 
 ## Signing
 
