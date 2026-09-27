@@ -43,6 +43,14 @@ inputs:
       the committed changelog's version is used as it is.
     required: false
     default: auto
+  lintian:
+    description: >-
+      Run lintian on the built packages (docs/packaging.md, "Package
+      contents"). "warn" (the default): every error and warning becomes a
+      warning annotation, and the build never fails on them. "error": lintian
+      errors, or lintian itself failing, fail the build. "off": don't run it.
+    required: false
+    default: warn
   github-token:
     description: >-
       Token for the GitHub API, which gives the site of each `repo = ...`
@@ -60,6 +68,12 @@ outputs:
       before installing the built packages; with none declared for the
       suite, install.sh does nothing.
     value: ${{ steps.depends.outputs.path }}
+  lintian-errors:
+    description: "The number of lintian errors (E:) in the built packages; empty with `lintian: off`."
+    value: ${{ steps.lintian.outputs.errors }}
+  lintian-warnings:
+    description: "The number of lintian warnings (W:) in the built packages; empty with `lintian: off`."
+    value: ${{ steps.lintian.outputs.warnings }}
 
 runs:
   using: composite
@@ -204,3 +218,37 @@ runs:
             cp /work/*.deb /work/out/
             ls -lh /work/out/
           '
+
+    # docs/packaging.md, "Package contents": lintian runs on every build. In
+    # debian:<codename> on the runner's own platform, not the build's: lintian
+    # reads another architecture's .debs as they are, so an emulated build
+    # doesn't run lintian under QEMU too. As a user, since lintian's authors
+    # advise against running it as root.
+    - name: Lintian
+      id: lintian
+      if: inputs.lintian != 'off'
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        OUT_DIR: ${{ inputs.out-dir }}
+        MODE: ${{ inputs.lintian }}
+        ACTION_ROOT: ${{ github.action_path }}/..
+      run: |
+        set -eu
+        report=$(mktemp -d "$RUNNER_TEMP/lintian.XXXXXX")
+        docker run --rm \
+          -v "$GITHUB_WORKSPACE/$OUT_DIR:/debs:ro" \
+          -v "$report:/report" \
+          "debian:${SUITE#raspbian-}" bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends lintian
+            useradd -m lintian-runner
+            status=0
+            runuser -u lintian-runner -- lintian --fail-on none --tag-display-limit 0 \
+              /debs/*.deb > /report/lintian.txt || status=$?
+            echo "$status" > /report/status
+          '
+        cat "$report/lintian.txt"
+        python3 "$ACTION_ROOT/scripts/lintian-report.py" --mode "$MODE" \
+          --status "$(cat "$report/status")" "$report/lintian.txt"
