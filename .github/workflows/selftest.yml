@@ -102,6 +102,123 @@ jobs:
             grep -q 'Placeholder changelog' fixture-src/debian/changelog
           fi
 
+  build-deb-arch:
+    # Architecture-dependent builds: the Raspbian suites (an ARMv6 root
+    # bootstrapped from archive.raspbian.org), Debian armhf, and arch-all:
+    # false. On the arm64 runner armhf runs natively, with no QEMU at all.
+    # Each is installed and run in a clean container of the image it was
+    # built in; --cpu-arch tells an ARMv6 (Raspbian) build from an ARMv7 one.
+    name: build-deb-arch (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.arch-all == 'false' && ' -B' || '' }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: raspbian-bookworm, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb12", cpu: "6"}
+          - {suite: raspbian-trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "6"}
+          - {suite: raspbian-forky, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb14", cpu: "6"}
+          - {suite: trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "7"}
+          - {suite: sid, arch: amd64, runner: ubuntu-24.04, arch-all: "false", want: "0.3.post1", cpu: none}
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: python3 tests/make-source-fixture.py fixture-src --no-changelog --any
+
+      - name: Build with this checkout of build-deb
+        id: build
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          arch-all: ${{ matrix.arch-all || 'true' }}
+          source-dir: fixture-src
+
+      - name: Check the packages and their versions
+        env:
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+          ARCH: ${{ matrix.arch }}
+          ARCH_ALL: ${{ matrix.arch-all || 'true' }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          ls built-debs/
+          want="apt-repo-selftest-hello_${WANT}_$ARCH.deb apt-repo-selftest-hello-dbgsym_${WANT}_$ARCH.deb"
+          if [ "$ARCH_ALL" = true ]; then want="$want apt-repo-selftest-src_${WANT}_all.deb"; fi
+          got=$(find built-debs -name '*.deb' -printf '%f\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          want=$(echo "$want" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          echo "built: $got"
+          echo "want:  $want"
+          test "$got" = "$want"
+
+      - name: No QEMU on the arm64 runner
+        if: runner.arch == 'ARM64'
+        run: |
+          ls /proc/sys/fs/binfmt_misc/
+          if compgen -G '/proc/sys/fs/binfmt_misc/qemu-arm*'; then
+            echo "::error::armhf was emulated, although this runner runs it natively"
+            exit 1
+          fi
+
+      - name: Install test, in a clean container of the build's image
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+          APT_SOURCES: ${{ steps.build.outputs.apt-sources }}
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+          CPU: ${{ matrix.cpu }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          echo "image $IMAGE, platform $PLATFORM"
+          docker run --rm --platform "$PLATFORM" -e WANT -e CPU \
+            -v "$APT_SOURCES:/apt-sources:ro" -v "$PWD/built-debs:/debs:ro" "$IMAGE" sh -ec '
+              sh /apt-sources/install.sh
+              apt-get update
+              apt-get install -y /debs/*.deb
+              got=$(apt-repo-selftest-hello --version)
+              echo "$got"
+              test "$got" = "apt-repo-selftest-hello $WANT"
+              cpu=$(apt-repo-selftest-hello --cpu-arch)
+              echo "__ARM_ARCH: $cpu (want $CPU)"
+              test "$cpu" = "$CPU"'
+
+  build-deb-refuses-suite:
+    # Refused before anything is built: Raspbian is armhf only and has no sid.
+    name: build-deb-refuses-suite (${{ matrix.suite }} ${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: raspbian-trixie, arch: all}
+          - {suite: raspbian-trixie, arch: arm64}
+          - {suite: raspbian-sid, arch: armhf}
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src --no-changelog --any
+      - name: Build it
+        id: build
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          source-dir: fixture-src
+      - name: Check it was refused
+        env:
+          OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::${{ matrix.suite }} ${{ matrix.arch }} was accepted (outcome: $OUTCOME)"
+            exit 1
+          fi
+          if ls built-debs/*.deb; then
+            echo "::error::a package was built"
+            exit 1
+          fi
+
   build-deb-refuses:
     runs-on: ubuntu-24.04
     steps:

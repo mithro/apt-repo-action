@@ -258,8 +258,13 @@ runs:
         gpg --dearmor < "$KEY" > "$RUNNER_TEMP/apt-repo-action-raspbian.gpg"
         sudo install -D -m 644 "$RUNNER_TEMP/apt-repo-action-raspbian.gpg" "$keyring"
         mkdir -p "$(dirname "$TAR")"
+        # minbase follows the archive's priorities, and Raspbian bookworm's
+        # leave apt out, so it is asked for. archive.raspbian.org drops the
+        # odd TLS connection mid-download, so apt retries, here and in
+        # every later apt run in the root (--aptopt stays in its apt.conf.d).
         sudo mmdebstrap --variant=minbase --architectures=armhf \
-          --include=ca-certificates \
+          --include=apt,ca-certificates \
+          --aptopt='Acquire::Retries "5"' \
           --setup-hook='mkdir -p "$1/usr/share/keyrings"' \
           --setup-hook="copy-in $keyring /usr/share/keyrings/" \
           --customize-hook="$HOOK" \

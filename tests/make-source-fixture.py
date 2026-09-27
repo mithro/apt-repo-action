@@ -15,8 +15,13 @@ repository at <url>/<suite>/ that has it as a `[[depends]]` in
 --declare-only leaves out the Build-Depends, so a build that fails can only
 have failed on the repository itself (a wrong key, no Release).
 
+--any adds an architecture-dependent package, apt-repo-selftest-hello: a C
+command that prints its version for `apt-repo-selftest-hello --version` and,
+for `--cpu-arch`, the ARM architecture it was compiled for (__ARM_ARCH), so
+a test can tell a Raspbian ARMv6 build from a Debian ARMv7 one.
+
 Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog]
-           [--depends <url> --depends-key <url> [--declare-only]]
+           [--depends <url> --depends-key <url> [--declare-only]] [--any]
 """
 import argparse
 import os
@@ -46,6 +51,56 @@ apt-repo-selftest-src (0.0) unstable; urgency=medium
 """,
     "debian/rules": "#!/usr/bin/make -f\n%:\n\tdh $@\n",
     "debian/source/format": "3.0 (native)\n",
+}
+
+ANY_PACKAGE = """
+Package: apt-repo-selftest-hello
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: apt-repo-action build-deb self-test command
+ Built by the self-test to prove build-deb builds architecture-dependent code.
+"""
+
+ANY_FILES = {
+    "hello.c": r"""#include <stdio.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        puts("apt-repo-selftest-hello " VERSION);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--cpu-arch") == 0) {
+#ifdef __ARM_ARCH
+        printf("%d\n", __ARM_ARCH);
+#else
+        puts("none");
+#endif
+        return 0;
+    }
+    puts("hello");
+    return 0;
+}
+""",
+    "Makefile": """\
+VERSION ?= unknown
+all: apt-repo-selftest-hello
+apt-repo-selftest-hello: hello.c
+\t$(CC) $(CPPFLAGS) $(CFLAGS) -DVERSION='"$(VERSION)"' $(LDFLAGS) -o $@ $<
+install: apt-repo-selftest-hello
+\tinstall -D -m 755 apt-repo-selftest-hello $(DESTDIR)/usr/bin/apt-repo-selftest-hello
+clean:
+\trm -f apt-repo-selftest-hello
+""",
+    "debian/rules": """\
+#!/usr/bin/make -f
+include /usr/share/dpkg/pkg-info.mk
+export VERSION = $(DEB_VERSION)
+%:
+\tdh $@
+override_dh_auto_install:
+\tdh_auto_install --destdir=debian/apt-repo-selftest-hello
+""",
 }
 
 LEGACY = """\
@@ -81,6 +136,7 @@ def main() -> None:
     ap.add_argument("--depends", metavar="URL", help="the dependency repository's site")
     ap.add_argument("--depends-key", metavar="URL", help="its key")
     ap.add_argument("--declare-only", action="store_true", help="declare it, but don't build-depend on it")
+    ap.add_argument("--any", action="store_true", help="add an architecture-dependent package")
     args = ap.parse_args()
     if bool(args.depends) != bool(args.depends_key):
         ap.error("--depends and --depends-key go together")
@@ -91,6 +147,9 @@ def main() -> None:
                 "Build-Depends: debhelper-compat (= 13)",
                 "Build-Depends: debhelper-compat (= 13), apt-repo-selftest-dep")
         files[".github/apt-packaging.toml"] = DEPENDS.format(url=args.depends, key=args.depends_key)
+    if args.any:
+        files["debian/control"] += ANY_PACKAGE
+        files.update(ANY_FILES)
     if args.legacy:
         files["packaging/deb-version.py"] = LEGACY
     if args.no_changelog:
