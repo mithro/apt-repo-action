@@ -439,7 +439,7 @@ runs:
     # a build that says it was checked must have been.
     - name: Lintian
       id: lintian
-      if: inputs.lintian != 'off'
+      if: inputs.lintian != 'off' && inputs.build == 'true'
       shell: bash
       env:
         SUITE: ${{ inputs.suite }}
