@@ -146,6 +146,12 @@ what a repository gets by default.
    concurrency, `uses: build-deb.yml`, `uses: publish-apt.yml`. `build-deb/`
    (the composite action) stays for repositories that need their own job
    around the build (nfpm, patch series).
+
+   Done, except lintian: `.github/workflows/build-deb.yml` plans the matrix
+   from the declaration (`scripts/build-matrix.py`), builds the Raspbian
+   suites in an ARMv6 root (`build-deb/raspbian/`), runs armhf natively on
+   the arm64 runners, keeps large `-dbgsym` out of apt, and install-tests
+   each suite.
 3. **`publish-apt.yml` enforces what can only be checked at publish time:**
    - refuses to publish from a pull request or any ref but the default
      branch (done);
@@ -250,11 +256,26 @@ that also deletes its own version and build scripts: see
 - **libpio** (fpga-tools): stays date-based under its exception. Moving to
   `0.0+git<N>` needs an epoch.
 
-**Cost.** The default matrix is up to 5 suites × 5 architectures, 25 build
-jobs per push for an architecture-dependent repository, and riscv64, armhf
-and Raspbian run under emulation. fpgas-online runs one job at a time.
-Phase 2 should measure a full matrix on one repository first, and PR
-previews for the slow emulated architectures may need to be limited. That
+**Cost.** The default matrix is 3 Debian suites × 5 architectures plus
+2 Raspbian suites: 17 build jobs and 5 install tests per push for an
+architecture-dependent repository. Measured on 2026-09-27 with
+`tests/fixtures/hello` (a one-file C command), run 36296630494, 5 min
+9 s end to end:
+
+| job | runner | time |
+|---|---|---|
+| amd64, i386 (trixie, forky, sid) | ubuntu-24.04, native | 28–43 s (one i386 79 s) |
+| arm64, armhf (trixie, forky, sid) | ubuntu-24.04-arm, native | 35–40 s |
+| raspbian-trixie, raspbian-forky | ubuntu-24.04-arm, native | 77–88 s, bootstrapping the root (cold cache) |
+| riscv64 (trixie, forky, sid) | ubuntu-24.04, QEMU | 231–258 s |
+| install test, per suite | native | 13–22 s |
+
+Only riscv64 is emulated now: GitHub's arm64 runners (Neoverse-N2) run
+armhf and Raspbian natively, and bootstrapping a Raspbian root takes about
+23 s there against about 140 s under QEMU on x86. riscv64 costs about
+four minutes on a trivial package, and much more on a large one, so it
+sets the wall-clock time. fpgas-online runs one job at a time. PR
+previews for riscv64 may need to be limited on large repositories; that
 would be recorded as an exception to "the same matrix as the default
 branch", not done silently.
 

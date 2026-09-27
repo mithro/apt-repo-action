@@ -1,0 +1,17 @@
+Source: apt-repo-selftest-src
+Section: misc
+Priority: optional
+Maintainer: apt-repo-action self-test <selftest@invalid>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+
+Package: apt-repo-selftest-src
+Architecture: all
+Description: apt-repo-action build-deb self-test fixture
+ Built by the self-test to prove build-deb stamps the right version.
+
+Package: apt-repo-selftest-hello
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: apt-repo-action build-deb self-test command
+ Built by the self-test to prove build-deb builds architecture-dependent code.
