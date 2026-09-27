@@ -89,6 +89,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule) | files on the publishing branch |
 | PKG-README | Set A has `packaging/README.md` | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
+| PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
 | PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else | parse YAML |
@@ -104,7 +105,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
 | PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
-| PKG-DOCS | `## Install` with the setup lines | README |
+| PKG-DOCS | `## Install` with the setup lines, and each dependency repository's | README |
 | REPO-PAGES | Pages from Actions, HTTPS enforced | GitHub API |
 | REPO-KEYS | `<repo>.gpg` binary, `<repo>.asc` armoured | live site |
 | REPO-LAYOUT | flat signed suites, nothing at the root | live site |
