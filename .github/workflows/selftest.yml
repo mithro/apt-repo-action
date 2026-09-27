@@ -269,6 +269,65 @@ jobs:
           assert r["keyring"] == "/etc/apt/keyrings/choosealicense.com.gpg", r["keyring"]
           EOF
 
+  collect-debs-upload:
+    # Artifacts for collect-debs below: one that its pattern is the only
+    # match for, and three for the other, suites with and without a dash.
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - {name: debs-trixie-amd64-selftest-one, deb: one_1_amd64.deb}
+          - {name: debs-bookworm-selftest-many, deb: many-a_1_all.deb}
+          - {name: debs-trixie-amd64-selftest-many, deb: many-b_1_amd64.deb}
+          - {name: debs-raspbian-trixie-armhf-selftest-many, deb: many-c_1_armhf.deb}
+    steps:
+      - name: A placeholder .deb
+        env:
+          DEB: ${{ matrix.deb }}
+        run: mkdir out && echo placeholder > "out/$DEB"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: out/
+
+  collect-debs:
+    # publish-apt.yml's first half, with the workflow's read-only token, as
+    # every caller's publish job has it. download-artifact v5+ extracts a
+    # lone matching artifact with no <name>/ directory, so "one" is the case
+    # that broke the regroup.
+    needs: collect-debs-upload
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: one
+            want: "trixie/one_1_amd64.deb"
+          - case: many
+            want: "bookworm/many-a_1_all.deb trixie/many-b_1_amd64.deb raspbian-trixie/many-c_1_armhf.deb"
+    name: collect-debs (${{ matrix.case }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: Collect
+        id: collect
+        uses: ./collect-debs
+        with:
+          suites: bookworm trixie raspbian-trixie
+          pattern: debs-*-selftest-${{ matrix.case }}
+          dest: apt-repo
+      - name: Each .deb is in its suite, and nothing else is
+        env:
+          WANT: ${{ matrix.want }}
+          COUNT: ${{ steps.collect.outputs.count }}
+        run: |
+          set -eu
+          (cd apt-repo && find . -type f | sed 's|^\./||' | sort) > got
+          # shellcheck disable=SC2086 # one path per word
+          printf '%s\n' $WANT | sort > want
+          diff -u want got
+          test "$COUNT" = "$(wc -l < want)"
+          for s in bookworm trixie raspbian-trixie; do test -d "apt-repo/$s"; done
+
   publish:
     runs-on: ubuntu-latest
     steps:
