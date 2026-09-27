@@ -671,6 +671,8 @@ def install_section(doc: str) -> str | None:
 def setup_problems(section: str, name: str, site: str, fingerprints: list[str]) -> list[str]:
     """What the setup block of docs/conventions.md ("One setup") for `name` at
     `site` is missing from `section`."""
+    # A shell line continuation, inside quotes or not, is one line.
+    section = re.sub(r"[ \t]*\\\n[ \t]*", " ", section)
     probs = []
     if f"{site}/{name}.gpg" not in section or f"/etc/apt/keyrings/{name}.gpg" not in section:
         probs.append(f"no key download from {site}/{name}.gpg into /etc/apt/keyrings")

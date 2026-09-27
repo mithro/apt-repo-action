@@ -266,6 +266,11 @@ class Docs(unittest.TestCase):
                              "/etc/apt/keyrings/example.asc\nhttps://example.org/debian trixie main\n\n## Usage")
         self.assertTrue(self.docs(doc, depends=[third])[0])
 
+    def test_line_continuation(self):
+        doc = README.replace(f"widget.gpg] {SITE}", f"widget.gpg] \\\n    {SITE}")
+        self.assertIn("\\\n    https://", doc)
+        self.assertTrue(self.docs(doc)[0])
+
     def test_forbidden(self):
         doc = README.replace("sudo apt update", "sudo apt update\nlsb_release -cs")
         self.assertEqual(self.docs(doc), (False, "mentions lsb_release"))
