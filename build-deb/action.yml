@@ -332,12 +332,20 @@ runs:
         mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
         depends=()
         if [ -n "$DEPENDS_DIR" ]; then depends=(-v "$DEPENDS_DIR:/work/apt-sources:ro"); fi
+        # The whole git checkout goes in, not only source-dir: the version
+        # is git describe's, and a source-dir below the top has no .git.
+        src="$GITHUB_WORKSPACE/$SOURCE_DIR"
+        if top=$(git -C "$src" rev-parse --show-toplevel); then
+          rel=$(realpath --relative-to="$top" "$src")
+        else
+          top=$src rel=.
+        fi
         docker run --rm --platform "$PLATFORM" \
-          -v "$GITHUB_WORKSPACE/$SOURCE_DIR:/work/src" \
+          -v "$top:/work/repo" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
           "${depends[@]}" \
-          -w /work/src \
+          -w "/work/repo/$rel" \
           -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
           -e GITHUB_REPOSITORY \
           "$IMAGE" bash -ec '
@@ -366,6 +374,6 @@ runs:
             else what=-b; fi
             dpkg-buildpackage -us -uc "$what"
             # dpkg-buildpackage writes to the parent directory.
-            cp /work/*.deb /work/out/
+            cp ../*.deb /work/out/
             ls -lh /work/out/
           '
