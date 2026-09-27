@@ -92,7 +92,6 @@ jobs:
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
       suites: "trixie forky sid"
-      architectures: "amd64 i386 arm64 armhf riscv64"
       description: "What these packages are, in one line"
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}

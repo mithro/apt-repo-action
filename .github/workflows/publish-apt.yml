@@ -18,7 +18,6 @@ name: Publish signed APT repository to Pages
 #       uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
 #       with:
 #         suites: "bookworm trixie sid"
-#         architectures: "amd64 arm64 armhf riscv64"
 #       secrets:
 #         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 
@@ -31,8 +30,10 @@ on:
         type: string
       architectures:
         description: >-
-          Space-separated architectures to advertise in Release. Use "all" for
-          arch-independent packages. riscv64 is only official from trixie on.
+          Deprecated: each suite's Release advertises exactly the
+          architectures its packages have, read from its own Packages index.
+          A value other than "all" only adds a warning when a suite holds an
+          architecture it doesn't list.
         required: false
         default: all
         type: string
