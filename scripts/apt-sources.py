@@ -219,8 +219,14 @@ def pages_site(repo: str) -> str:
         site = json.loads(body).get("html_url") or ""
     except (ValueError, AttributeError):
         site = ""
-    if not site.startswith(("https://", "http://")):
+    if not site:
         raise Error(f"{repo}'s GitHub Pages site has no html_url")
+    # The key apt trusts comes from this site, so it must be https: a Pages
+    # site of ours enforces HTTPS anyway (REPO-PAGES). No private-address
+    # exception here; that is for the explicit form's self-test only.
+    if not site.startswith("https://"):
+        raise Error(f"{repo}'s GitHub Pages site is {site}, not https://: a dependency repository's "
+                    "Pages site must enforce HTTPS, since its key is fetched from it")
     return site.rstrip("/")
 
 

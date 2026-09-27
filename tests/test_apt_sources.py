@@ -128,6 +128,10 @@ class Resolve(unittest.TestCase):
         self.calls.append((url, headers))
         if url == "https://api.example/repos/someone/dep-backport/pages":
             return json.dumps({"html_url": "https://pkgs.example.com/dep-backport/"}).encode()
+        if url == "https://api.example/repos/someone/plain-http/pages":
+            return json.dumps({"html_url": "http://pkgs.example.com/plain-http/"}).encode()
+        if url == "https://api.example/repos/someone/private-http/pages":
+            return json.dumps({"html_url": "http://172.17.0.1:8766/"}).encode()
         raise aps.Error(f"{url}: HTTP 404 Not Found")
 
     def test_ours(self):
@@ -146,6 +150,14 @@ class Resolve(unittest.TestCase):
         with self.assertRaises(aps.Error) as e:
             aps.resolve(aps.validate([{**OURS, "repo": "someone/nothing"}]), "bookworm")
         self.assertIn("can't find someone/nothing's GitHub Pages site", str(e.exception))
+
+    def test_http_site_refused(self):
+        # The key would be fetched over plain http. Not even a private
+        # address: that exception is the explicit form's alone.
+        for repo in ("someone/plain-http", "someone/private-http"):
+            with self.subTest(repo=repo), self.assertRaises(aps.Error) as e:
+                aps.resolve(aps.validate([{**OURS, "repo": repo}]), "bookworm")
+            self.assertIn("must enforce HTTPS", str(e.exception))
 
     def test_explicit(self):
         third, flat = aps.resolve(aps.validate([THIRD, FLAT]), "raspbian-trixie")

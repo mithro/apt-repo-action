@@ -596,6 +596,8 @@ reason = "python3-paho-mqtt (>= 2) is not in bookworm"
 
 - Its site is what GitHub reports for it (the Pages API's `html_url`,
   read with the workflow's token), so a custom domain needs nothing here.
+  It MUST be `https://` (Pages enforcing HTTPS, as REPO-PAGES requires):
+  the key is fetched from it.
 - The source is `<site>/<suite>/ ./`, `<suite>` being the suite being
   built, and the key `<site>/<name>.gpg`, installed as
   `/etc/apt/keyrings/<name>.gpg`: the [one setup](conventions.md#one-setup).
