@@ -236,11 +236,19 @@ runs:
       run: |
         set -eu
         report=$(mktemp -d "$RUNNER_TEMP/lintian.XXXXXX")
-        docker run --rm \
+        # Named explicitly: after an emulated build, the local debian:<suite>
+        # tag is the build's architecture's image, and would run under QEMU.
+        case "$RUNNER_ARCH" in
+          X64)   platform=linux/amd64 ;;
+          ARM64) platform=linux/arm64 ;;
+          *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+        esac
+        docker run --rm --platform "$platform" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/debs:ro" \
           -v "$report:/report" \
           "debian:${SUITE#raspbian-}" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
+            echo "lintian runs on $(dpkg --print-architecture)"
             apt-get update
             apt-get install -y --no-install-recommends lintian
             useradd -m lintian-runner
