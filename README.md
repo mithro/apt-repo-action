@@ -169,7 +169,8 @@ it, with a warning, until it is migrated: see
 `build-deb` then runs `lintian` on the packages it built. Its errors and
 warnings become annotations and a table in the job summary, and don't fail
 the build: set `lintian: error` to make errors fail it, or `lintian: off` to
-skip it (see [Package contents](docs/packaging.md#package-contents)).
+skip it. lintian not being able to run at all fails the build in either mode
+(see [Package contents](docs/packaging.md#package-contents)).
 
 A build dependency Debian doesn't have for a suite comes from a dependency
 repository, ours or anyone else's, declared as a `[[depends]]` in the

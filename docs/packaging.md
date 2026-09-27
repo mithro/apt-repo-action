@@ -510,10 +510,16 @@ To check it worked, look at any `build-deb` job of that commit:
   build yet.
   - `build-deb` runs it after the build and shows each error and warning as
     a warning annotation, and all of them in the job summary.
-  - Its `lintian` input is `warn` by default. `error` makes a lintian error
-    fail the build, for a repository that has fixed its errors and wants to
-    keep them fixed. `off` is for a build whose packages are checked
-    elsewhere, and needs a reason like any other exception.
+  - Its `lintian` input is `warn` by default: lintian's findings never fail
+    the build. `error` makes a lintian error fail the build, for a
+    repository that has fixed its errors and wants to keep them fixed. `off`
+    is for a build whose packages are checked elsewhere, and needs a reason
+    like any other exception.
+  - **lintian not being able to run fails the build**, in `warn` as well as
+    `error`: the image can't be pulled, apt can't install lintian, or
+    lintian or the report crashes. A build that says it was checked must
+    have been. apt retries each download three times first, so a brief
+    mirror failure doesn't fail it.
   - It runs in `debian:<codename>` on the runner's own architecture, not
     under QEMU, whatever the build's architecture.
 

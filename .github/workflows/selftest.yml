@@ -184,15 +184,15 @@ jobs:
 
   build-deb-lintian-cannot-run:
     # lintian failing to run at all (here: its package can't be installed)
-    # is a warning in warn mode, where the build must still succeed and so
-    # still publish, and a failure in error mode.
+    # fails the build in warn mode as well as error mode: warn only forgives
+    # lintian's findings.
     name: build-deb-lintian-cannot-run (${{ matrix.mode }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {mode: warn, want: success}
+          - {mode: warn, want: failure}
           - {mode: error, want: failure}
     env:
       APT_REPO_ACTION_SELFTEST_LINTIAN_PACKAGE: no-such-package-apt-repo-selftest
