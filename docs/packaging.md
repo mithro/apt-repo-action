@@ -184,6 +184,13 @@ jobs:
 - **An existing `ci.yml`** (tests in a workflow of their own) becomes the
   `test` job in `deb.yml`, and the file is deleted. Update the branch
   protection's required checks in the same change: they name the old jobs.
+  - Several jobs become one `test` job. Its matrix is the old test
+    matrix, and a job that needed only one leg becomes steps of one leg:
+    python-netgear-switch-library's `docs` job is now the documentation
+    build in its Python 3.13 leg (`include: - python-version: "3.13"
+    docs: true`, and `if: matrix.docs` on those steps).
+  - Checks that were a `workflow_run` chain before (build only after `CI`
+    went green) are now `build-deb`'s `needs: test`.
 - **Artifacts** are named `debs-<suite>-<arch>`, with an optional further
   `-<part>` (`debs-bookworm-armhf-openocd-stable`), and kept for
   `retention-days: 14`.
