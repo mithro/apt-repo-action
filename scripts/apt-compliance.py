@@ -120,8 +120,8 @@ RULES = [
     ("PKG-DBGSYM", "Packages", "no `-dbgsym` over 10 MB in the apt repository",
      "Keep debug symbols over 10 MB out of apt (artifact and GitHub Release only)."),
     ("PKG-MAINTAINER", "Metadata", "`Maintainer:` is the expected maintainer", "Set Maintainer: in debian/control."),
-    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup lines",
-     "Add an `## Install` section with the setup lines (README.md, or packaging/README.md for Set A)."),
+    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block, the key's fingerprint, and each dependency repository's setup",
+     "Give README.md (packaging/README.md for Set A) an `## Install` section with docs/conventions.md's setup block, the key's fingerprint, and each dependency repository's setup."),
     ("REPO-PAGES", "Published repository", "Pages built by GitHub Actions, HTTPS enforced",
      "Build Pages from GitHub Actions with HTTPS enforced."),
     ("REPO-KEYS", "Published repository", "`<repo>.gpg` (binary) and `<repo>.asc` (armoured) at the site root",
@@ -576,6 +576,100 @@ def install_test(jobs: dict, action_repo: str) -> tuple[bool, str]:
     return False, f"no `Install test` step in {', '.join(n for n, _ in builders)}"
 
 
+def key_fingerprints(data: bytes) -> list[str]:
+    """The fingerprints of the primary keys in a binary OpenPGP keyring, as
+    40 (v4) or 64 (v6) upper-case hex digits (RFC 9580, 5.5.4)."""
+    import hashlib
+    out, i = [], 0
+    while i < len(data):
+        b = data[i]
+        if not b & 0x80:
+            break  # not a packet: armoured, or garbage
+        if b & 0x40:  # new format
+            tag, o = b & 0x3F, data[i + 1]
+            if o < 192:
+                n, h = o, 2
+            elif o < 224:
+                n, h = ((o - 192) << 8) + data[i + 2] + 192, 3
+            elif o == 255:
+                n, h = int.from_bytes(data[i + 2:i + 6], "big"), 6
+            else:
+                break  # partial lengths: not in a key
+        else:  # old format
+            tag, lt = (b >> 2) & 0x0F, b & 3
+            if lt == 3:
+                break
+            size = 1 << lt
+            n, h = int.from_bytes(data[i + 1:i + 1 + size], "big"), 1 + size
+        body = data[i + h:i + h + n]
+        if tag == 6 and body:
+            if body[0] == 4:
+                out.append(hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper())
+            elif body[0] == 6:
+                out.append(hashlib.sha256(b"\x9b" + len(body).to_bytes(4, "big") + body).hexdigest().upper())
+        i += h + n
+    return out
+
+
+def install_section(doc: str) -> str | None:
+    """The `## Install` section of a README: from a heading that is exactly
+    `## Install` to the next level-2 heading, ignoring `#` lines in code
+    blocks (a shell comment isn't a heading)."""
+    lines, start, fence = doc.splitlines(), None, False
+    for n, l in enumerate(lines):
+        if l.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if start is None and re.fullmatch(r"## Install[ \t]*#*[ \t]*", l):
+            start = n + 1
+        elif start is not None and re.match(r"##(?!#)", l):
+            return "\n".join(lines[start:n])
+    return None if start is None else "\n".join(lines[start:])
+
+
+def setup_problems(section: str, name: str, site: str, fingerprints: list[str]) -> list[str]:
+    """What the setup block of docs/conventions.md ("One setup") for `name` at
+    `site` is missing from `section`."""
+    probs = []
+    if f"{site}/{name}.gpg" not in section or f"/etc/apt/keyrings/{name}.gpg" not in section:
+        probs.append(f"no key download from {site}/{name}.gpg into /etc/apt/keyrings")
+    if not re.search(rf"deb \[signed-by=/etc/apt/keyrings/{re.escape(name)}\.gpg\] {re.escape(site)}/[^\s/]+/ \./",
+                     section):
+        probs.append(f"no sources line for {site}/<suite>/")
+    flat = re.sub(r"\s", "", section).upper()
+    if fingerprints and not any(fp in flat for fp in fingerprints):
+        probs.append("no key fingerprint")
+    return probs
+
+
+@functools.cache
+def pages_site(repo: str) -> str:
+    return ((api(f"repos/{repo}/pages") or {}).get("html_url") or "").rstrip("/")
+
+
+def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list[dict]) -> tuple[bool, str]:
+    """PKG-DOCS (docs/packaging.md, "Documentation"): an `## Install` section
+    with this repository's setup block, its key's fingerprint, and the setup
+    of each dependency repository, and nothing conventions.md forbids."""
+    section = install_section(doc or "")
+    if section is None:
+        return False, "no `## Install` section"
+    probs = setup_problems(section, name, site, key_fingerprints(key)) if site else ["no Pages site to set up"]
+    for e in depends:
+        if "repo" in e:
+            dep_site = pages_site(e["repo"])
+            probs += [f"dependency {e['name']}: {p}" for p in
+                      (setup_problems(section, e["name"], dep_site, []) if dep_site else ["no Pages site"])]
+        else:
+            url = e["url"].partition("{")[0]
+            if e["key"] not in section or f"/etc/apt/keyrings/{e['name']}." not in section or url not in section:
+                probs.append(f"dependency {e['name']}: no setup for {url} with {e['key']}")
+    probs += [f"mentions {p}" for p in INDEX_FORBIDDEN if p in section]
+    return not probs, "; ".join(probs) if probs else "Install section with the setup and the key fingerprint"
+
+
 def changelog(files: list[str], gitignore: str | None, kind: str, nfpm: bool) -> tuple[bool | None, str]:
     """PKG-CHANGELOG (docs/packaging.md, "The changelog"): Set B commits no
     changelog, a patch series' templates included, and with `debian/` at the
@@ -818,15 +912,10 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         found = m.group(1).strip() if m else "none"
         put("PKG-MAINTAINER", found == args.maintainer, found)
     doc_path = "packaging/README.md" if kind == "A" else "README.md"
-    doc = f[doc_path] or ""
-    line = f"signed-by=/etc/apt/keyrings/{f['name']}.gpg]"
-    heading = bool(re.search(r"^##+ Install", doc, re.M))
-    # Installing needs each dependency repository too, on its suites.
-    no_dep = [e["name"] for e in t["depends"] if f"signed-by=/etc/apt/keyrings/{e['name']}.gpg]" not in doc]
-    put("PKG-DOCS", heading and line in doc and not no_dep,
-        f"{doc_path}: " + ("Install section with the setup" if heading and line in doc else
-                           "setup lines but no `## Install`" if line in doc else "no setup lines")
-        + (f"; no setup for dependency repository {', '.join(no_dep)}" if no_dep else ""))
+    site_url = (f["site"] or {}).get("site")
+    key = ((f["site"] or {}).get("root") or {}).get(f"{f['name']}.gpg", (0, b""))[1]
+    ok, detail = docs(f[doc_path], f["name"], site_url, key, t["depends"])
+    put("PKG-DOCS", ok, f"{doc_path}: {detail}")
 
     # --- Published repository
     pages = f["pages"]

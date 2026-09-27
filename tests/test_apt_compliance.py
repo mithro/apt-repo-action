@@ -7,7 +7,12 @@ Needs PyYAML (python3-yaml), as the script does.
 """
 import importlib.machinery
 import importlib.util
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import yaml
@@ -165,6 +170,130 @@ class Changelog(unittest.TestCase):
     def test_set_a_and_nfpm(self):
         self.assertIsNone(apc.changelog(self.ROOT + ["debian/changelog"], None, "A", False)[0])
         self.assertEqual(apc.changelog(["nfpm.yaml"], None, "B", True), (None, "nfpm build"))
+
+
+SITE = "https://pkgs.example.com/widget"
+FPR = "9DD7CAB5516449861B2243E613136D7A38B0462E"
+README = f"""# widget
+
+## Install
+
+```sh
+sudo install -d -m0755 /etc/apt/keyrings
+curl -fsSL {SITE}/widget.gpg | sudo tee /etc/apt/keyrings/widget.gpg > /dev/null
+## a shell comment, not a heading
+echo "deb [signed-by=/etc/apt/keyrings/widget.gpg] {SITE}/trixie/ ./" \\
+  | sudo tee /etc/apt/sources.list.d/widget.list
+sudo apt update
+```
+
+The signing key is `9DD7 CAB5 5164 4986 1B22  43E6 1313 6D7A 38B0 462E`.
+
+### On bookworm
+
+```sh
+curl -fsSL https://pkgs.example.com/dep-backport/dep-backport.gpg | sudo tee /etc/apt/keyrings/dep-backport.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/dep-backport.gpg] https://pkgs.example.com/dep-backport/bookworm/ ./" \\
+  | sudo tee /etc/apt/sources.list.d/dep-backport.list
+```
+
+## Usage
+
+deb [signed-by=/etc/apt/keyrings/other.gpg] https://example.org/other/trixie/ ./
+"""
+DEP = {"repo": "someone/dep-backport", "name": "dep-backport", "suites": ["bookworm"]}
+
+
+def old_format_key(body: bytes) -> bytes:
+    """A public key packet, old format, two-octet length."""
+    return bytes([0x99]) + len(body).to_bytes(2, "big") + body
+
+
+class Docs(unittest.TestCase):
+    def setUp(self):
+        apc.pages_site.cache_clear()
+        self.addCleanup(apc.pages_site.cache_clear)
+        self.sites = {"someone/dep-backport": "https://pkgs.example.com/dep-backport"}
+        patch = unittest.mock.patch.object(apc, "api", lambda path: {"html_url": self.sites.get(
+            path.removeprefix("repos/").removesuffix("/pages"), "")})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def docs(self, doc, fprs=(FPR,), depends=()):
+        with unittest.mock.patch.object(apc, "key_fingerprints", lambda key: list(fprs)):
+            return apc.docs(doc, "widget", SITE, b"key", list(depends))
+
+    def test_section_bounds(self):
+        section = apc.install_section(README)
+        self.assertIn("On bookworm", section)
+        self.assertNotIn("other.gpg", section)
+        self.assertIsNone(apc.install_section("## Installation\n\n### Install\n"))
+        self.assertEqual(apc.install_section("# x\n## Install ##\nhere\n"), "here")
+
+    def test_complete(self):
+        self.assertEqual(self.docs(README, depends=[DEP]),
+                         (True, "Install section with the setup and the key fingerprint"))
+
+    def test_heading_level_and_text(self):
+        for heading in ("### Install", "## Installation", "# Install"):
+            self.assertEqual(self.docs(README.replace("## Install\n", heading + "\n")),
+                             (False, "no `## Install` section"))
+
+    def test_setup_outside_the_section_does_not_count(self):
+        doc = README.replace("## Install\n", "## Build\n") + "\n## Install\n\nSee above.\n"
+        ok, detail = self.docs(doc)
+        self.assertFalse(ok)
+        self.assertIn(f"no key download from {SITE}/widget.gpg", detail)
+        self.assertIn(f"no sources line for {SITE}/<suite>/", detail)
+
+    def test_fingerprint(self):
+        self.assertEqual(self.docs(README, fprs=["0" * 40]), (False, "no key fingerprint"))
+        self.assertTrue(self.docs(README, fprs=[])[0])  # no key to read: nothing to compare
+
+    def test_dependency_repository(self):
+        ok, detail = self.docs(README.replace("dep-backport", "elsewhere"), depends=[DEP])
+        self.assertFalse(ok)
+        self.assertIn("dependency dep-backport: no key download", detail)
+        self.sites.clear()
+        apc.pages_site.cache_clear()
+        self.assertEqual(self.docs(README, depends=[DEP]), (False, "dependency dep-backport: no Pages site"))
+
+    def test_third_party_dependency(self):
+        third = {"name": "example", "url": "https://example.org/debian", "suite": "{codename}",
+                 "key": "https://example.org/key.asc"}
+        self.assertFalse(self.docs(README, depends=[third])[0])
+        doc = README.replace("## Usage", "curl -fsSL https://example.org/key.asc | sudo tee "
+                             "/etc/apt/keyrings/example.asc\nhttps://example.org/debian trixie main\n\n## Usage")
+        self.assertTrue(self.docs(doc, depends=[third])[0])
+
+    def test_forbidden(self):
+        doc = README.replace("sudo apt update", "sudo apt update\nlsb_release -cs")
+        self.assertEqual(self.docs(doc), (False, "mentions lsb_release"))
+
+    def test_fingerprints_of_a_packet(self):
+        import hashlib
+        body = bytes([4, 0, 0, 0, 0, 22]) + b"x" * 40
+        want = hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper()
+        self.assertEqual(apc.key_fingerprints(old_format_key(body)), [want])
+        # a user ID packet (tag 13, new format) after it is skipped
+        self.assertEqual(apc.key_fingerprints(old_format_key(body) + bytes([0xCD, 3]) + b"abc"), [want])
+        self.assertEqual(apc.key_fingerprints(b"-----BEGIN PGP"), [])
+
+    @unittest.skipUnless(shutil.which("gpg"), "needs gpg")
+    def test_fingerprints_match_gpg(self):
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        home.chmod(0o700)
+        env = {**os.environ, "GNUPGHOME": str(home)}
+
+        def gpg(*a):
+            return subprocess.run(["gpg", "--batch", "--passphrase", "", *a], env=env,
+                                  check=True, capture_output=True).stdout
+        gpg("--quick-gen-key", "apt-compliance test <test@invalid>", "ed25519", "sign", "never")
+        self.addCleanup(subprocess.run, ["gpgconf", "--kill", "gpg-agent"], env=env)
+        want = [l.split(":")[9] for l in gpg("--with-colons", "--fingerprint").decode().splitlines()
+                if l.startswith("fpr:")][:1]
+        self.assertEqual(apc.key_fingerprints(gpg("--export")), want)
 
 
 if __name__ == "__main__":
