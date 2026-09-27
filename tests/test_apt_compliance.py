@@ -321,6 +321,96 @@ jobs:
         self.assertTrue(apc.install_test(nfpm(), ACTION)[0])
 
 
+CONTROL_ANY = "Source: x\n\nPackage: x\nArchitecture: any\n\nPackage: x-doc\nArchitecture: all\n"
+CONTROL_ALL = "Source: x\n\nPackage: x\nArchitecture: all\n"
+
+# Declarations as docs/packaging.md allows them, with what build-matrix.py
+# (the reusable build-deb.yml's planner) does with each: (declaration,
+# debian/control, refused).
+MATRIX_CASES = [
+    ({}, CONTROL_ANY, False),
+    ({}, CONTROL_ALL, True),
+    ({"architectures": "all"}, CONTROL_ALL, False),
+    ({"architectures": "all"}, CONTROL_ANY, True),
+    ({"architectures": "default"}, CONTROL_ANY, False),
+    ({"architectures": ["arm64", "armhf"]}, CONTROL_ANY, False),
+    ({"architectures": "arm64 armhf"}, CONTROL_ANY, False),
+    ({"architectures": ["arm64"]}, CONTROL_ANY, False),
+    ({"architectures": ["arm64", "sparc64"]}, CONTROL_ANY, True),
+    ({"architectures": ["arm64", "arm64"]}, CONTROL_ANY, True),
+    ({"architectures": "all", "suites": ["bookworm", "trixie", "forky", "sid"]}, CONTROL_ALL, False),
+    ({"suites": ["bookworm", "trixie", "forky", "sid", "raspbian-bookworm", "raspbian-trixie"]}, CONTROL_ANY, False),
+    ({"suites": "trixie sid"}, CONTROL_ANY, False),
+    ({"architectures": "all", "suites": ["trixie", "raspbian-trixie"]}, CONTROL_ALL, True),
+    ({"architectures": ["arm64"], "suites": ["trixie", "raspbian-trixie"]}, CONTROL_ANY, True),
+    ({"suites": ["trixie", "raspbian-sid"]}, CONTROL_ANY, True),
+    ({"suites": ["bookworm"], "architectures": ["amd64", "riscv64"]}, CONTROL_ANY, False),
+]
+
+
+class Matrix(unittest.TestCase):
+    def test_defaults(self):
+        m = apc.declared_matrix({}, set(), CONTROL_ANY)
+        self.assertEqual(m["archs"], apc.DEFAULT_ARCH)
+        self.assertEqual(m["suites"], ["trixie", "forky", "sid", "raspbian-trixie", "raspbian-forky"])
+        self.assertTrue(m["arch_default"] and m["suites_default"])
+        self.assertEqual(m["matrix_problems"], [])
+
+    def test_all(self):
+        m = apc.declared_matrix({"architectures": "all"}, set(), CONTROL_ALL)
+        self.assertEqual((m["archs"], m["suites"]), ([], ["trixie", "forky", "sid"]))
+
+    def test_default_is_any(self):
+        self.assertEqual(apc.declared_matrix({"architectures": "default"}, set(), None)["archs"], apc.DEFAULT_ARCH)
+
+    def test_strings_are_words(self):
+        m = apc.declared_matrix({"architectures": "arm64 armhf", "suites": "trixie raspbian-trixie"}, set(), None)
+        self.assertEqual((m["archs"], m["suites"]), (["arm64", "armhf"], ["trixie", "raspbian-trixie"]))
+        self.assertFalse(m["arch_default"] or m["suites_default"])
+
+    def test_undeclared_infers_all_from_control(self):
+        self.assertEqual(apc.declared_matrix(None, {"amd64"}, CONTROL_ALL)["architectures"], "all")
+
+    def test_declared_without_architectures_is_the_default(self):
+        m = apc.declared_matrix({"kind": "B"}, {"all"}, None)
+        self.assertEqual((m["architectures"], m["archs"]), ("any", apc.DEFAULT_ARCH))
+
+    def test_undeclared_infers_all_from_published(self):
+        self.assertEqual(apc.declared_matrix(None, {"all"}, None)["architectures"], "all")
+        self.assertEqual(apc.declared_matrix(None, {"all", "amd64"}, None)["architectures"], "any")
+
+    def test_problems(self):
+        for decl, control, refused in MATRIX_CASES:
+            with self.subTest(decl=decl, control=control.splitlines()[-1]):
+                self.assertEqual(bool(apc.declared_matrix(decl, set(), control)["matrix_problems"]), refused)
+
+    def test_same_as_build_matrix(self):
+        """The same suites and architectures as the reusable workflow builds,
+        and refused exactly when it refuses."""
+        script = SCRIPT.with_name("build-matrix.py")
+        if not script.exists():
+            self.skipTest("no scripts/build-matrix.py (the reusable build-deb.yml)")
+        loader = importlib.machinery.SourceFileLoader("build_matrix", str(script))
+        bm = importlib.util.module_from_spec(importlib.util.spec_from_loader("build_matrix", loader))
+        loader.exec_module(bm)
+        for decl, control, refused in MATRIX_CASES:
+            with self.subTest(decl=decl, control=control.splitlines()[-1]):
+                m = apc.declared_matrix(decl, set(), control)
+                try:
+                    plan = bm.plan(decl, bm.control_architectures(control), "declared", "declared")
+                except bm.Error:
+                    self.assertTrue(refused)
+                    self.assertTrue(m["matrix_problems"])
+                    continue
+                self.assertFalse(refused)
+                self.assertEqual(m["matrix_problems"], [])
+                self.assertEqual(m["suites"], plan["suites"])
+                t = {"archs": m["archs"]}
+                for suite in plan["suites"]:
+                    self.assertEqual(apc.arch_for(suite, t),
+                                     {j["arch"] for j in plan["build"] if j["suite"] == suite}, suite)
+
+
 class Changelog(unittest.TestCase):
     ROOT = ["debian/control", "debian/rules", ".gitignore"]
 

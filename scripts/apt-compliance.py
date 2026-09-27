@@ -505,22 +505,7 @@ def target(f: dict, owner_tag: str | None) -> dict:
             variant = "patch-series"
     t["variant"] = variant or ""
     t["nfpm"] = "nfpm" in wf
-    arch = decl.get("architectures")
-    if arch is None:
-        arch = "all" if all_arch and all_arch <= {"all"} else "any"
-    t["architectures"] = arch
-    archs = [] if arch == "all" else (DEFAULT_ARCH if arch == "any" else list(arch))
-    t["arch_default"] = arch in ("any", "all")
-    suites = decl.get("suites", "default")
-    debian = DEFAULT_DEBIAN if suites == "default" else [s for s in suites if not s.startswith("raspbian-")]
-    t["suites_default"] = suites == "default"
-    want = list(debian)
-    if "armhf" in archs:  # Raspbian is armhf only, and has no sid
-        want += [f"raspbian-{s}" for s in debian if s != "sid"]
-    if suites != "default":
-        want = list(suites)
-    t["suites"] = sorted(want, key=KNOWN_SUITES.index)
-    t["archs"] = archs
+    t.update(declared_matrix(decl if t["declared"] else None, all_arch, f.get("debian/control")))
     t["exceptions"] = dict(decl.get("exceptions", {}))
     t["upstream"] = decl.get("upstream")
     raw = decl.get("depends", [])
@@ -531,6 +516,104 @@ def target(f: dict, owner_tag: str | None) -> dict:
     except apt_sources.Error as e:
         t["depends"], t["depends_error"] = [], str(e)
     return t
+
+
+def words(value, what: str) -> list[str]:
+    """A TOML list of strings, or a space-separated string, as the reusable
+    build-deb.yml's scripts/build-matrix.py reads `suites` and
+    `architectures`."""
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        out = list(value)
+    elif isinstance(value, str):
+        out = value.split()
+    else:
+        raise ValueError(f"{what} must be a string or a list of strings, not {value!r}")
+    dups = sorted({v for v in out if out.count(v) > 1})
+    if dups:
+        raise ValueError(f"{what} lists {', '.join(dups)} twice")
+    return out
+
+
+def control_architectures(text: str) -> list[str]:
+    """The Architecture: of each binary package in a debian/control."""
+    archs = []
+    for stanza in re.split(r"\n\s*\n", text):
+        fields = {}
+        for line in stanza.splitlines():
+            if line[:1] in (" ", "\t", "#") or ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            fields[name.strip().lower()] = value.strip()
+        if "package" in fields and "architecture" in fields:
+            archs.append(fields["architecture"])
+    return archs
+
+
+def declared_matrix(decl: dict | None, published: set[str], control: str | None) -> dict:
+    """The suites and architectures a repository should publish: its
+    declaration's `suites` and `architectures` (docs/packaging.md, "The
+    declaration"), read as the reusable build-deb.yml plans its builds
+    (scripts/build-matrix.py), so the checker expects what the build makes.
+    A declaration without `architectures` means the default set, as it does
+    to build-matrix.py. With no declaration (None), the target is inferred:
+    "all" when debian/control's packages, or failing that the published
+    ones, are all Architecture: all.
+
+    `problems` are what build-matrix.py would refuse the declaration for,
+    failing every build; an unknown name or a wrong type is one of them,
+    and is then left out, so the rest can still be checked."""
+    inferred = decl is None
+    decl = decl or {}
+    problems = []
+    in_control = control_architectures(control) if control is not None else []
+    arch = decl.get("architectures", None if inferred else "any")
+    if arch is None:
+        seen = set(in_control) or published
+        arch = "all" if seen and seen <= {"all"} else "any"
+    if arch == "default":
+        arch = "any"
+    if arch in ("any", "all"):
+        archs = [] if arch == "all" else list(DEFAULT_ARCH)
+    else:
+        try:
+            archs = words(arch, "architectures")
+        except ValueError as e:
+            problems.append(str(e))
+            archs = []
+        unknown = [a for a in archs if a not in DEFAULT_ARCH]
+        if unknown:
+            problems.append(f"unknown architecture {', '.join(unknown)}")
+            archs = [a for a in archs if a in DEFAULT_ARCH]
+    if in_control:
+        dependent = any(a != "all" for a in in_control)
+        if arch == "all" and dependent:
+            problems.append('architectures = "all", but debian/control has architecture-dependent packages')
+        elif arch != "all" and not dependent:
+            problems.append('every package in debian/control is Architecture: all: declare architectures = "all"')
+    suites = decl.get("suites", "default")
+    if suites == "default":
+        want = list(DEFAULT_DEBIAN)
+        if "armhf" in archs:  # Raspbian is armhf only, and has no sid
+            want += [f"raspbian-{s}" for s in DEFAULT_DEBIAN if s != "sid"]
+    else:
+        try:
+            want = words(suites, "suites")
+        except ValueError as e:
+            problems.append(str(e))
+            want = []
+        unknown = [x for x in want if x not in KNOWN_SUITES]
+        if unknown:
+            problems.append(f"unknown suite {', '.join(unknown)}")
+            want = [x for x in want if x in KNOWN_SUITES]
+        raspbian = [x for x in want if x.startswith("raspbian-")]
+        if raspbian and arch == "all":
+            problems.append(f"{' '.join(raspbian)}: an Architecture: all repository publishes only the Debian suites")
+        elif raspbian and "armhf" not in archs:
+            problems.append(f"{' '.join(raspbian)}: the Raspbian suites are armhf only, and the architectures "
+                            "leave armhf out")
+    return {"architectures": arch, "archs": archs, "arch_default": arch in ("any", "all"),
+            "suites": sorted(want, key=KNOWN_SUITES.index), "suites_default": suites == "default",
+            "matrix_problems": problems}
 
 
 def arch_for(suite: str, t: dict) -> set[str]:
@@ -825,6 +908,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     # --- Repository
     if t.get("declaration_error"):
         put("PKG-DECLARED", False, f"{DECLARATION} doesn't parse: {t['declaration_error']}")
+    elif t["declared"] and t["matrix_problems"]:
+        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(t["matrix_problems"]))
     else:
         put("PKG-DECLARED", t["declared"], f"kind {kind}" + (f" ({variant})" if variant else "")
             + ("" if t["declared"] else " — inferred"))
