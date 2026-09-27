@@ -221,6 +221,76 @@ jobs:
           test -z "$ERRORS"
           ls built-debs/*.deb
 
+  deb-version-action:
+    # The version for a build outside build-deb (docs/packaging.md, "The
+    # shared actions"): an nfpm package, as the Go repositories build, and a
+    # patch series' own job. nfpm must keep the version exactly as given.
+    name: deb-version (${{ matrix.case }} ${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: nfpm, suite: trixie, args: "", want: "0.3.post1~deb13"}
+          - {case: nfpm, suite: sid, args: "", want: "0.3.post1"}
+          - {case: patch-series, suite: forky,
+             args: "--owner-tag fpgasonline --upstream-version 20260914",
+             want: "20260914+fpgasonline.0.3.post1~deb14"}
+    env:
+      NFPM_VERSION: 2.47.0
+      NFPM_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: The version, with this checkout of deb-version
+        id: version
+        uses: ./deb-version
+        with:
+          suite: ${{ matrix.suite }}
+          source-dir: fixture-src
+          version-args: ${{ matrix.args }}
+      - name: Check it
+        env:
+          GOT: ${{ steps.version.outputs.version }}
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          echo "version: $GOT (want $WANT)"
+          test "$GOT" = "$WANT"
+      - name: Package it with nfpm, as a Go repository does
+        if: matrix.case == 'nfpm'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          curl -fsSL -o nfpm.deb \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          echo "$NFPM_SHA256  nfpm.deb" | sha256sum -c
+          sudo dpkg -i nfpm.deb
+          mkdir -p dist
+          printf '#!/bin/sh\necho selftest\n' > dist/apt-repo-selftest-nfpm
+          cat > nfpm.yaml <<'NFPM'
+          name: apt-repo-selftest-nfpm
+          arch: amd64
+          platform: linux
+          version: ${VERSION}
+          version_schema: none
+          maintainer: apt-repo-action self-test <selftest@invalid>
+          description: apt-repo-action deb-version self-test fixture
+          contents:
+            - src: ./dist/apt-repo-selftest-nfpm
+              dst: /usr/bin/apt-repo-selftest-nfpm
+              file_info:
+                mode: 0755
+          NFPM
+          nfpm package -p deb -f nfpm.yaml -t dist/
+          ls dist/
+          got=$(dpkg-deb -f dist/*.deb Version)
+          echo "package version: $got (want $VERSION)"
+          test "$got" = "$VERSION"
+
   build-deb-depends:
     # A build dependency only a declared [[depends]] repository has
     # (docs/packaging.md, "The declaration"). The repository is a throwaway,
