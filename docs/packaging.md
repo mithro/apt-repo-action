@@ -425,6 +425,33 @@ For example, from lowest to highest (checked with `dpkg --compare-versions`):
 0.3.post135~deb12           the next push
 ```
 
+### Python packages
+
+`~deb<R>` and `~pr<P>` aren't PEP 440, so a Python build can't be given the
+Debian version as it is. dh-python gives it anyway: when the build
+dependencies include `python3-setuptools-scm`, `python3-flit-scm` or
+`python3-hatch-vcs`, pybuild sets `SETUPTOOLS_SCM_PRETEND_VERSION` to the
+changelog's version, less revision and epoch, with its first `~` turned
+into `-` (`Debian/Debhelper/Buildsystem/pybuild.pm`, dh-python 6.20250414 in
+trixie). ntrip-rtcm3-to-rtcm2p3's first shared build failed that way in
+every suite:
+
+```
+ValueError: Invalid version `0.1.0.post29-deb13~pr5` from source `vcs`
+```
+
+pybuild only sets it when it's unset, so `debian/rules` sets it first, to
+the version up to the first `-` or `~`: the `X.Y[.postN]` hatch-vcs gets
+from git, which the PyPI wheel of the same commit carries. Either form
+does it:
+
+```make
+# ntrip-rtcm3-to-rtcm2p3, sensors2mqtt
+export SETUPTOOLS_SCM_PRETEND_VERSION = $(shell dpkg-parsechangelog -SVersion | sed 's/[-~].*//')
+# rpi-hwid, python-netgear-switch-library (native: no revision)
+export SETUPTOOLS_SCM_PRETEND_VERSION = $(firstword $(subst ~, ,$(shell dpkg-parsechangelog -SVersion)))
+```
+
 ### The changelog
 
 `debian/changelog` in git is not where versions are kept. The build writes
