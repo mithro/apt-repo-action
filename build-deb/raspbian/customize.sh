@@ -10,7 +10,9 @@
 # considered secure since 2026-02-01". That file says to override it by
 # copying it to /etc/crypto-policies/back-ends/apt-sequoia.config, which
 # replaces it. The copy changes that one date and nothing else; it only
-# exists inside these build roots. See README.md.
+# exists inside these build roots. apt can't scope a policy to one source,
+# so it covers every source in the root, and what it widens is only keys
+# bound with SHA-1 self-signatures: README.md, "What the override covers".
 set -eu
 root=$1
 default=$root/usr/share/apt/default-sequoia.config

@@ -114,11 +114,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {suite: raspbian-bookworm, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb12", cpu: "6"}
-          - {suite: raspbian-trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "6"}
-          - {suite: raspbian-forky, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb14", cpu: "6"}
-          - {suite: trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "7"}
-          - {suite: sid, arch: amd64, runner: ubuntu-24.04, arch-all: "false", want: "0.3.post1", cpu: none}
+          - {suite: raspbian-bookworm, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb12", cpu: "6", sequoia: none}
+          - {suite: raspbian-trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "6", sequoia: override}
+          - {suite: raspbian-forky, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb14", cpu: "6", sequoia: override}
+          - {suite: trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "7", sequoia: none}
+          - {suite: sid, arch: amd64, runner: ubuntu-24.04, arch-all: "false", want: "0.3.post1", cpu: none, sequoia: none}
     steps:
       - uses: actions/checkout@v5
 
@@ -159,6 +159,40 @@ jobs:
             echo "::error::armhf was emulated, although this runner runs it natively"
             exit 1
           fi
+
+      # build-deb/raspbian/README.md, "What the override covers": the Sequoia
+      # policy override is in the Raspbian trixie and forky roots, differs
+      # from apt's default in the SHA-1 second-preimage date only, and is in
+      # nothing built and in no Debian image.
+      - name: The Sequoia policy override is only where it should be
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+          SEQUOIA: ${{ matrix.sequoia }}
+        run: |
+          set -eu
+          for f in built-debs/*.deb; do
+            if dpkg-deb -c "$f" | grep -E 'etc/crypto-policies|apt-sequoia'; then
+              echo "::error::$f carries a crypto policy"
+              exit 1
+            fi
+          done
+          docker run --rm --platform "$PLATFORM" -e SEQUOIA "$IMAGE" sh -ec '
+            o=/etc/crypto-policies/back-ends/apt-sequoia.config
+            d=/usr/share/apt/default-sequoia.config
+            ls /etc/crypto-policies/back-ends/ || true
+            if [ "$SEQUOIA" = none ]; then
+              test ! -e "$o"
+              echo "no override, as expected"
+              exit 0
+            fi
+            # Every line but the sha1 one is the same.
+            rest_d=$(grep -v "^sha1.second_preimage_resistance" "$d")
+            rest_o=$(grep -v "^sha1.second_preimage_resistance" "$o")
+            test "$rest_d" = "$rest_o"
+            grep "^sha1.second_preimage_resistance" "$d" "$o"
+            grep -q "^sha1.second_preimage_resistance = 2030-02-01 " "$o"
+            echo "override: the SHA-1 second-preimage date only"'
 
       - name: Install test, in a clean container of the build's image
         env:

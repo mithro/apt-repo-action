@@ -43,11 +43,64 @@ Signing key on A0DA38D0D76E8B5D638872819165938D90FDDD2E is not bound:
 `customize.sh` does what that file says to do: it copies it to
 `/etc/crypto-policies/back-ends/apt-sequoia.config` (which replaces it) with
 that one date moved to 2030-02-01, the date the same policy stops trusting
-rsa2048 keys anyway. Nothing else changes, and only inside these build
-roots. A SHA-1 collision attack doesn't help against the binding signature,
-which already exists: forging a replacement needs a second preimage. The
-bookworm root has apt 2, which verifies with `gpgv`, so the hook does
-nothing there.
+rsa2048 keys anyway. Nothing else in the file changes. The bookworm root has
+apt 2, which verifies with `gpgv`, so the hook does nothing there.
+
+### What the override covers
+
+**It can't be limited to Raspbian's key.** apt 3.0.3 has no per-source or
+per-key signature policy: the sqv method reads one policy for every source,
+from `APT_SEQUOIA_CRYPTO_POLICY` or the first of
+`/etc/crypto-policies/back-ends/apt-sequoia.config`,
+`/var/lib/crypto-config/profiles/current/apt-sequoia.config`, … ,
+`/usr/share/apt/default-sequoia.config` (the paths in
+`/usr/lib/apt/methods/sqv`). None of the options in sources.list(5)
+(`Signed-By`, `Trusted`, `Allow-Insecure`, `Allow-Weak`, …) sets one.
+`Allow-Weak` doesn't help: `apt-get update` on Raspbian's trixie with
+`[signed-by=… allow-weak=yes]` still fails, with sqv's same error. So in a
+Raspbian root the override applies to every source apt verifies there:
+Raspbian's archive, and any [dependency
+repository](../../docs/packaging.md#dependency-repositories) declared for a
+`raspbian-<codename>` suite.
+
+**What it widens, for those sources, is one thing: a signing key whose
+binding self-signatures are SHA-1 is usable again.** Sequoia only applies
+`second_preimage_resistance` to signatures an attacker can't have
+influenced. In the words of
+[`sequoia_openpgp::policy::HashAlgoSecurity`](https://docs.rs/sequoia-openpgp/latest/sequoia_openpgp/policy/enum.HashAlgoSecurity.html):
+"many self signatures only require second pre-image resistance … we need
+collision resistance when a signature is over data that could have been
+influenced by an attacker". A repository's signature over its `InRelease`
+needs collision resistance, and SHA-1's is refused from 2013-02-01 in
+Sequoia's own policy, which the override doesn't touch. Checked with
+sqv 1.3.0 on 2026-09-27, with throwaway RSA-3072 keys, apt's default policy
+and the override:
+
+| key's self-signatures | `InRelease` signed with | default | override |
+|---|---|---|---|
+| SHA-512 | SHA-512 | accepted | accepted |
+| SHA-512 | SHA-1 | refused (2013-02-01) | refused (2013-02-01) |
+| SHA-1 | SHA-512 | refused (2026-02-01) | **accepted** |
+| SHA-1 | SHA-1 | refused (2026-02-01) | refused (2013-02-01) |
+
+Only the third row changes, and it is Raspbian's case. Abusing it needs a
+new binding signature on the key that matches an existing SHA-1 one: a
+second preimage, which nobody has shown for SHA-1 (the published attacks
+are collisions). And that key still has to be the one the source's
+`signed-by` names.
+
+**Where the override is, and isn't:**
+- in the Raspbian root image: the build container, and the install test's,
+  which has to be the same root to install from Raspbian's archive;
+- in the week's cache of that root, in the calling repository's Actions
+  cache. The image is imported into the job's docker, never pushed;
+- not in any built package. The build packages `debian/<package>/` only,
+  and the self-test checks that no built `.deb` contains
+  `etc/crypto-policies`;
+- not in `debian:<suite>` builds or their install tests. The self-test
+  checks that the Debian armhf install test's container has no override,
+  and that the Raspbian root's differs from apt's default in that one line
+  only.
 
 Checked with sqv 1.3.0 on 2026-09-27 against the `InRelease` of trixie (apt
 3.0.3) and forky (apt 3.3.3, same policy date): exit 1
