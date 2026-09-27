@@ -20,11 +20,14 @@ versions. This README covers using the workflow.
 | `action.yml` | composite | Index and sign a tree of per-suite `.deb` directories |
 | `.github/workflows/publish-apt.yml` | reusable workflow | Collect build artifacts → index+sign → deploy to Pages |
 | `build-deb/action.yml` | composite | `dpkg-buildpackage` in `debian:<suite>` for one architecture |
+| `collect-debs/action.yml` | composite | Download a run's `debs-<suite>-<arch>` artifacts into one directory per suite (publish-apt's first step) |
 | `scripts/make-index.py` | script | Generate the repository landing page |
+| `scripts/collect-debs.py` | script | List the run's artifacts for `collect-debs`, and regroup their `.deb`s by suite |
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
 | `scripts/keep-history.py` | script | Keep earlier package versions from the live site, up to `size-limit-mb` |
 | `scripts/apt-sources.py` | script | The dependency repositories a declaration's `[[depends]]` names: resolve, fetch the keys, write an apt setup for `build-deb` and install tests |
+| `scripts/lintian-report.py` | script | Turn `build-deb`'s lintian run into annotations, a job-summary table and counts |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |
 
 Most callers want the **reusable workflow** — it owns the `pages: write` /
@@ -117,6 +120,11 @@ The artifact name **must** be `debs-<suite>` or start `debs-<suite>-`, normally 
 further suffixes are allowed (`debs-bookworm-armhf-openocd-stable`). The publish
 workflow regroups each artifact under the longest suite in `suites` that its
 name starts with, so a suite may contain a dash (`debs-raspbian-trixie-armhf`).
+It does so with [`collect-debs/`](collect-debs/action.yml), which lists the run's
+artifacts through the API before downloading them. publish-apt's token has no
+`actions: read`, and that works because the repository is public (the
+self-test checks it with a `contents: read` token). A private repository
+can't publish through it as it is (see docs/packaging.md, "Workflows").
 
 The index page is generated for every repository. To say something about the
 packages, put an HTML fragment in `packaging/apt-intro.html`.
@@ -166,6 +174,12 @@ form, with the `~deb<R>` and `~pr<P>` suffixes of
 repository that still carries its own `packaging/deb-version.py` keeps using
 it, with a warning, until it is migrated: see
 [Moving a repository to the shared build](docs/packaging.md#moving-a-repository-to-the-shared-build).
+
+`build-deb` then runs `lintian` on the packages it built. Its errors and
+warnings become annotations and a table in the job summary, and don't fail
+the build: set `lintian: error` to make errors fail it, or `lintian: off` to
+skip it. lintian not being able to run at all fails the build in either mode
+(see [Package contents](docs/packaging.md#package-contents)).
 
 A build dependency Debian doesn't have for a suite comes from a dependency
 repository, ours or anyone else's, declared as a `[[depends]]` in the

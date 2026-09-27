@@ -80,32 +80,41 @@ live sites, checks each rule, and writes the tables and per-repository todo
 lists (HTML), one checklist per repository (Markdown, the body of the
 repository's issue in section 4), and everything as JSON.
 
+- `--repo owner/name` (repeatable) checks only those repositories, with no
+  scan of the owners' others: seconds, not minutes.
+- `--local PATH` checks a checkout before it is pushed: its workflows,
+  declaration, `debian/`, README and `.gitignore` as they would be
+  committed (tracked files, and untracked ones git doesn't ignore). The
+  branch, the history and the live site still come from GitHub. The
+  repository is `--repo`, or the checkout's origin.
+
 | ID | rule | how it's checked |
 |---|---|---|
-| PKG-DECLARED | the kind is declared | `.github/apt-packaging.toml` parses |
+| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, and `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures` |
 | PKG-BRANCH | default branch `packaging` (A) or `main` (B), and it publishes | GitHub API, last Pages deployment |
 | PKG-HISTORY | Set A carries upstream's history | fork, or commits by others before the repository existed |
 | PKG-UPSTREAM | Set A has an `upstream` branch | GitHub API |
 | PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule) | files on the publishing branch |
 | PKG-README | Set A has `packaging/README.md` | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
+| PKG-CHANGELOG | Set B commits no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |
 | PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
-| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else | parse YAML |
+| PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else; every `workflow_run` job guarded against pull requests | parse YAML, every workflow |
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
 | PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |
-| PKG-SHARED | shared build at `@main`; no local `deb-version.py` | YAML + tree |
-| PKG-INSTALL-TEST | an `Install test` step | YAML |
-| PKG-SUITES | default suites, or declared with a reason | live site |
-| PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site |
+| PKG-SHARED | shared build at `@main`: the reusable `build-deb.yml`, the `build-deb` action, or the `deb-version` action for an nfpm build or a patch series' own job; every use at `@main`; no local `deb-version.py` | YAML + tree |
+| PKG-INSTALL-TEST | an `Install test` step that runs something, in the job that builds (or the shared `build-deb.yml`) | YAML |
+| PKG-SUITES | default suites, or declared with a reason | live site, against the declaration read as `build-deb.yml` plans its builds |
+| PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site, against the declaration read as `build-deb.yml` plans its builds |
 | PKG-NODATES | no date in a version | live `Packages` |
 | PKG-VERSION | version matches its kind's form; no epoch | live `Packages` |
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
 | PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
-| PKG-DOCS | `## Install` with the setup lines, and each dependency repository's | README |
+| PKG-DOCS | a `## Install` section (that exact heading) holding the setup block for one suite, the name of every published suite, the key's fingerprint (read from the live key) and each dependency repository's setup; nothing conventions.md forbids | README, live key |
 | REPO-PAGES | Pages from Actions, HTTPS enforced | GitHub API |
 | REPO-KEYS | `<repo>.gpg` binary, `<repo>.asc` armoured | live site |
 | REPO-LAYOUT | flat signed suites, nothing at the root | live site |
@@ -165,12 +174,27 @@ what a repository gets by default.
 ## 4. Continuous checking
 
 - **Nightly `compliance.yml` in apt-repo-action** runs
-  `scripts/apt-compliance.py`, then:
-  - publishes the report on apt-repo-action's own Pages site: the tables
-    and todo lists of the compliance report, from live data;
-  - keeps **one issue per non-compliant repository**, in that repository,
-    titled `apt conventions: N rules failing`. The body is the todo list as
-    checkboxes, and it closes itself when the repository passes.
+  `scripts/apt-compliance.py` over the owners named in the workflow (and on
+  `workflow_dispatch`, with owners and maintainer as inputs). It exists, and
+  so far only:
+  - keeps `report.{html,md,json}` as the run's `compliance-report`
+    artifact;
+  - writes the Markdown checklists into the run's job summary.
+
+  It changes nothing anywhere. The run's own token suffices: a scan makes
+  about 250 API requests, and every packaging repository is public. That
+  token sees only an organisation's *public* members, though, so in an
+  organisation whose members are all private, an undeclared repository's
+  commits by its own people look like upstream's and its kind is inferred
+  as Set A. A declaration settles the kind, so this ends once every
+  repository has one.
+
+  Still to come:
+  - publishing the report on apt-repo-action's own Pages site;
+  - keeping **one issue per non-compliant repository**, in that
+    repository, titled `apt conventions: N rules failing`. The body is the
+    todo list as checkboxes, and it closes itself when the repository
+    passes. Whether to do this is still to be decided.
 - **Every build checks itself.** `build-deb.yml` runs `--self` first. A pull
   request that renames a job, drops a trigger or adds an unregistered suite
   gets a warning, or a failure once that rule is enforced, before it
