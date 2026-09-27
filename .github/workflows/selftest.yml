@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: scripts/deb-version.py against docs/packaging.md
+      - name: scripts/deb-version.py and scripts/apt-sources.py against docs/packaging.md
         run: python3 -m unittest discover -v -s tests -p 'test_*.py'
 
   build-deb:
@@ -119,6 +119,133 @@ jobs:
             echo "::error::a package was built without its version"
             exit 1
           fi
+
+  build-deb-depends:
+    # A build dependency only a declared [[depends]] repository has
+    # (docs/packaging.md, "The declaration"). The repository is a throwaway,
+    # signed with this checkout of the action and served from the runner on
+    # the docker bridge, so the build container reaches it and nothing
+    # depends on a live site. The failing cases declare the repository
+    # without build-depending on it: only build-deb's own check can fail them.
+    name: build-deb-depends (${{ matrix.case }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: bookworm, suite: bookworm, key: apt-repo-action.gpg, want: success}
+          - {case: trixie, suite: trixie, key: apt-repo-action.gpg, want: success}
+          - {case: armoured key, suite: trixie, key: apt-repo-action.asc, want: success}
+          - {case: wrong key, suite: trixie, key: stranger.gpg, want: failure}
+          - {case: wrong key bookworm, suite: bookworm, key: stranger.gpg, want: failure}
+          - {case: no key, suite: trixie, key: missing.gpg, want: failure}
+          - {case: no Release, suite: forky, key: apt-repo-action.gpg, want: failure}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Make the dependency repository's package, its key and a stranger's
+        id: fixture
+        run: |
+          set -eu
+          tests/make-fixture.sh dep-repo "bookworm trixie" "$RUNNER_TEMP/private.asc" apt-repo-selftest-dep
+          {
+            echo "private-key<<END_OF_KEY"
+            cat "$RUNNER_TEMP/private.asc"
+            echo "END_OF_KEY"
+          } >> "$GITHUB_OUTPUT"
+          # Another key: the wrong one to trust the repository with.
+          tests/make-fixture.sh stranger trixie "$RUNNER_TEMP/stranger.asc"
+          export GNUPGHOME
+          GNUPGHOME=$(mktemp -d)
+          gpg --batch --import "$RUNNER_TEMP/stranger.asc"
+          mkdir -p dep-repo
+          gpg --batch --export > dep-repo/stranger.gpg
+          gpgconf --kill gpg-agent
+
+      - name: Index and sign it with this checkout of the action
+        uses: ./
+        with:
+          apt-root: dep-repo
+          suites: bookworm trixie
+          gpg-private-key: ${{ steps.fixture.outputs.private-key }}
+
+      - name: Serve it on the docker bridge
+        id: serve
+        run: |
+          set -eu
+          host=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          nohup python3 -m http.server -d dep-repo -b "$host" 8766 > http-server.log 2>&1 &
+          for _ in $(seq 30); do
+            if curl -fsS -o /dev/null "http://$host:8766/trixie/InRelease"; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null "http://$host:8766/trixie/InRelease"
+          echo "url=http://$host:8766" >> "$GITHUB_OUTPUT"
+
+      - name: Make the fixture source tree, declaring the repository
+        env:
+          URL: ${{ steps.serve.outputs.url }}
+          KEY: ${{ matrix.key }}
+          WANT: ${{ matrix.want }}
+        run: |
+          set -eu
+          only=()
+          if [ "$WANT" = failure ]; then only=(--declare-only); fi
+          python3 tests/make-source-fixture.py fixture-src --no-changelog \
+            --depends "$URL" --depends-key "$URL/$KEY" "${only[@]}"
+          cat fixture-src/.github/apt-packaging.toml
+          grep Build-Depends fixture-src/debian/control
+
+      - name: Build with this checkout of build-deb
+        id: build
+        continue-on-error: ${{ matrix.want == 'failure' }}
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: all
+          source-dir: fixture-src
+
+      - name: Check the outcome
+        env:
+          OUTCOME: ${{ steps.build.outcome }}
+          WANT: ${{ matrix.want }}
+        run: |
+          set -eu
+          echo "build: $OUTCOME (want $WANT)"
+          if [ "$OUTCOME" != "$WANT" ]; then
+            echo "::error::the build's outcome was $OUTCOME, not $WANT"
+            exit 1
+          fi
+          if [ "$WANT" = success ]; then
+            ls built-debs/apt-repo-selftest-src_*.deb
+          elif ls built-debs/*.deb; then
+            echo "::error::a package was built without its dependency repository"
+            exit 1
+          fi
+
+  apt-sources-pages:
+    # The `repo = "owner/name"` form against the real GitHub API, with the
+    # workflow's own read-only token: all build-deb has. Only the URLs are
+    # checked, not what the site serves.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve a public repository's Pages site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          printf '[[depends]]\nrepo = "github/choosealicense.com"\nreason = "self-test"\n' > decl.toml
+          python3 scripts/apt-sources.py resolve --declaration decl.toml --suite trixie > resolved.json
+          cat resolved.json
+          python3 - <<'EOF'
+          import json
+          [r] = json.load(open("resolved.json"))
+          assert r["uri"].startswith("http") and r["uri"].endswith("/trixie/"), r["uri"]
+          assert r["dist"] == "./" and r["components"] == [], r
+          assert r["key"] == r["uri"].removesuffix("trixie/") + "choosealicense.com.gpg", r["key"]
+          assert r["keyring"] == "/etc/apt/keyrings/choosealicense.com.gpg", r["keyring"]
+          EOF
 
   publish:
     runs-on: ubuntu-latest
