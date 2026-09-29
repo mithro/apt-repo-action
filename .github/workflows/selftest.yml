@@ -628,8 +628,9 @@ jobs:
           artifacts/debs-trixie-armhf/apt-repo-selftest-hello_${t}_armhf.deb
           EOF
           )
-          # Only this workflow's: the run's other jobs upload artifacts too.
-          got=$(find artifacts/debs-* artifacts/dbgsym-* -type f | sort)
+          # Only this workflow's: the run's other jobs upload artifacts too,
+          # and collect-debs' test artifacts are debs-*-selftest-<case>.
+          got=$(find artifacts/debs-* artifacts/dbgsym-* -type f | grep -v -- '-selftest-[^/]*/' | sort)
           if [ "$got" != "$want" ]; then
             diff <(echo "$want") <(echo "$got") || true
             echo "::error::the artifacts are not the ones expected"
