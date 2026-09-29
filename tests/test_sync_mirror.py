@@ -65,16 +65,18 @@ class SyncMirror(unittest.TestCase):
         git(repo, "add", name)
         git(repo, "commit", "-q", "-m", msg)
 
-    def sync(self, dry_run=False):
+    def sync(self, dry_run=False, default="packaging"):
         cwd = os.getcwd()
         os.chdir(self.work)
         old = dict(os.environ)
         os.environ.update(ENV)
         self.summary = Path(self.tmp.name) / "summary.md"
+        self.outputs = Path(self.tmp.name) / "outputs"
         os.environ["GITHUB_STEP_SUMMARY"] = str(self.summary)
+        os.environ["GITHUB_OUTPUT"] = str(self.outputs)
         try:
-            upstream, build, ours = sm.load(self.decl)
-            return sm.sync(upstream, build, ours, "origin", "packaging", dry_run)
+            upstream, build, ours, patches = sm.load(self.decl)
+            return sm.sync(upstream, build, ours, "origin", default, dry_run, patches)
         finally:
             os.environ.clear()
             os.environ.update(old)
@@ -175,6 +177,71 @@ class SyncMirror(unittest.TestCase):
         before = self.here()
         self.assertTrue(self.sync(dry_run=True))
         self.assertEqual(self.here(), before)
+
+    def output(self):
+        return dict(line.split("=", 1) for line in self.outputs.read_text().splitlines())
+
+    def test_empty_default_refused(self):
+        # A scheduled run's event has no repository: its default_branch is "".
+        with self.assertRaisesRegex(sm.Error, "default branch is empty"):
+            self.sync(default="")
+
+    def test_remote_head_is_always_ours(self):
+        # Even with a wrong --default, the branch the remote's HEAD names
+        # (packaging) is never overwritten by an upstream branch of that name.
+        before = self.here()["refs/heads/packaging"]
+        git(self.up, "branch", "-q", "packaging")
+        self.sync(default="main")
+        self.assertEqual(self.here()["refs/heads/packaging"], before)
+
+    def test_patch_branches_and_archive_tags_are_ours(self):
+        # Ours here: a patch branch and an archive tag; upstream has both names.
+        git(self.work, "push", "-q", "origin", "packaging:refs/heads/patches/greeting")
+        git(self.work, "push", "-q", "origin", "packaging:refs/tags/archive/patches/greeting/2026-09-29")
+        before = self.here()
+        git(self.up, "branch", "-q", "patches/greeting")
+        git(self.up, "tag", "archive/patches/greeting/2026-09-29")
+        self.sync()
+        after = self.here()
+        for n in ("refs/heads/patches/greeting", "refs/tags/archive/patches/greeting/2026-09-29"):
+            self.assertEqual(after[n], before[n], n)
+        # And a patch branch upstream doesn't have is never deleted.
+        self.assertIn("refs/heads/patches/greeting", after)
+
+    def patched(self, conflicting):
+        """A patch branch on master here, pinned; then upstream moves master."""
+        self.sync()
+        git(self.work, "fetch", "-q", "origin", "master:master")
+        git(self.work, "checkout", "-q", "-b", "patches/greeting", "master")
+        self.commit(self.work, "our greeting", name="greeting")
+        pin = git(self.work, "rev-parse", "HEAD")
+        git(self.work, "push", "-q", "origin", "patches/greeting")
+        git(self.work, "checkout", "-q", "packaging")
+        self.decl.write_text(self.decl.read_text() + f'[[mirror.patches]]\nbranch = "patches/greeting"\ncommit = "{pin}"\n')
+        self.commit(self.up, "upstream's own" if conflicting else "two", name="greeting" if conflicting else "f")
+
+    def test_patches_still_apply(self):
+        self.patched(conflicting=False)
+        self.assertTrue(self.sync())
+        self.assertEqual(self.output(), {"build": "true", "patch-conflict": ""})
+
+    def test_patches_dont_apply(self):
+        self.patched(conflicting=True)
+        self.assertFalse(self.sync())
+        out = self.output()
+        self.assertEqual(out["build"], "false")
+        self.assertIn("patches/greeting: greeting/0001-our-greeting.patch doesn't apply to master", out["patch-conflict"])
+        # The copy is still exact; the build just isn't started.
+        self.assertEqual(self.here()["refs/heads/master"], sm.refs(str(self.up))["refs/heads/master"])
+        self.assertIn("Not building", self.summary.read_text())
+
+    def test_build_output_survives_refused_tags(self):
+        hook = self.ours / "hooks/update"
+        hook.write_text('#!/bin/sh\ncase "$1" in refs/tags/*) exit 1 ;; esac\n')
+        hook.chmod(0o755)
+        self.assertTrue(self.sync())
+        self.assertEqual(self.output()["build"], "true")
+        self.assertIn("refused refs/tags/0.9.2", self.summary.read_text())
 
     def test_declaration(self):
         self.decl.write_text('kind = "B"\n')
