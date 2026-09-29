@@ -983,6 +983,8 @@ upstream = "https://github.com/tmux/tmux"      # Set A; a mirror's: the git URL 
 architectures = "any"       # "any" (the default set), "all", or a list: ["arm64"]
 suites = "default"          # "default", or the full list:
                             # ["bookworm", "trixie", "forky", "sid"]
+owners = ["fpgas-online"]   # optional: other GitHub owners whose repositories
+                            # are ours too (see "Bundling a dependency repository")
 
 [exceptions]                # rule ID = reason, for every rule not followed
 PKG-SUITES = "fpgas.online uses it"
@@ -1094,11 +1096,22 @@ reason = "python3-paho-mqtt (>= 2) is not in bookworm"
 ```
 
 - **Whose.** Bundling re-signs the dependency's packages with our key, so
-  our users trust them as ours. `bundle = true` is only for a `repo` with
-  the same GitHub owner as the repository declaring it. Anything else, a
-  `repo` of another owner included, must say `bundle = "third-party"`,
-  only when we vouch for that repository; an explicit (non-`repo`) one
-  must also be a flat repository. PKG-DEPENDS applies the same rule.
+  our users trust them as ours. `bundle = true` is only for a `repo` of
+  one of our owners: the declaring repository's own, and any GitHub owners
+  the declaration lists in `owners`, for one person or project spread over
+  several users and organisations:
+
+  ```toml
+  owners = ["fpgas-online"]      # in mithro/sensors2mqtt: fpgas-online's repositories are ours too
+  ```
+
+  Anything else, a `repo` of another owner included, must say
+  `bundle = "third-party"`, only when we vouch for that repository; an
+  explicit (non-`repo`) one must also be a flat repository. The list is in
+  the declaration, not a workflow input, because everything that applies
+  the rule reads the declaration already: publish-apt's bundling, the
+  install test, `refresh-bundled.yml` and PKG-DEPENDS, which applies the
+  same rule. Nothing in apt-repo-action names any owner.
 - **Which packages.** Each `Depends` and `Pre-Depends` relation of ours
   that the dependency repository can satisfy (the package at a version the
   relation allows, or a `Provides`; a versioned relation only by a

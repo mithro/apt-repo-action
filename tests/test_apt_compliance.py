@@ -842,14 +842,20 @@ class Bundle(unittest.TestCase):
 
     def test_bundle_true_is_for_the_same_owner(self):
         # PKG-DEPENDS applies apt-sources.py's rule with the repository's owner.
-        def target(repo):
-            decl = ('kind = "B"\narchitectures = "all"\n'
+        def target(repo, owners=""):
+            decl = ('kind = "B"\narchitectures = "all"\n' + owners +
                     f'[[depends]]\nrepo = "{repo}"\nbundle = true\nreason = "r"\n')
             f = {"repo": "mithro/widget", "declaration": decl, "site": None, "workflows": {},
                  "files": ["debian/control"], "debian/control": "Package: widget\nArchitecture: all\n"}
             return apc.target(f, None)
         self.assertIn("someone/dep isn't mithro's", target("someone/dep")["depends_error"])
         self.assertIsNone(target("Mithro/dep")["depends_error"])
+        # The declaration's `owners`: the same rule bundling applies.
+        self.assertIsNone(target("fpgas-online/dep", 'owners = ["fpgas-online"]\n')["depends_error"])
+        self.assertIn("isn't fpgas-online or mithro's",
+                      target("someone/dep", 'owners = ["fpgas-online"]\n')["depends_error"])
+        self.assertIn("`owners` must be a list",
+                      target("fpgas-online/dep", 'owners = "fpgas-online"\n')["depends_error"])
 
     def test_not_bundled_is_not_checked(self):
         dep = apc.apt_sources.validate([{"repo": "o/dep", "reason": "r"}])
