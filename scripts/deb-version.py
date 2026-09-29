@@ -241,11 +241,12 @@ def github_repository(src: Path) -> str:
 
 
 def write_changelog(src: Path, tree: Path, version: str, suite: str, repo: str,
-                    fetched: bool = False) -> None:
+                    fetched: str | None = None) -> None:
     """The entry goes in src's debian/changelog; the commit it names is tree's.
 
-    With fetched, src is a Debian source fetched at build time, not a git
-    checkout: its own debian/changelog (Debian's history) stays under ours."""
+    With fetched (the Debian version the pin names), src is a Debian source
+    fetched at build time, not a git checkout: its own debian/changelog
+    (Debian's history) stays under ours, and must be that version's."""
     if not (src / "debian/control").is_file():
         fail(f"{src / 'debian/control'} does not exist, so there is no changelog to write")
     control = (src / "debian/control").read_text()
@@ -268,6 +269,16 @@ def write_changelog(src: Path, tree: Path, version: str, suite: str, repo: str,
     if BUILT_FROM in top:
         fail("the committed debian/changelog starts with a build's generated entry. "
              "Commit the changelog without it: the build adds its own.")
+    if fetched:
+        # The version is built from the pin, the code from the tree: if they
+        # differ (a Debian update fetched under an old pin), the package
+        # would carry one version's code under the other's number, and
+        # Debian's own build of the newer version would replace ours.
+        m = re.match(r"\S+ \(([^)]+)\)", old)
+        have = m.group(1) if m else None
+        if have != fetched:
+            fail(f"the fetched debian/changelog is for {have or 'no version'}, not "
+                 f"--upstream-debian-version {fetched}: the tree isn't the pinned source")
     entry = changelog_entry(control_field(control, "Source"), version, suite, repo,
                             git(tree, "rev-parse", "HEAD"), control_field(control, "Maintainer"),
                             git(tree, "log", "-1", "--format=%cd", "--date=rfc2822"))
@@ -329,7 +340,8 @@ def main() -> None:
                                             args.epoch, debian_source), args.suite, args.pr)
     if args.write_changelog:
         write_changelog(args.source_dir, tree, version, args.suite,
-                        args.repo or github_repository(tree), fetched=debian_source)
+                        args.repo or github_repository(tree),
+                        fetched=args.upstream_debian_version)
     print(version)
 
 

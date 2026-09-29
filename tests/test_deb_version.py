@@ -172,11 +172,15 @@ class Ordering(unittest.TestCase):
         "43.0.0-4+welland.0.0.post1~deb13",
     ]
     BOOKWORM = ["38.0.4-3+deb12u1+insecure1", "38.0.4-3+deb12u1+welland.0.0.post6~deb12"]
+    # A Debian binNMU of the same source sorts below ours (b < w): it doesn't
+    # replace our build, and our pin needs no change for it.
+    BINNMU = ["49.0.0-2+b1", "49.0.0-2+welland.0.0.post6"]
     SID = ["49.0.0-2+insecure1", "49.0.0-2+welland.0.0.post6~deb14",
            "49.0.0-2+welland.0.0.post6"]
 
     def test_order(self):
-        for name in ["ORDER", "PATCH_SERIES", "NFPM", "EPOCH", "DEBIAN_SOURCE", "BOOKWORM", "SID"]:
+        for name in ["ORDER", "PATCH_SERIES", "NFPM", "EPOCH", "DEBIAN_SOURCE", "BOOKWORM", "SID",
+                     "BINNMU"]:
             table = getattr(self, name)
             for lower, higher in zip(table, table[1:]):
                 with self.subTest(table=name, lower=lower, higher=higher):
@@ -376,7 +380,8 @@ class Tree(unittest.TestCase):
         self.addCleanup(shutil.rmtree, fetched)
         (fetched / "debian").mkdir()
         (fetched / "debian/control").write_text(CONTROL)
-        (fetched / "debian/changelog").write_text(PLACEHOLDER)
+        debian = PLACEHOLDER.replace("selftest-src (0.0)", "selftest-src (43.0.0-3+deb13u1)")
+        (fetched / "debian/changelog").write_text(debian)
         self.commit("two")
         sha = self.git("rev-parse", "HEAD")
         args = ["python3", str(SCRIPT), "--source-dir", str(fetched), "--version-tree",
@@ -388,10 +393,27 @@ class Tree(unittest.TestCase):
             "selftest-src (43.0.0-3+deb13u1+welland.0.0.post2~deb13) trixie; urgency=medium\n\n"
             f"  * Built from example/selftest-src@{sha}\n\n"
             " -- Self Test <selftest@invalid>  Thu, 24 Sep 2026 12:00:00 +0000\n\n"
-            + PLACEHOLDER))
+            + debian))
         again = subprocess.run(args, env=self.env, capture_output=True, text=True)
         self.assertNotEqual(again.returncode, 0)
         self.assertIn("generated entry", again.stderr)
+
+    def test_debian_source_must_be_the_pinned_version(self):
+        # The pin says one Debian version and the fetched tree is another (a
+        # stable update fetched under an old pin): refused, not built as the
+        # pin's version with the other's code.
+        fetched = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fetched)
+        (fetched / "debian").mkdir()
+        (fetched / "debian/control").write_text(CONTROL)
+        (fetched / "debian/changelog").write_text(
+            PLACEHOLDER.replace("selftest-src (0.0)", "selftest-src (43.0.0-3+deb13u2)"))
+        r = subprocess.run(["python3", str(SCRIPT), "--source-dir", str(fetched), "--version-tree",
+                            str(self.src), "--suite", "trixie", "--upstream-debian-version",
+                            "43.0.0-3+deb13u1", "--owner-tag", "welland", "--write-changelog"],
+                           env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("43.0.0-3+deb13u2, not --upstream-debian-version 43.0.0-3+deb13u1", r.stderr)
 
     def test_nfpm_tree_has_no_debian(self):
         # A Go repository packaged with nfpm has no debian/: printing the
