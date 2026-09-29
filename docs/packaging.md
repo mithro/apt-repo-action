@@ -569,11 +569,19 @@ Debian has:
 - **Or architecture-independent only**: a repository whose packages are all
   `Architecture: all` builds once per suite, on amd64, and passes
   `architectures: all`.
-- **A restricted set** is allowed only for hardware-specific packages: code
-  that can only run on one piece of hardware. The set is that hardware's
-  architectures, and the exception names the hardware:
-  - Traverse Ten64 (NXP LS1088A): `arm64`;
-  - Raspberry Pi: `arm64`, `armhf`, and the `raspbian-*` suites.
+- **A restricted set** is allowed for exactly two reasons, and the
+  `PKG-ARCH` exception names which:
+  - **Hardware-specific** packages: code that can only run on one piece of
+    hardware. The set is that hardware's architectures, and the exception
+    names the hardware:
+    - Traverse Ten64 (NXP LS1088A): `arm64`;
+    - Raspberry Pi: `arm64`, `armhf`, and the `raspbian-*` suites.
+  - **Upstream restricts it** (Set A and mirrors only): upstream's own
+    packaging lists fewer architectures, so the others can't be built
+    from upstream's code. The set is upstream's, and the exception names
+    where upstream says so. usdr-lib: upstream's `debian/control` gives
+    every compiled package `Architecture: amd64 arm64`. Building for more
+    means carrying our own porting changes, which is a separate decision.
 - Each suite's `Release` advertises exactly the architectures that have
   packages in that suite, plus `all` when some package is
   architecture-independent, and never one with no packages: `publish-apt`
@@ -1226,6 +1234,7 @@ should carry:
 | mithro/scanbd | `kind = "A"`; `PKG-VERSION = "epoch 1: the count-based version sorts below the published 1.5.1+welland4"` |
 | mithro/sensors2mqtt | `kind = "B"`, `architectures = "all"`, bookworm added; `PKG-SUITES = "fpgas.online uses it"`; `[[depends]]` `repo = "mithro/paho-mqtt-bookworm"`, `suites = ["bookworm"]` |
 | mithro/ten64-microcontroller-utility | `kind = "A"`, `architectures = ["arm64"]`; `PKG-ARCH = "hardware-specific: Traverse Ten64"` |
+| mithro/usdr-lib (agreed 2026-09-29) | `kind = "A"`, `architectures = ["amd64", "arm64"]`; `PKG-ARCH = "upstream supports only amd64 and arm64: …"` (its `packaging/debian-bookworm/control`) |
 
 Every other repository declares only its `kind` (and `upstream` or
 `architectures = "all"`).
