@@ -458,6 +458,9 @@ on:
 permissions:
   contents: write # push the mirrored branches and tags
   actions: write # start deb.yml
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 jobs:
   sync:
     runs-on: ubuntu-24.04
@@ -489,7 +492,8 @@ class Mirror(unittest.TestCase):
 
     def test_declaration(self):
         self.assertEqual(apc.mirror_declaration(MIRROR_DECL),
-                         ({"build": "master", "ours": ["github-master", "legacy", "experimental"], "tags": "[0-9]*"}, []))
+                         ({"build": "master", "ours": ["github-master", "legacy", "experimental"], "tags": "[0-9]*",
+                           "patches": []}, []))
         self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "mirror": {"build": "master", "tags": "v[0-9]*"}})[0]["tags"],
                          "v[0-9]*")
         self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "upstream": "git@example.org:x/y.git"})[1], [])
@@ -517,6 +521,53 @@ class Mirror(unittest.TestCase):
         self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace("run: gh workflow run", "run: true # gh workflow run")),
                          (False, "doesn't start deb.yml"))
         self.assertFalse(apc.mirror_sync(MIRROR_SYNC.replace("name: Sync upstream", "name: Mirror"))[0])
+
+    def test_sync_permissions_and_concurrency(self):
+        no_actions = MIRROR_SYNC.replace("  actions: write # start deb.yml\n", "")
+        self.assertEqual(apc.mirror_sync(no_actions), (False, "doesn't grant actions: write"))
+        racing = MIRROR_SYNC.replace("cancel-in-progress: false", "cancel-in-progress: true")
+        self.assertEqual(apc.mirror_sync(racing), (False, "no concurrency group that waits (two syncs could race)"))
+        # With patches, the sync opens an issue when one doesn't apply.
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC, with_patches=True), (False, "doesn't grant issues: write"))
+        both = MIRROR_SYNC.replace("  actions: write # start deb.yml\n", "  actions: write\n  issues: write\n")
+        self.assertTrue(apc.mirror_sync(both, with_patches=True)[0])
+
+    def test_tags_that_cant_be_listed_fail(self):
+        rs = {"name": "tags", "include": ["refs/tags/*"], "exclude": []}
+        ok, detail = self.rules(self.facts(upstream_tags=None, upstream_tags_error="Connection refused",
+                                           tag_rulesets=[rs]))["PKG-SYNC"]
+        self.assertFalse(ok)
+        self.assertIn("couldn't list upstream's tags", detail)
+
+    PIN = "c" * 40
+
+    def patch_facts(self, **x):
+        pin = {"branch": "patches/axfr", "commit": self.PIN, "tip": self.PIN, "base": "a" * 40,
+               "ahead": 2, "behind": 3}
+        pin.update(x)
+        return {**self.facts(patches=[pin]), "files": []}
+
+    def test_patches(self):
+        decl = {**MIRROR_DECL, "mirror": {**MIRROR_DECL["mirror"], "patches": [{"branch": "patches/axfr",
+                                                                               "commit": self.PIN}]}}
+        self.assertEqual(self.rules(self.patch_facts(), decl)["PKG-PATCHES"],
+                         (True, "patches/axfr: 2 commit(s), 3 behind"))
+        self.assertEqual(self.rules(self.patch_facts(tip="d" * 40), decl)["PKG-PATCHES"],
+                         (False, "patches/axfr is at dddddddddddd, but the pin is cccccccccccc"))
+        self.assertEqual(self.rules(self.patch_facts(tip=None), decl)["PKG-PATCHES"][0], False)
+        self.assertIn("isn't based on master", self.rules(self.patch_facts(base=None), decl)["PKG-PATCHES"][1])
+
+    def test_no_patches_and_committed_patches(self):
+        self.assertEqual(self.rules({**self.facts(), "files": []})["PKG-PATCHES"], (None, "no patches"))
+        ok, detail = self.rules({**self.facts(), "files": ["debian/patches/series"]})["PKG-PATCHES"]
+        self.assertFalse(ok)
+        self.assertIn("packaging commits debian/patches/series", detail)
+
+    def test_patch_declaration_problems(self):
+        probs = apc.mirror_declaration({**MIRROR_DECL, "mirror": {"build": "master", "patches": [
+            {"branch": "axfr", "commit": "abc"}]}})[1]
+        self.assertIn("a patch branch is patches/<topic>, not 'axfr'", probs)
+        self.assertIn("axfr's commit must be a full commit id", probs)
 
     def test_in_step(self):
         r = self.rules(self.facts())
@@ -566,7 +617,7 @@ class Mirror(unittest.TestCase):
                 '[mirror]\nbuild = "master"\n')
         t = apc.target(self.target_facts(decl), "fpgasonline")
         self.assertEqual((t["kind"], t["mirror"], t["mirror_problems"]),
-                         ("mirror", {"build": "master", "ours": [], "tags": "[0-9]*"}, []))
+                         ("mirror", {"build": "master", "ours": [], "tags": "[0-9]*", "patches": []}, []))
 
     # fpgas-online/migen's tag ruleset (2026-09-29): only vX.Y, plus upstream's bare tags.
     MIGEN_RULESET = {"name": "Enforce vXX.ZZZ version tags (+ upstream migen tags)", "include": ["refs/tags/*"],

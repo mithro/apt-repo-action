@@ -87,7 +87,8 @@ RULES = [
      "Set A: re-create the repository as a fork of upstream, or import upstream's full history. "
      "A mirror: make packaging an orphan branch."),
     ("PKG-UPSTREAM", "Repository", "Set A has an `upstream` branch mirroring upstream; a mirror's built branch "
-     "is upstream's, exactly (or the last sync was recent and succeeded)",
+     "is upstream's (git ls-remote), or upstream moved since the last sync, which succeeded in the last two days; "
+     "an upstream that can't be reached fails it",
      "Set A: create an `upstream` branch at the upstream commit the packaging is based on. "
      "A mirror: declare `upstream` and `[mirror] build`, and fix the sync."),
     ("PKG-SYNC", "Repository", "Set A has `sync-upstream.yml` (a backport: a scheduled rebuild); a mirror's "
@@ -95,6 +96,10 @@ RULES = [
      "Add .github/workflows/sync-upstream.yml."),
     ("PKG-README", "Repository", "Set A has `packaging/README.md`; a mirror has README.md naming its upstream",
      "Write packaging/README.md (a mirror: README.md): upstream, what we change, how to update."),
+    ("PKG-PATCHES", "Repository", "a mirror's [[mirror.patches]] branches exist, each pin is its branch's tip "
+     "and is based on the built branch, and `packaging` commits no debian/patches",
+     "Push the patch branch, move its pin to the branch's tip in the declaration, or rebase it onto the built "
+     "branch; generate debian/patches in the build (scripts/mirror-patches.py) instead of committing them."),
     ("PKG-DEBIAN", "Repository", "`debian/` at the root of the default branch (a patch series: `packaging/debian/<name>/`)",
      "Move the packaging to debian/ at the root of the default branch."),
     ("PKG-CHANGELOG", "Repository", "Set B and mirrors commit no `debian/changelog`, and `.gitignore` lists it",
@@ -654,10 +659,20 @@ def mirror_declaration(decl: dict) -> tuple[dict, list[str]]:
         tags = "[0-9]*"
     if build and (build in ours or build == "packaging"):
         problems.append(f"[mirror] build {build} is one of our own branches")
-    extra = sorted(set(m) - {"build", "ours", "tags"})
+    patches = m.get("patches", [])
+    if not isinstance(patches, list) or not all(isinstance(x, dict) for x in patches):
+        problems.append("[[mirror.patches]] must be an array of tables")
+        patches = []
+    for x in patches:
+        if not re.fullmatch(r"patches/[A-Za-z0-9._-]+", str(x.get("branch", ""))):
+            problems.append(f"a patch branch is patches/<topic>, not {x.get('branch')!r}")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(x.get("commit", ""))):
+            problems.append(f"{x.get('branch')}'s commit must be a full commit id")
+    patches = [x for x in patches if isinstance(x.get("branch"), str) and isinstance(x.get("commit"), str)]
+    extra = sorted(set(m) - {"build", "ours", "tags", "patches"})
     if extra:
         problems.append(f"[mirror] has unknown keys {', '.join(extra)}")
-    return {"build": build, "ours": ours, "tags": tags}, problems
+    return {"build": build, "ours": ours, "tags": tags, "patches": patches}, problems
 
 
 GITHUB_ACTIONS_APP = 15368  # the app a workflow's GITHUB_TOKEN acts as
@@ -733,8 +748,18 @@ def mirror_facts(f: dict, t: dict) -> dict:
             if r.returncode == 0:
                 out["upstream_tags"] = sorted({line.split("\t")[1] for line in r.stdout.splitlines()
                                                if "\t" in line and not line.endswith("^{}")})
+            else:
+                out["upstream_tags_error"] = (r.stderr.strip().splitlines() or ["git ls-remote failed"])[-1]
         except subprocess.TimeoutExpired:
-            pass
+            out["upstream_tags_error"] = "git ls-remote --tags timed out"
+    out["patches"] = []
+    for x in t["mirror"].get("patches", []):
+        b = api(f"repos/{repo}/branches/{x['branch']}")
+        tip = ((b or {}).get("commit") or {}).get("sha")
+        cmp = api(f"repos/{repo}/compare/{build}...{x['commit']}") if build and out["build_present"] else None
+        out["patches"].append({"branch": x["branch"], "commit": x["commit"], "tip": tip,
+                               "base": ((cmp or {}).get("merge_base_commit") or {}).get("sha"),
+                               "ahead": (cmp or {}).get("ahead_by"), "behind": (cmp or {}).get("behind_by")})
     if not out["build_present"]:
         return out
     # The compare API answers 404, "No common ancestor", for unrelated histories.
@@ -1008,7 +1033,7 @@ def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list
     return not probs, "; ".join(probs) if probs else "Install section with the setup and the key fingerprint"
 
 
-def mirror_sync(text: str | None) -> tuple[bool, str]:
+def mirror_sync(text: str | None, with_patches: bool = False) -> tuple[bool, str]:
     """A mirror's PKG-SYNC: sync-upstream.yml, `Sync upstream`, scheduled,
     and starting deb.yml itself (a push made with the workflow's token starts
     no workflow)."""
@@ -1024,6 +1049,18 @@ def mirror_sync(text: str | None) -> tuple[bool, str]:
         probs.append(f"named “{w.get('name', '')}”, not “{SYNC_NAME}”")
     if "schedule" not in triggers(w):
         probs.append("not scheduled")
+    perms = w.get("permissions") or {}
+    for j in (w.get("jobs") or {}).values():
+        if isinstance(j, dict) and isinstance(j.get("permissions"), dict):
+            perms = {**(perms if isinstance(perms, dict) else {}), **j["permissions"]}
+    need = {"contents": "write", "actions": "write"} | ({"issues": "write"} if with_patches else {})
+    lacking = [f"{k}: {v}" for k, v in need.items() if not (isinstance(perms, dict) and perms.get(k) == v)
+               and perms != "write-all"]
+    if lacking:
+        probs.append(f"doesn't grant {', '.join(lacking)}")
+    conc = w.get("concurrency")
+    if not conc or (isinstance(conc, dict) and str(conc.get("cancel-in-progress", "false")).lower() == "true"):
+        probs.append("no concurrency group that waits (two syncs could race)")
     # What the steps run, without shell comments (a `#` at a line's start or
     # after a space).
     runs = "\n".join(re.sub(r"(^|\s)#.*", "", line) for j in (w.get("jobs") or {}).values() if isinstance(j, dict)
@@ -1069,15 +1106,43 @@ def mirror_rules(f: dict, t: dict, now: float | None = None) -> list[tuple[str, 
             why = ("upstream moved since the last sync, which succeeded" if recent else
                    f"last sync {last['conclusion']} {last['created_at']}" if last else "no sync has run")
             out.append(("PKG-UPSTREAM", recent, f"{build} {ours[:12]}, upstream {theirs[:12]} — {why}"))
-    ok, detail = mirror_sync(f["workflows"].get(SYNC_FILE))
+    ok, detail = mirror_sync(f["workflows"].get(SYNC_FILE), bool(t["mirror"].get("patches")))
     refused = refused_tags(mf.get("upstream_tags") or [], mf.get("tag_rulesets") or [])
+    if mf.get("upstream_tags_error") and mf.get("tag_rulesets"):
+        # A check that can't run fails.
+        ok = False
+        detail += f"; couldn't list upstream's tags to check them against the tag rulesets: {mf['upstream_tags_error']}"
     if refused:
         ok = False
         detail += "; " + "; ".join(
             f"tag ruleset “{n}” refuses upstream's {' '.join(x.removeprefix('refs/tags/') for x in tags[:3])}"
             + (" …" if len(tags) > 3 else "") for n, tags in refused.items())
     out.append(("PKG-SYNC", ok, detail))
+    out.append(("PKG-PATCHES", *mirror_patches(f, t)))
     return out
+
+
+def mirror_patches(f: dict, t: dict) -> tuple[bool | None, str]:
+    """PKG-PATCHES (docs/packaging.md, "Our own patches on a mirror")."""
+    committed = sorted(x for x in f.get("files", []) if x.startswith("debian/patches/"))
+    pins = (f.get("mirror") or {}).get("patches") or []
+    if not pins and not committed:
+        return None, "no patches"
+    probs, fine = [], []
+    if committed:
+        probs.append(f"packaging commits {committed[0]}{' …' if len(committed) > 1 else ''}: generate "
+                     "debian/patches from the patch branches instead")
+    for x in pins:
+        b = x["branch"]
+        if not x["tip"]:
+            probs.append(f"no {b} branch")
+        elif x["tip"] != x["commit"]:
+            probs.append(f"{b} is at {x['tip'][:12]}, but the pin is {x['commit'][:12]}")
+        if not x["base"]:
+            probs.append(f"{b} ({x['commit'][:12]}) isn't based on {t['mirror'].get('build')}")
+        elif x["tip"] == x["commit"]:
+            fine.append(f"{b}: {x['ahead']} commit(s)" + (f", {x['behind']} behind" if x["behind"] else ""))
+    return not probs, "; ".join(probs) if probs else "; ".join(fine)
 
 
 def changelog(files: list[str], gitignore: str | None, kind: str, nfpm: bool) -> tuple[bool | None, str]:
@@ -1177,6 +1242,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     else:
         where = sorted({p.rsplit("/control", 1)[0] for p in f["files"] if p.endswith("debian/control")})
         put("PKG-DEBIAN", False, "no debian/ at the root" + (f" (found {', '.join(where)})" if where else ""))
+    if kind != "mirror":
+        put("PKG-PATCHES", None, "not a mirror")
     put("PKG-CHANGELOG", *changelog(f["files"], f[".gitignore"], kind, t["nfpm"]))
     if t["depends_error"]:
         put("PKG-DEPENDS", False, t["depends_error"])
