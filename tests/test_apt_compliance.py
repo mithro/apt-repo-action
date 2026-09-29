@@ -443,6 +443,126 @@ class Changelog(unittest.TestCase):
         self.assertIsNone(apc.changelog(self.ROOT + ["debian/changelog"], None, "A", False)[0])
         self.assertEqual(apc.changelog(["nfpm.yaml"], None, "B", True), (None, "nfpm build"))
 
+    def test_mirror_is_as_set_b(self):
+        self.assertEqual(apc.changelog(self.ROOT, "/debian/changelog\n", "mirror", False),
+                         (True, "not committed; ignored"))
+        self.assertFalse(apc.changelog(self.ROOT + ["debian/changelog"], None, "mirror", False)[0])
+
+
+# fpgas-online/migen's, on packaging (2026-09-27), trimmed to what matters.
+MIRROR_SYNC = """name: Sync upstream
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: write # push the mirrored branches and tags
+  actions: write # start deb.yml
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - id: mirror
+        run: python3 packaging/sync-mirror.py
+      - if: steps.mirror.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deb.yml --ref packaging --repo "$GITHUB_REPOSITORY"
+"""
+MIRROR_DECL = {"kind": "mirror", "upstream": "https://git.m-labs.hk/M-Labs/migen.git",
+               "mirror": {"build": "master", "ours": ["github-master", "legacy", "experimental"]}}
+
+
+class Mirror(unittest.TestCase):
+    NOW = 1790000000.0  # 2026-09-21T12:53:20Z
+
+    def facts(self, **mirror):
+        m = {"build_present": True, "shared_history": False, "ours": "a" * 40, "theirs": "a" * 40,
+             "theirs_error": None, "sync_runs": []}
+        m.update(mirror)
+        return {"default": "packaging", "mirror": m, "workflows": {"sync-upstream.yml": MIRROR_SYNC}}
+
+    def rules(self, f, decl=MIRROR_DECL):
+        t = {"mirror": apc.mirror_declaration(decl)[0]}
+        return {r: (ok, d) for r, ok, d in apc.mirror_rules(f, t, now=self.NOW)}
+
+    def test_declaration(self):
+        self.assertEqual(apc.mirror_declaration(MIRROR_DECL),
+                         ({"build": "master", "ours": ["github-master", "legacy", "experimental"]}, []))
+        self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "upstream": "git@example.org:x/y.git"})[1], [])
+
+    def test_declaration_problems(self):
+        def probs(**kw):
+            return apc.mirror_declaration({**MIRROR_DECL, **kw})[1]
+        self.assertIn("a mirror's `upstream` must be the git URL it copies", probs(upstream=None))
+        self.assertIn("a mirror needs a [mirror] table with `build`", probs(mirror="master"))
+        self.assertIn("[mirror] build must name the branch the package is built from", probs(mirror={}))
+        self.assertIn("[mirror] build master is one of our own branches",
+                      probs(mirror={"build": "master", "ours": ["master"]}))
+        self.assertIn("[mirror] build packaging is one of our own branches", probs(mirror={"build": "packaging"}))
+        self.assertIn("[mirror] ours must be a list of branch names", probs(mirror={"build": "master", "ours": "x"}))
+        self.assertIn("[mirror] has unknown keys branch", probs(mirror={"build": "master", "branch": "x"}))
+
+    def test_sync(self):
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC), (True, "sync-upstream.yml: scheduled, starts deb.yml"))
+        self.assertEqual(apc.mirror_sync(None), (False, "no sync-upstream.yml"))
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace('  schedule:\n    - cron: "0 6 * * *" # daily 06:00 UTC\n', "")),
+                         (False, "not scheduled"))
+        # Only in a comment: it doesn't start anything.
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace("run: gh workflow run", "run: true # gh workflow run")),
+                         (False, "doesn't start deb.yml"))
+        self.assertFalse(apc.mirror_sync(MIRROR_SYNC.replace("name: Sync upstream", "name: Mirror"))[0])
+
+    def test_in_step(self):
+        r = self.rules(self.facts())
+        self.assertEqual(r["PKG-HISTORY"], (True, "packaging shares no history with master"))
+        self.assertEqual(r["PKG-UPSTREAM"], (True, "master is upstream's (aaaaaaaaaaaa)"))
+        self.assertEqual(r["PKG-SYNC"], (True, "sync-upstream.yml: scheduled, starts deb.yml"))
+
+    def test_shared_history(self):
+        self.assertEqual(self.rules(self.facts(shared_history=True))["PKG-HISTORY"],
+                         (False, "packaging shares history with master"))
+
+    def test_upstream_moved_since_a_recent_sync(self):
+        recent = [{"conclusion": None, "created_at": "2026-09-21T12:00:00Z"},  # running: not counted
+                  {"conclusion": "success", "created_at": "2026-09-21T06:00:00Z"}]
+        ok, detail = self.rules(self.facts(theirs="b" * 40, sync_runs=recent))["PKG-UPSTREAM"]
+        self.assertTrue(ok, detail)
+        self.assertIn("upstream moved since the last sync", detail)
+
+    def test_upstream_moved_and_the_sync_is_failing_or_stale(self):
+        failing = [{"conclusion": "failure", "created_at": "2026-09-21T06:00:00Z"}]
+        stale = [{"conclusion": "success", "created_at": "2026-09-18T06:00:00Z"}]
+        for runs, want in ((failing, "last sync failure"), (stale, "last sync success 2026-09-18"), ([], "no sync has run")):
+            ok, detail = self.rules(self.facts(theirs="b" * 40, sync_runs=runs))["PKG-UPSTREAM"]
+            self.assertFalse(ok)
+            self.assertIn(want, detail)
+
+    def test_upstream_unreachable(self):
+        self.assertEqual(self.rules(self.facts(theirs=None, theirs_error="upstream has no master branch"))["PKG-UPSTREAM"],
+                         (False, "upstream: upstream has no master branch"))
+
+    def test_no_build_branch(self):
+        r = self.rules(self.facts(build_present=False))
+        self.assertEqual(r["PKG-HISTORY"], (False, "no master branch"))
+        self.assertEqual(r["PKG-UPSTREAM"], (False, "no master branch"))
+        r = self.rules(self.facts(), decl={**MIRROR_DECL, "mirror": {}})
+        self.assertEqual(r["PKG-UPSTREAM"], (False, "no [mirror] build declared"))
+
+    def target_facts(self, declaration):
+        return {"declaration": declaration, "site": None, "workflows": {"deb.yml": "run: dpkg-buildpackage"},
+                "fork": True, "branches": ["packaging", "master"], "upstream_authors": [], "files": [],
+                "debian/control": "Source: x\n\nPackage: x\nArchitecture: all\n"}
+
+    def test_declared_not_inferred(self):
+        # A GitHub fork with a packaging default branch is Set A, unless it says otherwise.
+        self.assertEqual(apc.target(self.target_facts(None), "fpgasonline")["kind"], "A")
+        decl = ('kind = "mirror"\nupstream = "https://git.m-labs.hk/M-Labs/migen.git"\narchitectures = "all"\n'
+                '[mirror]\nbuild = "master"\n')
+        t = apc.target(self.target_facts(decl), "fpgasonline")
+        self.assertEqual((t["kind"], t["mirror"], t["mirror_problems"]), ("mirror", {"build": "master", "ours": []}, []))
+
 
 SITE = "https://pkgs.example.com/widget"
 FPR = "9DD7CAB5516449861B2243E613136D7A38B0462E"

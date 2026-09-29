@@ -59,7 +59,9 @@ KNOWN_SUITES = ["bookworm", "trixie", "forky", "sid",
                 "raspbian-bookworm", "raspbian-trixie", "raspbian-forky"]
 DEFAULT_ARCH = ["amd64", "i386", "arm64", "armhf", "riscv64"]
 NO_RISCV64 = {"bookworm"}  # Debian suites without an official riscv64
-DEFAULT_BRANCH = {"A": "packaging", "B": "main", "aggregate": "main"}
+DEFAULT_BRANCH = {"A": "packaging", "B": "main", "mirror": "packaging", "aggregate": "main"}
+KINDS = tuple(DEFAULT_BRANCH)
+SYNC_FILE, SYNC_NAME = "sync-upstream.yml", "Sync upstream"
 JOBS = {"test", "build-deb", "publish-apt", "release"}
 WORKFLOW_FILE, WORKFLOW_NAME = "deb.yml", "Debian packages"
 CONCURRENCY_GROUP = "deb-${{ github.ref }}"
@@ -78,19 +80,24 @@ ARMOUR = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 RULES = [
     ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}, and the build accepts it",
      f"Add {DECLARATION}: kind, and a reason for every exception."),
-    ("PKG-BRANCH", "Repository", "default branch is `packaging` (Set A) or `main` (Set B), and it is what publishes",
+    ("PKG-BRANCH", "Repository", "default branch is `packaging` (Set A, mirror) or `main` (Set B), and it is what publishes",
      "Make the conventional branch the default branch and publish from it."),
-    ("PKG-HISTORY", "Repository", "Set A carries upstream's history (a GitHub fork, or history imported)",
-     "Re-create the repository as a fork of upstream, or import upstream's full history."),
-    ("PKG-UPSTREAM", "Repository", "Set A has an `upstream` branch mirroring upstream",
-     "Create an `upstream` branch at the upstream commit the packaging is based on."),
-    ("PKG-SYNC", "Repository", "Set A has `sync-upstream.yml` (a backport: a scheduled rebuild)",
+    ("PKG-HISTORY", "Repository", "Set A carries upstream's history (a GitHub fork, or history imported); "
+     "a mirror's `packaging` shares none with the branch it builds",
+     "Set A: re-create the repository as a fork of upstream, or import upstream's full history. "
+     "A mirror: make packaging an orphan branch."),
+    ("PKG-UPSTREAM", "Repository", "Set A has an `upstream` branch mirroring upstream; a mirror's built branch "
+     "is upstream's, exactly (or the last sync was recent and succeeded)",
+     "Set A: create an `upstream` branch at the upstream commit the packaging is based on. "
+     "A mirror: declare `upstream` and `[mirror] build`, and fix the sync."),
+    ("PKG-SYNC", "Repository", "Set A has `sync-upstream.yml` (a backport: a scheduled rebuild); a mirror's "
+     "is scheduled and starts deb.yml when the built branch moves",
      "Add .github/workflows/sync-upstream.yml."),
-    ("PKG-README", "Repository", "Set A has `packaging/README.md`",
-     "Write packaging/README.md: upstream, what we change, how to update."),
+    ("PKG-README", "Repository", "Set A has `packaging/README.md`; a mirror has README.md naming its upstream",
+     "Write packaging/README.md (a mirror: README.md): upstream, what we change, how to update."),
     ("PKG-DEBIAN", "Repository", "`debian/` at the root of the default branch (a patch series: `packaging/debian/<name>/`)",
      "Move the packaging to debian/ at the root of the default branch."),
-    ("PKG-CHANGELOG", "Repository", "Set B commits no `debian/changelog`, and `.gitignore` lists it",
+    ("PKG-CHANGELOG", "Repository", "Set B and mirrors commit no `debian/changelog`, and `.gitignore` lists it",
      "Delete the committed debian/changelog and add `debian/changelog` to .gitignore (the build writes it)."),
     ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites",
      f"Fix the [[depends]] entries in {DECLARATION} (docs/packaging.md, \"The declaration\")."),
@@ -490,7 +497,9 @@ def target(f: dict, owner_tag: str | None) -> dict:
     all_arch = {p["Architecture"] for S in ((f["site"] or {}).get("suites") or {}).values() for p in S["packages"]}
     wf = " ".join(code_lines(x) for x in f["workflows"].values())
     has_build = bool(re.search(r"dpkg-buildpackage|build-deb|dpkg-deb|nfpm|debuild", wf))
-    if decl.get("kind") in ("A", "B", "aggregate"):
+    # A mirror is never inferred: a GitHub fork with a `packaging` default
+    # branch (migen) looks like Set A until it says otherwise.
+    if decl.get("kind") in KINDS:
         t["kind"] = decl["kind"]
     elif not has_build:
         t["kind"] = "aggregate"
@@ -510,6 +519,7 @@ def target(f: dict, owner_tag: str | None) -> dict:
     t.update(declared_matrix(decl if t["declared"] else None, all_arch, f.get("debian/control")))
     t["exceptions"] = dict(decl.get("exceptions", {}))
     t["upstream"] = decl.get("upstream")
+    t["mirror"], t["mirror_problems"] = mirror_declaration(decl) if t["kind"] == "mirror" else ({}, [])
     raw = decl.get("depends", [])
     try:
         if not isinstance(raw, list) or not all(isinstance(d, dict) for d in raw):
@@ -618,6 +628,63 @@ def declared_matrix(decl: dict | None, published: set[str], control: str | None)
     return {"architectures": arch, "archs": archs, "arch_default": arch in ("any", "all"),
             "suites": sorted(want, key=KNOWN_SUITES.index), "suites_default": suites == "default",
             "matrix_problems": problems}
+
+
+def mirror_declaration(decl: dict) -> tuple[dict, list[str]]:
+    """A mirror's `upstream` (the git URL copied) and `[mirror]` table
+    (docs/packaging.md, "The declaration"): `build`, the branch the package
+    is built from, and `ours`, our branches besides packaging, which the
+    sync never touches."""
+    problems = []
+    up = decl.get("upstream")
+    if not isinstance(up, str) or not re.match(r"(https|git)://|[\w.-]+@[\w.-]+:", up or ""):
+        problems.append("a mirror's `upstream` must be the git URL it copies")
+    m = decl.get("mirror")
+    if not isinstance(m, dict):
+        return {}, problems + ["a mirror needs a [mirror] table with `build`"]
+    build, ours = m.get("build"), m.get("ours", [])
+    if not isinstance(build, str) or not build:
+        problems.append("[mirror] build must name the branch the package is built from")
+        build = None
+    if not (isinstance(ours, list) and all(isinstance(o, str) for o in ours)):
+        problems.append("[mirror] ours must be a list of branch names")
+        ours = []
+    if build and (build in ours or build == "packaging"):
+        problems.append(f"[mirror] build {build} is one of our own branches")
+    extra = sorted(set(m) - {"build", "ours"})
+    if extra:
+        problems.append(f"[mirror] has unknown keys {', '.join(extra)}")
+    return {"build": build, "ours": ours}, problems
+
+
+def mirror_facts(f: dict, t: dict) -> dict:
+    """What PKG-HISTORY, PKG-UPSTREAM and PKG-SYNC need to know about a
+    mirror, from GitHub and from upstream itself."""
+    repo, build = f["repo"], t["mirror"].get("build")
+    out = {"build_present": bool(build) and build in f["branches"], "shared_history": None,
+           "ours": None, "theirs": None, "theirs_error": None, "sync_runs": []}
+    if not out["build_present"]:
+        return out
+    # The compare API answers 404, "No common ancestor", for unrelated histories.
+    cmp = api(f"repos/{repo}/compare/{build}...{f['default']}")
+    out["shared_history"] = bool(cmp and cmp.get("merge_base_commit"))
+    out["ours"] = ((api(f"repos/{repo}/branches/{build}") or {}).get("commit") or {}).get("sha")
+    if isinstance(t.get("upstream"), str):
+        try:
+            r = subprocess.run(["git", "ls-remote", "--heads", t["upstream"], f"refs/heads/{build}"],
+                               capture_output=True, text=True, timeout=60)
+            line = r.stdout.split()
+            out["theirs"] = line[0] if r.returncode == 0 and line else None
+            if r.returncode != 0:
+                out["theirs_error"] = (r.stderr.strip().splitlines() or ["git ls-remote failed"])[-1]
+            elif not line:
+                out["theirs_error"] = f"upstream has no {build} branch"
+        except subprocess.TimeoutExpired:
+            out["theirs_error"] = "git ls-remote timed out"
+    runs = api(f"repos/{repo}/actions/workflows/{SYNC_FILE}/runs?per_page=5&branch={f['default']}") or {}
+    out["sync_runs"] = [{"conclusion": r.get("conclusion"), "created_at": r.get("created_at")}
+                        for r in runs.get("workflow_runs", [])]
+    return out
 
 
 def arch_for(suite: str, t: dict) -> set[str]:
@@ -869,12 +936,77 @@ def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list
     return not probs, "; ".join(probs) if probs else "Install section with the setup and the key fingerprint"
 
 
+def mirror_sync(text: str | None) -> tuple[bool, str]:
+    """A mirror's PKG-SYNC: sync-upstream.yml, `Sync upstream`, scheduled,
+    and starting deb.yml itself (a push made with the workflow's token starts
+    no workflow)."""
+    if text is None:
+        return False, f"no {SYNC_FILE}"
+    try:
+        w = yaml.safe_load(text) or {}
+    except yaml.YAMLError as e:
+        return False, f"{SYNC_FILE} doesn't parse: {e}"
+    w = w if isinstance(w, dict) else {}
+    probs = []
+    if w.get("name") != SYNC_NAME:
+        probs.append(f"named “{w.get('name', '')}”, not “{SYNC_NAME}”")
+    if "schedule" not in triggers(w):
+        probs.append("not scheduled")
+    # What the steps run, without shell comments (a `#` at a line's start or
+    # after a space).
+    runs = "\n".join(re.sub(r"(^|\s)#.*", "", line) for j in (w.get("jobs") or {}).values() if isinstance(j, dict)
+                     for st in (j.get("steps") or []) if isinstance(st, dict)
+                     for line in str(st.get("run", "")).splitlines())
+    if not re.search(rf"workflow run\s+(\S+\s+)*{re.escape(WORKFLOW_FILE)}\b", runs):
+        probs.append(f"doesn't start {WORKFLOW_FILE}")
+    return not probs, "; ".join(probs) if probs else f"{SYNC_FILE}: scheduled, starts {WORKFLOW_FILE}"
+
+
+def mirror_rules(f: dict, t: dict, now: float | None = None) -> list[tuple[str, bool | None, str]]:
+    """PKG-HISTORY, PKG-UPSTREAM and PKG-SYNC for a mirror (docs/packaging.md,
+    "Mirrors"), from mirror_facts."""
+    import datetime
+    mf, build = f.get("mirror") or {}, t["mirror"].get("build")
+    out = []
+    if not build:
+        out += [("PKG-HISTORY", False, "no [mirror] build declared"),
+                ("PKG-UPSTREAM", False, "no [mirror] build declared")]
+    elif not mf.get("build_present"):
+        out += [("PKG-HISTORY", False, f"no {build} branch"), ("PKG-UPSTREAM", False, f"no {build} branch")]
+    else:
+        shared = mf.get("shared_history")
+        out.append(("PKG-HISTORY", shared is False,
+                    f"{f['default']} shares history with {build}" if shared else
+                    f"{f['default']} shares no history with {build}"))
+        ours, theirs = mf.get("ours") or "", mf.get("theirs") or ""
+        if mf.get("theirs_error"):
+            out.append(("PKG-UPSTREAM", False, f"upstream: {mf['theirs_error']}"))
+        elif ours == theirs:
+            out.append(("PKG-UPSTREAM", True, f"{build} is upstream's ({ours[:12]})"))
+        else:
+            # Upstream may have moved since the last daily sync: fine while
+            # the sync keeps succeeding.
+            done = [r for r in mf.get("sync_runs", []) if r.get("conclusion")]
+            last = done[0] if done else None
+            if now is None:
+                now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+            age = None
+            if last and last.get("created_at"):
+                age = now - datetime.datetime.fromisoformat(last["created_at"].replace("Z", "+00:00")).timestamp()
+            recent = bool(last) and last["conclusion"] == "success" and age is not None and age < 2 * 86400
+            why = ("upstream moved since the last sync, which succeeded" if recent else
+                   f"last sync {last['conclusion']} {last['created_at']}" if last else "no sync has run")
+            out.append(("PKG-UPSTREAM", recent, f"{build} {ours[:12]}, upstream {theirs[:12]} — {why}"))
+    out.append(("PKG-SYNC", *mirror_sync(f["workflows"].get(SYNC_FILE))))
+    return out
+
+
 def changelog(files: list[str], gitignore: str | None, kind: str, nfpm: bool) -> tuple[bool | None, str]:
     """PKG-CHANGELOG (docs/packaging.md, "The changelog"): Set B commits no
     changelog, a patch series' templates included, and with `debian/` at the
     root lists `debian/changelog` in .gitignore, so a local build doesn't
     dirty the tree. Set A keeps its committed one."""
-    if kind != "B":
+    if kind not in ("B", "mirror"):
         return None, "Set A keeps its changelog" if kind == "A" else "no build of its own"
     tracked = sorted(p for p in files if p == "debian/changelog" or p.endswith("/debian/changelog")
                      or re.fullmatch(r"packaging/debian/[^/]+/changelog", p))
@@ -912,8 +1044,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     # --- Repository
     if t.get("declaration_error"):
         put("PKG-DECLARED", False, f"{DECLARATION} doesn't parse: {t['declaration_error']}")
-    elif t["declared"] and t["matrix_problems"]:
-        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(t["matrix_problems"]))
+    elif t["declared"] and (t["matrix_problems"] or t.get("mirror_problems")):
+        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(t["matrix_problems"] + t.get("mirror_problems", [])))
     else:
         put("PKG-DECLARED", t["declared"], f"kind {kind}" + (f" ({variant})" if variant else "")
             + ("" if t["declared"] else " — inferred"))
@@ -922,7 +1054,10 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         f"default {f['default']}" + (f", publishes from {f['build_ref']}" if f["build_ref"] != f["default"] else "")
         + f" (want {want})")
     set_a = kind == "A" and variant != "backport"
-    if set_a:
+    if kind == "mirror":
+        for rule, ok, detail in mirror_rules(f, t):
+            put(rule, ok, detail)
+    elif set_a:
         others = f["upstream_authors"]
         put("PKG-HISTORY", f["fork"] or bool(others),
             f"fork of {f['parent']}" if f["fork"] else
@@ -942,6 +1077,14 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     if kind == "A":
         has = f["packaging/README.md"] is not None
         put("PKG-README", has, "packaging/README.md" if has else "no packaging/README.md")
+    elif kind == "mirror":
+        # On a mirror's orphan packaging branch the root README is ours.
+        up = re.sub(r"(\.git)?/*$", "", t["upstream"]) if isinstance(t.get("upstream"), str) else None
+        if f["README.md"] is None:
+            put("PKG-README", False, "no README.md")
+        else:
+            named = bool(up) and up in f["README.md"]
+            put("PKG-README", named, "README.md names the upstream" if named else f"README.md doesn't name {up}")
     else:
         put("PKG-README", None, f"Set {kind}")
     if kind == "aggregate" or variant == "backport":
@@ -1026,7 +1169,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         put("PKG-SHARED", None, "nothing to build")
     else:
         put("PKG-SHARED", *shared_build(jobs, args.action_repo, "packaging/deb-version.py" in f["files"],
-                                        t["nfpm"], variant))
+                                        t["nfpm"], "patch-series" if kind == "mirror" else variant))
     if kind == "aggregate":
         put("PKG-INSTALL-TEST", None, "nothing to build")
     else:
@@ -1067,7 +1210,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         forms = re.compile(r".+~bpo\d+\+\d+")
     elif kind == "A":
         forms = re.compile(rf"(\d+:)?[^:]+-[^-+]*\+{tag}\d+{suffix}")
-    elif variant == "patch-series":
+    elif variant == "patch-series" or kind == "mirror":
         forms = re.compile(rf"(\d+:)?.+\+{tag}\.\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
     else:
         forms = re.compile(rf"(\d+:)?\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
@@ -1180,14 +1323,17 @@ def to_markdown(report: dict) -> str:
 CSS = """
 :root{--ground:#f4f7f6;--surface:#ffffff;--ink:#17211e;--muted:#5a6964;--line:#d3dcd8;--accent:#2c5a86;
 --pass:#2e7d4f;--pass-bg:#e3f2e8;--fail:#b3261e;--fail-bg:#fbe5e3;--exc:#9a5b00;--exc-bg:#fcefd9;--na:#8a9793;--na-bg:transparent;
---kind-A:#2f5f9e;--kind-A-bg:#e8f0fa;--kind-B:#6a4a9c;--kind-B-bg:#f1ebf8;--kind-aggregate:#4d5d66;--kind-aggregate-bg:#eceff1}
+--kind-A:#2f5f9e;--kind-A-bg:#e8f0fa;--kind-B:#6a4a9c;--kind-B-bg:#f1ebf8;--kind-aggregate:#4d5d66;--kind-aggregate-bg:#eceff1;
+--kind-mirror:#9c3d73;--kind-mirror-bg:#f8e8f1}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--ground:#101615;--surface:#172020;
 --ink:#e2ebe8;--muted:#98a8a2;--line:#2c3936;--accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;
 --fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570;
---kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427}}
+--kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427;
+--kind-mirror:#e7a3c8;--kind-mirror-bg:#34182a}}
 :root[data-theme="dark"]{color-scheme:dark;--ground:#101615;--surface:#172020;--ink:#e2ebe8;--muted:#98a8a2;--line:#2c3936;
 --accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570;
---kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427}
+--kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427;
+--kind-mirror:#e7a3c8;--kind-mirror-bg:#34182a}
 body{background:var(--ground);color:var(--ink);font:15px/1.55 "IBM Plex Sans",system-ui,sans-serif;padding:32px 20px 64px}
 main{max-width:1280px;margin:0 auto;display:grid;gap:36px}
 h1,h2,h3{text-wrap:balance;line-height:1.2;margin:0}h1{font-size:28px;font-weight:600}h2{font-size:20px;font-weight:600}
@@ -1213,16 +1359,16 @@ td.num{font-variant-numeric:tabular-nums;font-weight:600}
 .todo .meta{color:var(--muted);font-size:13px}.todo ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:14px}
 .todo li b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:600}
 tr.kind-A td{background:var(--kind-A-bg)}tr.kind-B td{background:var(--kind-B-bg)}
-tr.kind-aggregate td{background:var(--kind-aggregate-bg)}
+tr.kind-aggregate td{background:var(--kind-aggregate-bg)}tr.kind-mirror td{background:var(--kind-mirror-bg)}
 tr.kind-A td.repo{box-shadow:inset 4px 0 var(--kind-A)}tr.kind-B td.repo{box-shadow:inset 4px 0 var(--kind-B)}
-tr.kind-aggregate td.repo{box-shadow:inset 4px 0 var(--kind-aggregate)}
+tr.kind-aggregate td.repo{box-shadow:inset 4px 0 var(--kind-aggregate)}tr.kind-mirror td.repo{box-shadow:inset 4px 0 var(--kind-mirror)}
 tr[class^="kind-"] td.kind{font-weight:600}tr.kind-A td.kind{color:var(--kind-A)}tr.kind-B td.kind{color:var(--kind-B)}
-tr.kind-aggregate td.kind{color:var(--kind-aggregate)}
+tr.kind-aggregate td.kind{color:var(--kind-aggregate)}tr.kind-mirror td.kind{color:var(--kind-mirror)}
 .k{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:4px}
-.k-A{background:var(--kind-A)}.k-B{background:var(--kind-B)}.k-aggregate{background:var(--kind-aggregate)}
+.k-A{background:var(--kind-A)}.k-B{background:var(--kind-B)}.k-aggregate{background:var(--kind-aggregate)}.k-mirror{background:var(--kind-mirror)}
 .rules{font-size:14px}.rules td{text-align:left;white-space:normal}.rules td:first-child{white-space:nowrap}
 """
-KIND_ORDER = {"A": 0, "B": 1, "aggregate": 2}
+KIND_ORDER = {"A": 0, "mirror": 1, "B": 2, "aggregate": 3}
 SYMBOL = {"pass": "✓", "fail": "✗", "exception": "E", "na": "·"}
 
 
@@ -1247,6 +1393,7 @@ def to_html(report: dict) -> str:
            '<div class="legend"><span><span class="s pass">✓</span> passes</span><span><span class="s fail">✗</span> fails</span>'
            '<span><span class="s exception">E</span> declared exception</span><span><span class="s na">·</span> does not apply</span></div>'
            '<div class="legend">Rows by kind: <span><span class="k k-A"></span>Set A, someone else\'s code</span>'
+           '<span><span class="k k-mirror"></span>mirror, someone else\'s code hosted elsewhere</span>'
            '<span><span class="k k-B"></span>Set B, our code</span>'
            '<span><span class="k k-aggregate"></span>aggregate, collects other repositories\' packages</span></div>'
            "</section>"]
@@ -1343,6 +1490,8 @@ def main() -> int:
     with ThreadPoolExecutor(6) as ex:
         facts = list(ex.map(lambda d: repo_facts(d, args.action_repo), packaging))
     targets = [target(f, owners.get(f["repo"].split("/")[0])) for f in facts]
+    for f, t in zip(facts, targets):
+        f["mirror"] = mirror_facts(f, t) if t["kind"] == "mirror" else None
     if args.repo:
         # Without a scan, look at each dependency repository itself.
         deps = sorted({e["repo"] for t in targets for e in t["depends"] if "repo" in e} - found)
