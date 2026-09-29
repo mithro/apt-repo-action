@@ -42,9 +42,8 @@ Set A). Everything after [Set B](#set-b-our-code) applies to all three.
 
 Set A is for an upstream we fork, patch, and bring up to date by a reviewed
 pull request, usually one on GitHub. An upstream that isn't on GitHub is
-normally a [mirror](#mirrors-someone-elses-code-copied-exactly) instead; one that
-also carries our own patches is [an open question](#open-question-someone-elses-code-with-our-own-patches),
-and stays Set A until it is answered.
+normally a [mirror](#mirrors-someone-elses-code-copied-exactly) instead,
+including one that carries [our own patches](#our-own-patches-on-a-mirror).
 
 - **The repository carries upstream's history.** When upstream is on GitHub,
   it MUST be a GitHub fork of upstream. When upstream isn't on GitHub (and
@@ -117,18 +116,25 @@ a mirror.
   `workflow_dispatch`:
   - it copies every branch and tag of the declared `upstream` here under the
     same name, forced, so each is always identical to upstream's;
-  - **pending Tim's confirmation:** it never deletes anything (a branch
-    upstream deletes stays here, with a warning). That is how migen's sync
-    was written, not yet a decided rule: "identical" copies would delete
-    them too;
-  - it never touches `packaging` or `[mirror] ours`;
+  - **it never deletes anything.** A branch or tag upstream deletes stays
+    here, with a warning: history is never lost, and a package built from
+    it stays reproducible;
+  - it never touches what is ours: `packaging`, `[mirror] ours`, the
+    [patch branches](#our-own-patches-on-a-mirror) (`patches/*`), and our
+    tags (`packaging`'s `v0.0`, `archive/*`);
   - when `[mirror] build`, the branch the package is built from, moved, it
     starts `deb.yml` on `packaging` (`gh workflow run deb.yml --ref
     packaging`). A push made with the workflow's own token doesn't start
     other workflows by itself, so the sync has to.
 
   It needs `contents: write` (to push the copies) and `actions: write` (to
-  start `deb.yml`).
+  start `deb.yml`), `issues: write` with patch branches (below), and a
+  `concurrency` group that doesn't cancel, so two syncs never race.
+  **The workflow token can't push `.github/workflows/` files**, so a mirror
+  of an upstream that has any (most on GitHub) needs a token that can:
+  a GitHub App token or a fine-grained token with Contents and Workflows
+  write, passed as the reusable workflow's `token` secret. That is a
+  repository secret, set by its owner.
 - **The tag ruleset admits upstream's tags.** A mirror copies upstream's
   tags under their own names, so a ruleset that restricts tag names (our
   "only `vX.Y`" one) MUST also admit upstream's: migen's excludes
@@ -137,28 +143,87 @@ a mirror.
   never holds up the branches.
 - **`deb.yml`** runs on a push to `packaging`, when the sync starts it, and
   on pull requests (which never publish). It checks out `packaging`, and the
-  build branch into `src/`, copies `debian/` into `src/`, and builds `src/`.
-- **Nothing in upstream's files is changed.** What the build needs to adapt
-  (migen's `debian/pyproject-compat.py`, for bookworm's setuptools) lives in
-  `debian/` and is undone after the build.
+  build branch into `src/` (with the history, `fetch-depth: 0`, so the
+  pinned patch commits are there too), copies `debian/` into `src/`,
+  generates `src/debian/patches/` when there are patches, and builds `src/`.
+- **Nothing in upstream's files is changed** except by our
+  [patch branches](#our-own-patches-on-a-mirror). What the build needs to
+  adapt (migen's `debian/pyproject-compat.py`, for bookworm's setuptools)
+  lives in `debian/` and is undone after the build.
 - **`README.md`**, at the root of `packaging`, says which upstream, which
   branches are copies and which are ours, how the sync and the build run,
   and how the version is made. It is at the root, not in `packaging/` as in
   Set A, because on a mirror's `packaging` the root is ours: upstream's own
   README is on upstream's branches.
 
-#### Open question: someone else's code with our own patches
+#### Our own patches on a mirror
 
-Not decided yet: where does a project that isn't on GitHub go when we carry
-our own patches to it? dnsmasq is the case: upstream is thekelleys.org.uk's
-git, and we add a streaming AXFR patch. The candidates are:
-- a mirror, with the patches as `debian/patches/` on `packaging` (quilt),
-  so the copies stay exact and the patches are reviewed as pull requests
-  against `packaging`;
-- Set A, imported with upstream's history, the patches as commits on
-  `packaging`, and new upstream versions merged by a reviewed pull request.
+Someone else's code that carries our own patches is a mirror too: dnsmasq,
+with our streaming AXFR and `--dump-config` changes. The copies of upstream
+stay exact, `packaging` still holds none of upstream's files, and nobody
+maintains patch files by hand:
 
-Until it is decided, such a repository stays Set A.
+- **Each change is a branch, `patches/<topic>`** (`patches/streaming-axfr`,
+  `patches/dump-config`): our commits, one logical change each, on top of a
+  commit of the built branch. They are ours: the sync never pushes to or
+  deletes a `patches/*` branch, and never copies an upstream branch under
+  that name.
+- **The declaration pins each one**, in the order they apply:
+
+  ```toml
+  [[mirror.patches]]
+  branch = "patches/streaming-axfr"
+  commit = "4f1c2d9e…"          # the tip that is built
+  [[mirror.patches]]
+  branch = "patches/dump-config"
+  commit = "a07e55b1…"
+  ```
+
+  A build uses the pinned commits, never a moving branch, so it is
+  reproducible. Changing a patch is a push to its branch plus a pull request
+  to `packaging` moving the pin, and that `packaging` commit is what raises
+  the version (its `<X.Y.postN>` half).
+- **The build generates `debian/patches/`**: the shared
+  `scripts/mirror-patches.py`, run in `deb.yml` before `build-deb`, writes
+  `git format-patch <base>..<commit>` for each pin (one patch per commit,
+  `<base>` being where the branch leaves the built branch) into
+  `debian/patches/<topic>/`, and the `series`. `packaging`'s
+  `debian/source/format` is `3.0 (quilt)`, and `dpkg-buildpackage -b`
+  applies them before building. `packaging` never commits `debian/patches/`
+  (`PKG-PATCHES`).
+- **When upstream moves**, the patches are applied to the new tip as they
+  are: while they still apply, nothing needs doing. The sync checks that
+  (`git am` of the generated patches on the new tip) before it starts the
+  build. If one doesn't apply, it **doesn't start the build**, so nothing
+  broken is published and the last good package stays, and it opens (or
+  updates) an issue saying which patch and which upstream commit.
+- **Rebasing a patch branch** is then done by a person, reviewed like any
+  other change: tag its old tip `archive/patches/<topic>/<YYYY-MM-DD>`
+  first (history is never lost, and pinned commits stay fetchable), rebase
+  it onto the built branch's tip, push it, and move the pin in a pull
+  request to `packaging`.
+- **When upstream takes a patch**, its entry is removed from the
+  declaration; the branch stays, as history.
+
+#### Several upstreams (follow-up)
+
+The declaration has one `upstream`. dnsmasq follows four (thekelleys'
+`dnsmasq.git` and `dnsmasq-debian.git`, salsa, and dgit), and thekelleys'
+`dnsmasq.git` publishes only `master` as a branch, keeping its others as
+`refs/remotes/*`. So a follow-up adds, alongside `upstream`, a list:
+
+```toml
+[[mirror.upstreams]]
+name = "thekelleys"
+url = "git://thekelleys.org.uk/dnsmasq.git"
+refs = ["refs/heads/*", "refs/remotes/origin/*"]  # source patterns, not only heads
+prefix = ""                     # mirrored branch names: <prefix><name>
+tags = "v[0-9]*"                # the version tags, for this upstream
+tag-prefix = ""                 # tags from another source that collide get one
+```
+
+with tag collisions between sources reported in the run summary, never
+overwritten. Until then, a mirror has one upstream.
 
 ### Set B: our code
 
@@ -889,6 +954,10 @@ upstream = "https://git.m-labs.hk/M-Labs/migen.git"   # what is copied (git ls-r
 build = "master"                                  # the branch the package is built from
 ours = ["github-master", "legacy", "experimental"]  # our branches besides packaging: never synced
 tags = "[0-9]*"                                   # optional: upstream's version tags ("v[0-9]*"...)
+
+[[mirror.patches]]                                # optional: our patches, in order (see above)
+branch = "patches/streaming-axfr"
+commit = "4f1c2d9e…"
 ```
 
 ### Dependency repositories
