@@ -96,7 +96,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-BRANCH | default branch `packaging` (A, mirror) or `main` (B), and it publishes | GitHub API, last Pages deployment |
 | PKG-HISTORY | Set A carries upstream's history; a mirror's `packaging` shares none with the built branch | fork, or commits by others before the repository existed; a mirror: the compare API finds no common ancestor |
 | PKG-UPSTREAM | Set A has an `upstream` branch; a mirror's built branch is upstream's | GitHub API; a mirror: `git ls-remote` of the declared `upstream`, or else the last sync succeeded in the last two days |
-| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule); a mirror's is `Sync upstream`, scheduled, and starts `deb.yml` | files on the publishing branch; a mirror: its steps' scripts |
+| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule); a mirror's is `Sync upstream`, scheduled, and calls the shared `sync-mirror.yml@main` | files on the publishing branch; a mirror: its jobs' `uses:` |
 | PKG-README | Set A has `packaging/README.md`; a mirror has `README.md` naming its upstream | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
 | PKG-CHANGELOG | Set B and mirrors commit no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |

@@ -109,11 +109,32 @@ a mirror.
   keeps the archived GitHub repository's branches) are listed in the
   declaration's `[mirror] ours`, and the sync never touches them.
 - **`sync-upstream.yml`** (`Sync upstream`) runs daily and on
-  `workflow_dispatch`:
+  `workflow_dispatch`, and is only a call to the shared
+  `mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main`
+  (`scripts/sync-mirror.py`), so no mirror carries its own sync:
+
+  ```yaml
+  name: Sync upstream
+  on:
+    schedule:
+      - cron: "0 6 * * *"   # daily
+    workflow_dispatch:
+  permissions:
+    contents: write         # push the copies
+    actions: write          # start deb.yml
+  concurrency:
+    group: sync-upstream
+    cancel-in-progress: false
+  jobs:
+    sync:
+      uses: mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main
+  ```
+
   - it copies every branch and tag of the declared `upstream` here under the
     same name, forced, so each is always identical to upstream's;
   - it never deletes anything (a branch upstream deletes stays, with a
-    warning), and never touches `packaging` or `[mirror] ours`;
+    warning), and never touches `packaging`, `[mirror] ours`, or a tag on
+    `packaging`'s history (its `v0.0`), whatever upstream has;
   - when `[mirror] build`, the branch the package is built from, moved, it
     starts `deb.yml` on `packaging` (`gh workflow run deb.yml --ref
     packaging`). A push made with the workflow's own token doesn't start
