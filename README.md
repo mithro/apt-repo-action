@@ -29,6 +29,8 @@ versions. This README covers using the workflow.
 | `scripts/check-keyrings.py` | script | Fail the publish if a keyring's format contradicts its extension |
 | `scripts/carry-over.py` | script | Keep serving a previous layout, frozen, while clients move (`legacy-paths`) |
 | `scripts/keep-history.py` | script | Keep earlier package versions from the live site, up to `size-limit-mb` |
+| `.github/workflows/sync-mirror.yml` | reusable workflow | A mirror repository's sync: copy upstream's branches and tags exactly, and start `deb.yml` when the built branch moved |
+| `scripts/sync-mirror.py` | script | `sync-mirror.yml`'s copy, driven by the declaration's `upstream` and `[mirror]` |
 | `scripts/apt-sources.py` | script | The dependency repositories a declaration's `[[depends]]` names: resolve, fetch the keys, write an apt setup for `build-deb` and install tests |
 | `scripts/lintian-report.py` | script | Turn `build-deb`'s lintian run into annotations, a job-summary table and counts |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |

@@ -1033,10 +1033,12 @@ def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list
     return not probs, "; ".join(probs) if probs else "Install section with the setup and the key fingerprint"
 
 
-def mirror_sync(text: str | None, with_patches: bool = False) -> tuple[bool, str]:
+def mirror_sync(text: str | None, action_repo: str, with_patches: bool = False) -> tuple[bool, str]:
     """A mirror's PKG-SYNC: sync-upstream.yml, `Sync upstream`, scheduled,
-    and starting deb.yml itself (a push made with the workflow's token starts
-    no workflow)."""
+    through the shared sync-mirror.yml at `@main`, which copies upstream and
+    starts deb.yml itself (a push made with the workflow's token starts no
+    workflow). A sync of its own is a failure, as an own build is for
+    PKG-SHARED: it says whether it would at least start deb.yml."""
     if text is None:
         return False, f"no {SYNC_FILE}"
     try:
@@ -1066,12 +1068,20 @@ def mirror_sync(text: str | None, with_patches: bool = False) -> tuple[bool, str
     runs = "\n".join(re.sub(r"(^|\s)#.*", "", line) for j in (w.get("jobs") or {}).values() if isinstance(j, dict)
                      for st in (j.get("steps") or []) if isinstance(st, dict)
                      for line in str(st.get("run", "")).splitlines())
-    if not re.search(rf"workflow run\s+(\S+\s+)*{re.escape(WORKFLOW_FILE)}\b", runs):
+    shared = f"{action_repo}/.github/workflows/sync-mirror.yml".lower()
+    refs = {str(j.get("uses", "")).partition("@")[2] for j in (w.get("jobs") or {}).values()
+            if isinstance(j, dict) and str(j.get("uses", "")).partition("@")[0].lower() == shared}
+    if refs:
+        probs += [f"sync-mirror.yml@{r} (want @main)" for r in sorted(refs) if r != "main"]
+        what = "the shared sync-mirror.yml"
+    elif re.search(rf"workflow run\s+(\S+\s+)*{re.escape(WORKFLOW_FILE)}\b", runs):
+        probs.append(f"its own sync steps, not {action_repo}/.github/workflows/sync-mirror.yml@main")
+    else:
         probs.append(f"doesn't start {WORKFLOW_FILE}")
-    return not probs, "; ".join(probs) if probs else f"{SYNC_FILE}: scheduled, starts {WORKFLOW_FILE}"
+    return not probs, "; ".join(probs) if probs else f"{SYNC_FILE}: scheduled, {what}"
 
 
-def mirror_rules(f: dict, t: dict, now: float | None = None) -> list[tuple[str, bool | None, str]]:
+def mirror_rules(f: dict, t: dict, action_repo: str, now: float | None = None) -> list[tuple[str, bool | None, str]]:
     """PKG-HISTORY, PKG-UPSTREAM and PKG-SYNC for a mirror (docs/packaging.md,
     "Mirrors"), from mirror_facts."""
     import datetime
@@ -1106,7 +1116,7 @@ def mirror_rules(f: dict, t: dict, now: float | None = None) -> list[tuple[str, 
             why = ("upstream moved since the last sync, which succeeded" if recent else
                    f"last sync {last['conclusion']} {last['created_at']}" if last else "no sync has run")
             out.append(("PKG-UPSTREAM", recent, f"{build} {ours[:12]}, upstream {theirs[:12]} — {why}"))
-    ok, detail = mirror_sync(f["workflows"].get(SYNC_FILE), bool(t["mirror"].get("patches")))
+    ok, detail = mirror_sync(f["workflows"].get(SYNC_FILE), action_repo, bool(t["mirror"].get("patches")))
     refused = refused_tags(mf.get("upstream_tags") or [], mf.get("tag_rulesets") or [])
     if mf.get("upstream_tags_error") and mf.get("tag_rulesets"):
         # A check that can't run fails.
@@ -1199,7 +1209,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         + f" (want {want})")
     set_a = kind == "A" and variant != "backport"
     if kind == "mirror":
-        for rule, ok, detail in mirror_rules(f, t):
+        for rule, ok, detail in mirror_rules(f, t, args.action_repo):
             put(rule, ok, detail)
     elif set_a:
         others = f["upstream_authors"]

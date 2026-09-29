@@ -113,7 +113,33 @@ a mirror.
   keeps the archived GitHub repository's branches) are listed in the
   declaration's `[mirror] ours`, and the sync never touches them.
 - **`sync-upstream.yml`** (`Sync upstream`) runs daily and on
-  `workflow_dispatch`:
+  `workflow_dispatch`, and is only a call to the shared
+  `mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main`
+  (`scripts/sync-mirror.py`), so no mirror carries its own sync:
+
+  ```yaml
+  name: Sync upstream
+  on:
+    schedule:
+      - cron: "0 6 * * *"   # daily
+    workflow_dispatch:
+  permissions:
+    contents: write         # push the copies
+    actions: write          # start deb.yml
+    issues: write           # with [[mirror.patches]]: say when one doesn't apply
+  concurrency:
+    group: sync-upstream
+    cancel-in-progress: false
+  jobs:
+    sync:
+      uses: mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main
+      # secrets:
+      #   token: ${{ secrets.MIRROR_TOKEN }}   # to copy .github/workflows files
+  ```
+
+  If the sync pushed the copies but couldn't start `deb.yml`, the next sync
+  sees nothing new: run **Debian packages** by hand (the run says so).
+
   - it copies every branch and tag of the declared `upstream` here under the
     same name, forced, so each is always identical to upstream's;
   - **it never deletes anything.** A branch or tag upstream deletes stays
@@ -121,7 +147,8 @@ a mirror.
     it stays reproducible;
   - it never touches what is ours: `packaging`, `[mirror] ours`, the
     [patch branches](#our-own-patches-on-a-mirror) (`patches/*`), and our
-    tags (`packaging`'s `v0.0`, `archive/*`);
+    tags (`packaging`'s `v0.0`, any tag on `packaging`'s history, `archive/*`),
+    whatever upstream has;
   - when `[mirror] build`, the branch the package is built from, moved, it
     starts `deb.yml` on `packaging` (`gh workflow run deb.yml --ref
     packaging`). A push made with the workflow's own token doesn't start
