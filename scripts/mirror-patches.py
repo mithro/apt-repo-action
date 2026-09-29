@@ -17,15 +17,21 @@ branch, before build-deb:
 
     mirror-patches.py --declaration .github/apt-packaging.toml --source src
 
-With --check it generates them into a scratch directory and applies them
-with `git am` to --source's HEAD in a scratch worktree instead, and says
-which one doesn't apply: what the sync runs before it starts a build.
+Every generated series is applied, in order, to a copy of the built tree
+with dpkg-source's own `patch` options before it is written out, and a
+patch that doesn't apply fails it: dpkg-source --before-build would
+otherwise skip the whole series and build unpatched, with exit 0. A patch
+branch that changes a binary file is refused (quilt can't carry one). A
+patch branch built on another (a stack) starts from that one's pin. With
+--check, the same, into a scratch directory, saying which doesn't apply:
+what the sync runs before it starts a build.
 
 Standard library only.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +42,23 @@ from pathlib import Path
 
 class Error(Exception):
     pass
+
+
+class Conflict(Error):
+    """A generated patch that doesn't apply, in order, to the built tree."""
+    def __init__(self, topic: str, patch: str, why: str):
+        super().__init__(f"{patch} doesn't apply to the built branch: {why}")
+        self.topic, self.patch = topic, patch
+
+
+# How dpkg-source applies each patch of a 3.0 (quilt) series
+# (Dpkg::Source::Patch::apply, dpkg 1.22): the same tool and options here,
+# so the check and the build can't disagree.
+PATCH = ["patch", "-t", "-F", "0", "-N", "-p1", "-u", "-V", "never", "-b", "-z", ".dpkg-orig"]
+# In debian/patches beside the series: tells build-deb they were generated,
+# so it checks every one was applied (dpkg-source --before-build returns 0
+# without applying anything when the first patch doesn't apply).
+MARKER = ".mirror-patches"
 
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -71,47 +94,80 @@ def load(path: Path) -> list[dict]:
     return out
 
 
+def is_ancestor(src: Path, a: str, b: str) -> bool:
+    return git(src, "merge-base", "--is-ancestor", a, b, check=False).returncode == 0
+
+
+def base_of(src: Path, patches: list[dict], i: int, head: str) -> str:
+    """Where patches[i] starts: the nearest earlier pin it is built on (a
+    stack, patches/b on patches/a), else where it leaves the built branch."""
+    p = patches[i]
+    for q in reversed(patches[:i]):
+        if is_ancestor(src, q["commit"], p["commit"]):
+            return q["commit"]
+    base = git(src, "merge-base", head, p["commit"], check=False).stdout.strip()
+    if not base:
+        raise Error(f"{p['branch']} ({p['commit'][:12]}) shares no history with the built branch")
+    return base
+
+
+def apply_series(src: Path, head: str, out: Path, series: list[str]) -> None:
+    """Applies the series, in order, to a copy of `head`'s tree with
+    dpkg-source's patch options; raises Conflict at the first that fails."""
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = subprocess.Popen(["git", "-C", str(src), "archive", head], stdout=subprocess.PIPE)
+        subprocess.run(["tar", "-x", "-C", tmp], stdin=archive.stdout, check=True)
+        if archive.wait():
+            raise Error(f"git archive {head} failed")
+        for f in series:
+            with open(out / f) as fh:
+                r = subprocess.run(PATCH, cwd=tmp, stdin=fh, capture_output=True, text=True,
+                                   env={**os.environ, "LC_ALL": "C", "PATCH_GET": "0"})
+            if r.returncode:
+                why = (r.stdout + r.stderr).strip().splitlines()
+                raise Conflict(f.split("/", 1)[0], f, why[-1] if why else f"patch exit {r.returncode}")
+
+
 def generate(src: Path, patches: list[dict], out: Path, head: str = "HEAD") -> list[str]:
-    """Writes each pin's patches under `out`/<topic>/ and `out`/series;
+    """Writes each pin's patches under `out`/<topic>/ and `out`/series, and
+    checks they apply, in order, to `head` as dpkg-source will apply them;
     returns the series (paths relative to `out`)."""
     # git -C <src> reads a relative -o from <src>: make both absolute.
     src, out = src.resolve(), out.resolve()
     series = []
-    for p in patches:
+    for i, p in enumerate(patches):
         if git(src, "cat-file", "-e", f"{p['commit']}^{{commit}}", check=False).returncode:
             raise Error(f"{p['branch']}: commit {p['commit'][:12]} isn't in {src}. Check the build branch "
                         "out with its history (fetch-depth: 0), or fetch the pinned commit.")
-        base = git(src, "merge-base", head, p["commit"], check=False).stdout.strip()
-        if not base:
-            raise Error(f"{p['branch']} ({p['commit'][:12]}) shares no history with the built branch")
-        if base == p["commit"]:
+        base = base_of(src, patches, i, head)
+        if base == p["commit"] or is_ancestor(src, p["commit"], head):
             raise Error(f"{p['branch']} ({p['commit'][:12]}) has nothing the built branch doesn't: "
                         "upstream took it? Remove it from the declaration.")
         d = out / p["topic"]
         d.mkdir(parents=True)
         files = git(src, "format-patch", "--zero-commit", "--no-signature", "--keep-subject",
                     "-o", str(d), f"{base}..{p['commit']}").stdout.split()
+        for f in files:
+            text = Path(f).read_text(errors="replace")
+            if "\nGIT binary patch\n" in text or re.search(r"^Binary files .* differ$", text, re.M):
+                raise Error(f"{p['branch']}: {Path(f).name} changes a binary file, which a quilt patch "
+                            "can't carry (patch applies none of it, silently). Keep binary changes out of "
+                            "patch branches.")
         series += [str(Path(f).relative_to(out)) for f in files]
     (out / "series").write_text("".join(f"{x}\n" for x in series))
+    apply_series(src, head, out, series)
     return series
 
 
 def check(src: Path, patches: list[dict], head: str = "HEAD") -> tuple[str, str] | None:
-    """Applies the generated patches, in order, to `head` in a scratch
-    worktree; the first (topic, patch) that doesn't apply, or None."""
+    """Whether the patches apply to `head`, exactly as the build checks
+    (generate, into a scratch directory): the first (topic, patch) that
+    doesn't, or None."""
     with tempfile.TemporaryDirectory() as tmp:
-        out, wt = Path(tmp) / "patches", Path(tmp) / "wt"
-        series = generate(src, patches, out, head)
-        git(src, "worktree", "add", "-q", "--detach", str(wt), head)
         try:
-            for f in series:
-                r = git(wt, "-c", "user.name=mirror-patches", "-c", "user.email=mirror-patches@invalid",
-                        "am", "-q", str(out / f), check=False)
-                if r.returncode:
-                    git(wt, "am", "--abort", check=False)
-                    return f.split("/", 1)[0], f
-        finally:
-            git(src, "worktree", "remove", "--force", str(wt), check=False)
+            generate(src, patches, Path(tmp) / "patches", head)
+        except Conflict as c:
+            return c.topic, c.patch
     return None
 
 
@@ -145,7 +201,10 @@ def main() -> int:
             raise Error(f"{out} already has files: packaging must not commit debian/patches; "
                         "they are generated from the patch branches")
         series = generate(args.source, patches, out, args.head)
-        print(f"{len(series)} patches from {len(patches)} branches:", *series, sep="\n  ")
+        (out / MARKER).write_text("Generated by mithro/apt-repo-action's scripts/mirror-patches.py from "
+                                  "the declaration's [[mirror.patches]]. build-deb checks every patch in "
+                                  "series was applied.\n")
+        print(f"{len(series)} patches from {len(patches)} branches, each applies:", *series, sep="\n  ")
     except Error as e:
         print(f"::error::mirror-patches.py: {e}")
         return 1

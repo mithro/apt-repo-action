@@ -76,6 +76,7 @@ class MirrorPatches(unittest.TestCase):
                          ["axfr/0001-axfr-stream-it.patch", "axfr/0002-axfr-faster.patch"])
         for f in (patches / "series").read_text().split():
             self.assertTrue((patches / f).is_file(), f)
+        self.assertTrue((patches / mp.MARKER).is_file())
 
     def test_upstream_moved_patches_still_apply(self):
         self.write("NEWS", "2.93\n", "upstream moves on")
@@ -90,6 +91,59 @@ class MirrorPatches(unittest.TestCase):
         # The scratch worktree is gone, and master untouched.
         self.assertEqual(git(self.src, "worktree", "list").count("\n"), 0)
         self.assertEqual((self.src / "axfr.c").read_text(), "upstream's own\n")
+
+    def test_generate_fails_when_a_patch_doesnt_apply(self):
+        # dpkg-source --before-build dry-runs only the first unapplied patch
+        # and, when that fails, takes the series as applied: exit 0, nothing
+        # patched. So generating must fail itself, as the build would apply.
+        self.write("axfr.c", "upstream's own\n", "upstream adds axfr.c")
+        with self.assertRaises(mp.Conflict) as cm:
+            mp.generate(self.src, self.pins, Path(self.tmp.name) / "patches")
+        self.assertEqual((cm.exception.topic, cm.exception.patch), ("axfr", "axfr/0001-axfr-stream-it.patch"))
+
+    def test_check_and_generate_agree(self):
+        for conflicting in (False, True):
+            with self.subTest(conflicting=conflicting):
+                self.setUp()
+                if conflicting:
+                    self.write("dump.c", "upstream's dump\n", "upstream adds dump.c")
+                got = mp.check(self.src, self.pins)
+                try:
+                    mp.generate(self.src, self.pins, Path(self.tmp.name) / "patches")
+                    generated = None
+                except mp.Conflict as c:
+                    generated = (c.topic, c.patch)
+                self.assertEqual(got, generated)
+                self.assertEqual(got is not None, conflicting)
+
+    def binary_topic(self, with_text):
+        git(self.src, "checkout", "-q", "-b", "patches/logo", "master")
+        (self.src / "logo.bin").write_bytes(bytes(range(256)))
+        if with_text:
+            (self.src / "main.c").write_text("int main(void) { return 1; }\n")
+            git(self.src, "add", "main.c")
+        git(self.src, "add", "logo.bin")
+        git(self.src, "commit", "-q", "-m", "a logo")
+        git(self.src, "checkout", "-q", "master")
+        return [{"branch": "patches/logo", "commit": git(self.src, "rev-parse", "patches/logo"), "topic": "logo"}]
+
+    def test_binary_changes_refused(self):
+        for with_text in (False, True):  # a binary hunk beside a text one is refused too
+            with self.subTest(with_text=with_text):
+                self.setUp()
+                with self.assertRaisesRegex(mp.Error, "changes a binary file"):
+                    mp.generate(self.src, self.binary_topic(with_text), Path(self.tmp.name) / "patches")
+
+    def test_stacked_patch_branches(self):
+        # patches/faster is built on patches/axfr: its patches start at axfr's pin.
+        git(self.src, "checkout", "-q", "-b", "patches/faster", "patches/axfr")
+        self.write("axfr.c", "stream\nfaster\nfastest\n", "axfr: fastest")
+        git(self.src, "checkout", "-q", "master")
+        pins = self.pins[:1] + [{"branch": "patches/faster", "commit": git(self.src, "rev-parse", "patches/faster"),
+                                 "topic": "faster"}]
+        series = mp.generate(self.src, pins, Path(self.tmp.name) / "patches")
+        self.assertEqual(series, ["axfr/0001-axfr-stream-it.patch", "axfr/0002-axfr-faster.patch",
+                                  "faster/0001-axfr-fastest.patch"])
 
     def test_pinned_commit_not_the_branch_tip(self):
         # The build uses the pin, not whatever the branch has moved to since.
