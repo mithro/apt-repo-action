@@ -101,10 +101,28 @@ class MirrorPatches(unittest.TestCase):
             mp.generate(self.src, self.pins, Path(self.tmp.name) / "patches")
         self.assertEqual((cm.exception.topic, cm.exception.patch), ("axfr", "axfr/0001-axfr-stream-it.patch"))
 
+    def test_a_failed_generate_leaves_nothing(self):
+        # Nothing at --out unless every patch applies: a caller that carries
+        # on past the failure (continue-on-error) mustn't find a half-written
+        # series without the .mirror-patches marker, which build-deb would
+        # then build without checking.
+        self.write("axfr.c", "upstream's own\n", "upstream adds axfr.c")
+        out = Path(self.tmp.name) / "patches"
+        with self.assertRaises(mp.Conflict):
+            mp.generate(self.src, self.pins, out)
+        self.assertFalse(out.exists())
+        self.assertEqual([x.name for x in Path(self.tmp.name).iterdir()], ["src"])
+        # And a refused one (a binary change) the same.
+        with self.assertRaisesRegex(mp.Error, "binary"):
+            mp.generate(self.src, self.binary_topic(False), out)
+        self.assertFalse(out.exists())
+
     def test_check_and_generate_agree(self):
-        for conflicting in (False, True):
+        for i, conflicting in enumerate((False, True)):
             with self.subTest(conflicting=conflicting):
-                self.setUp()
+                if i:  # a fresh fixture; the last one cleaned up
+                    self.tearDown()
+                    self.setUp()
                 if conflicting:
                     self.write("dump.c", "upstream's dump\n", "upstream adds dump.c")
                 got = mp.check(self.src, self.pins)
@@ -128,9 +146,11 @@ class MirrorPatches(unittest.TestCase):
         return [{"branch": "patches/logo", "commit": git(self.src, "rev-parse", "patches/logo"), "topic": "logo"}]
 
     def test_binary_changes_refused(self):
-        for with_text in (False, True):  # a binary hunk beside a text one is refused too
+        for i, with_text in enumerate((False, True)):  # a binary hunk beside a text one is refused too
             with self.subTest(with_text=with_text):
-                self.setUp()
+                if i:  # a fresh fixture; the last one cleaned up
+                    self.tearDown()
+                    self.setUp()
                 with self.assertRaisesRegex(mp.Error, "changes a binary file"):
                     mp.generate(self.src, self.binary_topic(with_text), Path(self.tmp.name) / "patches")
 
