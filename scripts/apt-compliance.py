@@ -642,19 +642,81 @@ def mirror_declaration(decl: dict) -> tuple[dict, list[str]]:
     m = decl.get("mirror")
     if not isinstance(m, dict):
         return {}, problems + ["a mirror needs a [mirror] table with `build`"]
-    build, ours = m.get("build"), m.get("ours", [])
+    build, ours, tags = m.get("build"), m.get("ours", []), m.get("tags", "[0-9]*")
     if not isinstance(build, str) or not build:
         problems.append("[mirror] build must name the branch the package is built from")
         build = None
     if not (isinstance(ours, list) and all(isinstance(o, str) for o in ours)):
         problems.append("[mirror] ours must be a list of branch names")
         ours = []
+    if not isinstance(tags, str) or not tags:
+        problems.append('[mirror] tags must be a glob, such as "[0-9]*" or "v[0-9]*"')
+        tags = "[0-9]*"
     if build and (build in ours or build == "packaging"):
         problems.append(f"[mirror] build {build} is one of our own branches")
-    extra = sorted(set(m) - {"build", "ours"})
+    extra = sorted(set(m) - {"build", "ours", "tags"})
     if extra:
         problems.append(f"[mirror] has unknown keys {', '.join(extra)}")
-    return {"build": build, "ours": ours}, problems
+    return {"build": build, "ours": ours, "tags": tags}, problems
+
+
+GITHUB_ACTIONS_APP = 15368  # the app a workflow's GITHUB_TOKEN acts as
+
+
+def tag_rulesets(repo: str) -> list[dict]:
+    """The active tag rulesets that stop a workflow's token creating or
+    moving tags: what the sync's pushes meet."""
+    out = []
+    for rs in api_pages(f"repos/{repo}/rulesets?per_page=100"):
+        if rs.get("target") != "tag" or rs.get("enforcement") != "active":
+            continue
+        d = api(f"repos/{repo}/rulesets/{rs['id']}") or {}
+        kinds = {r.get("type") for r in d.get("rules", [])} & {"creation", "update", "non_fast_forward"}
+        if not kinds or any(b.get("actor_type") == "Integration" and b.get("actor_id") == GITHUB_ACTIONS_APP
+                            for b in d.get("bypass_actors") or []):
+            continue
+        cond = (d.get("conditions") or {}).get("ref_name") or {}
+        out.append({"name": d.get("name", ""), "include": cond.get("include", []),
+                    "exclude": cond.get("exclude", [])})
+    return out
+
+
+def ref_pattern(pattern: str) -> re.Pattern:
+    """A ruleset ref pattern (fnmatch: `*` doesn't cross a /, `**` does)."""
+    if pattern == "~ALL":
+        return re.compile(r".*")
+    rx, i = "", 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**", i):
+            rx, i = rx + ".*", i + 2
+            continue
+        if c == "*":
+            rx += "[^/]*"
+        elif c == "?":
+            rx += "[^/]"
+        elif c == "[":
+            j = pattern.find("]", i + 1)
+            if j > i:
+                rx, i = rx + pattern[i:j + 1], j + 1
+                continue
+            rx += re.escape(c)
+        else:
+            rx += re.escape(c)
+        i += 1
+    return re.compile(rx)
+
+
+def refused_tags(tags: list[str], rulesets: list[dict]) -> dict[str, list[str]]:
+    """ruleset name -> the upstream tags (refs/tags/...) it would refuse."""
+    out = {}
+    for rs in rulesets:
+        inc = [ref_pattern(p) for p in rs["include"]]
+        exc = [ref_pattern(p) for p in rs["exclude"]]
+        bad = [t for t in tags if any(p.fullmatch(t) for p in inc) and not any(p.fullmatch(t) for p in exc)]
+        if bad:
+            out[rs["name"]] = bad
+    return out
 
 
 def mirror_facts(f: dict, t: dict) -> dict:
@@ -662,7 +724,17 @@ def mirror_facts(f: dict, t: dict) -> dict:
     mirror, from GitHub and from upstream itself."""
     repo, build = f["repo"], t["mirror"].get("build")
     out = {"build_present": bool(build) and build in f["branches"], "shared_history": None,
-           "ours": None, "theirs": None, "theirs_error": None, "sync_runs": []}
+           "ours": None, "theirs": None, "theirs_error": None, "sync_runs": [],
+           "upstream_tags": None, "tag_rulesets": tag_rulesets(repo)}
+    if isinstance(t.get("upstream"), str):
+        try:
+            r = subprocess.run(["git", "ls-remote", "--tags", t["upstream"]], capture_output=True, text=True,
+                               timeout=60)
+            if r.returncode == 0:
+                out["upstream_tags"] = sorted({line.split("\t")[1] for line in r.stdout.splitlines()
+                                               if "\t" in line and not line.endswith("^{}")})
+        except subprocess.TimeoutExpired:
+            pass
     if not out["build_present"]:
         return out
     # The compare API answers 404, "No common ancestor", for unrelated histories.
@@ -997,7 +1069,14 @@ def mirror_rules(f: dict, t: dict, now: float | None = None) -> list[tuple[str, 
             why = ("upstream moved since the last sync, which succeeded" if recent else
                    f"last sync {last['conclusion']} {last['created_at']}" if last else "no sync has run")
             out.append(("PKG-UPSTREAM", recent, f"{build} {ours[:12]}, upstream {theirs[:12]} — {why}"))
-    out.append(("PKG-SYNC", *mirror_sync(f["workflows"].get(SYNC_FILE))))
+    ok, detail = mirror_sync(f["workflows"].get(SYNC_FILE))
+    refused = refused_tags(mf.get("upstream_tags") or [], mf.get("tag_rulesets") or [])
+    if refused:
+        ok = False
+        detail += "; " + "; ".join(
+            f"tag ruleset “{n}” refuses upstream's {' '.join(x.removeprefix('refs/tags/') for x in tags[:3])}"
+            + (" …" if len(tags) > 3 else "") for n, tags in refused.items())
+    out.append(("PKG-SYNC", ok, detail))
     return out
 
 
@@ -1393,7 +1472,7 @@ def to_html(report: dict) -> str:
            '<div class="legend"><span><span class="s pass">✓</span> passes</span><span><span class="s fail">✗</span> fails</span>'
            '<span><span class="s exception">E</span> declared exception</span><span><span class="s na">·</span> does not apply</span></div>'
            '<div class="legend">Rows by kind: <span><span class="k k-A"></span>Set A, someone else\'s code</span>'
-           '<span><span class="k k-mirror"></span>mirror, someone else\'s code hosted elsewhere</span>'
+           '<span><span class="k k-mirror"></span>mirror, someone else\'s code copied exactly</span>'
            '<span><span class="k k-B"></span>Set B, our code</span>'
            '<span><span class="k k-aggregate"></span>aggregate, collects other repositories\' packages</span></div>'
            "</section>"]

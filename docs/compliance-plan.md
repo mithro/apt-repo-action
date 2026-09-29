@@ -92,11 +92,11 @@ repository's issue in section 4), and everything as JSON.
 
 | ID | rule | how it's checked |
 |---|---|---|
-| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures`, and a mirror's `upstream` and `[mirror]` are well-formed |
+| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures`, and a mirror's `upstream` and `[mirror]` (`build`, `ours`, `tags`) are well-formed |
 | PKG-BRANCH | default branch `packaging` (A, mirror) or `main` (B), and it publishes | GitHub API, last Pages deployment |
 | PKG-HISTORY | Set A carries upstream's history; a mirror's `packaging` shares none with the built branch | fork, or commits by others before the repository existed; a mirror: the compare API finds no common ancestor |
 | PKG-UPSTREAM | Set A has an `upstream` branch; a mirror's built branch is upstream's | GitHub API; a mirror: `git ls-remote` of the declared `upstream`, or else the last sync succeeded in the last two days |
-| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule); a mirror's is `Sync upstream`, scheduled, and starts `deb.yml` | files on the publishing branch; a mirror: its steps' scripts |
+| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule); a mirror's is `Sync upstream`, scheduled, and starts `deb.yml`, and no tag ruleset refuses upstream's tags | files on the publishing branch; a mirror: its steps' scripts, and upstream's tags (`git ls-remote`) against the active tag rulesets without a GitHub Actions bypass |
 | PKG-README | Set A has `packaging/README.md`; a mirror has `README.md` naming its upstream | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
 | PKG-CHANGELOG | Set B and mirrors commit no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |

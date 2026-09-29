@@ -489,7 +489,9 @@ class Mirror(unittest.TestCase):
 
     def test_declaration(self):
         self.assertEqual(apc.mirror_declaration(MIRROR_DECL),
-                         ({"build": "master", "ours": ["github-master", "legacy", "experimental"]}, []))
+                         ({"build": "master", "ours": ["github-master", "legacy", "experimental"], "tags": "[0-9]*"}, []))
+        self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "mirror": {"build": "master", "tags": "v[0-9]*"}})[0]["tags"],
+                         "v[0-9]*")
         self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "upstream": "git@example.org:x/y.git"})[1], [])
 
     def test_declaration_problems(self):
@@ -503,6 +505,8 @@ class Mirror(unittest.TestCase):
         self.assertIn("[mirror] build packaging is one of our own branches", probs(mirror={"build": "packaging"}))
         self.assertIn("[mirror] ours must be a list of branch names", probs(mirror={"build": "master", "ours": "x"}))
         self.assertIn("[mirror] has unknown keys branch", probs(mirror={"build": "master", "branch": "x"}))
+        self.assertIn('[mirror] tags must be a glob, such as "[0-9]*" or "v[0-9]*"',
+                      probs(mirror={"build": "master", "tags": ["x"]}))
 
     def test_sync(self):
         self.assertEqual(apc.mirror_sync(MIRROR_SYNC), (True, "sync-upstream.yml: scheduled, starts deb.yml"))
@@ -561,7 +565,32 @@ class Mirror(unittest.TestCase):
         decl = ('kind = "mirror"\nupstream = "https://git.m-labs.hk/M-Labs/migen.git"\narchitectures = "all"\n'
                 '[mirror]\nbuild = "master"\n')
         t = apc.target(self.target_facts(decl), "fpgasonline")
-        self.assertEqual((t["kind"], t["mirror"], t["mirror_problems"]), ("mirror", {"build": "master", "ours": []}, []))
+        self.assertEqual((t["kind"], t["mirror"], t["mirror_problems"]),
+                         ("mirror", {"build": "master", "ours": [], "tags": "[0-9]*"}, []))
+
+    # fpgas-online/migen's tag ruleset (2026-09-29): only vX.Y, plus upstream's bare tags.
+    MIGEN_RULESET = {"name": "Enforce vXX.ZZZ version tags (+ upstream migen tags)", "include": ["refs/tags/*"],
+                     "exclude": ["refs/tags/v[0-9].[0-9]", "refs/tags/v[0-9].[0-9][0-9]", "refs/tags/[0-9]*"]}
+    UPSTREAM_TAGS = ["refs/tags/0.5.dev", "refs/tags/0.9.2"]
+
+    def test_ruleset_admits_upstreams_tags(self):
+        self.assertEqual(apc.refused_tags(self.UPSTREAM_TAGS, [self.MIGEN_RULESET]), {})
+
+    def test_ruleset_refuses_upstreams_tags(self):
+        rs = {**self.MIGEN_RULESET, "exclude": self.MIGEN_RULESET["exclude"][:2]}
+        self.assertEqual(apc.refused_tags(self.UPSTREAM_TAGS, [rs]), {rs["name"]: self.UPSTREAM_TAGS})
+        f = self.facts(upstream_tags=self.UPSTREAM_TAGS, tag_rulesets=[rs])
+        ok, detail = self.rules(f)["PKG-SYNC"]
+        self.assertFalse(ok)
+        self.assertIn("refuses upstream's 0.5.dev 0.9.2", detail)
+
+    def test_ref_patterns(self):
+        # fnmatch as GitHub's rulesets read it: * stays within a path part.
+        self.assertTrue(apc.ref_pattern("refs/tags/*").fullmatch("refs/tags/0.9.2"))
+        self.assertFalse(apc.ref_pattern("refs/tags/*").fullmatch("refs/tags/debian/2.90-1"))
+        self.assertTrue(apc.ref_pattern("refs/tags/**").fullmatch("refs/tags/debian/2.90-1"))
+        self.assertTrue(apc.ref_pattern("~ALL").fullmatch("refs/tags/x"))
+        self.assertFalse(apc.ref_pattern("refs/tags/v[0-9].[0-9]").fullmatch("refs/tags/v10.1"))
 
 
 SITE = "https://pkgs.example.com/widget"
