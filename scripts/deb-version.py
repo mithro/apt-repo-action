@@ -14,7 +14,10 @@ preview suffixes:
   given (``--upstream-version``), or its own ``git describe --tags`` at the
   pinned commit (``--upstream-dir``): ``1.1.1`` at its tag ``v1.1.1``,
   ``1.1.1.post173`` 173 commits later. ``<owner-tag>`` is the owner's tag
-  (``fpgasonline``, ``welland``).
+  (``fpgasonline``, ``welland``). When the fetched project is a Debian source
+  package (``--upstream-debian-version``), ``<upstream>`` is its own version,
+  revision included (``43.0.0-3+deb13u1``), and the fetched
+  debian/changelog stays under the build's entry.
 - ``<E>:`` only with ``--epoch``, which a repository uses only under a
   declared PKG-VERSION exception (rpi-qemu's epoch 2).
 - ``~deb<R>`` is the suite's Debian release number; sid has none.
@@ -119,6 +122,17 @@ def check_upstream(v: str, what: str, hint: str = "") -> None:
              f"letters, digits and . + ~).{hint}")
 
 
+def check_debian_version(v: str) -> None:
+    """A Debian source package's own version, with its revision: the
+    fetched project is a Debian source (cryptography-insecure rebuilds each
+    suite's python-cryptography), and a 3.0 (quilt) source needs a revision."""
+    if ":" in v:
+        fail(f"--upstream-debian-version {v!r} has an epoch; pass it as --epoch instead")
+    if not re.fullmatch(r"[0-9][A-Za-z0-9.+~-]*-[A-Za-z0-9.+~]+", v):
+        fail(f"--upstream-debian-version {v!r} is not a Debian version with a revision "
+             "(<upstream>-<revision>, such as 43.0.0-3+deb13u1)")
+
+
 def upstream_version(up: Path, match: str | None = None) -> str:
     """The fetched project's version, from its own tags at the pinned commit:
     any tag, or with `match` only those matching that glob (a mirror's
@@ -162,11 +176,19 @@ def mirror_tag_match(tree: Path) -> str | None:
 
 
 def package_version(base: str, upstream: str | None, owner_tag: str | None,
-                    epoch: int | None) -> str:
-    """Set B's version, or the patch series form around it; then the epoch."""
+                    epoch: int | None, debian_source: bool = False) -> str:
+    """Set B's version, or the patch series form around it; then the epoch.
+
+    With debian_source, `upstream` is a Debian source package's own version,
+    revision included: ours then extends Debian's revision
+    (43.0.0-3+deb13u1+welland.0.0.post6), so it sorts above Debian's and
+    above any earlier +<suffix> of ours on the same Debian version."""
     version = base
     if upstream is not None:
-        check_upstream(upstream, "--upstream-version")
+        if debian_source:
+            check_debian_version(upstream)
+        else:
+            check_upstream(upstream, "--upstream-version")
         if not owner_tag or not re.fullmatch(r"[a-z]+", owner_tag):
             fail(f"--owner-tag must be lower-case letters (fpgasonline, welland), not {owner_tag!r}")
         version = f"{upstream}+{owner_tag}.{base}"
@@ -218,21 +240,45 @@ def github_repository(src: Path) -> str:
     return m.group(1)
 
 
-def write_changelog(src: Path, tree: Path, version: str, suite: str, repo: str) -> None:
-    """The entry goes in src's debian/changelog; the commit it names is tree's."""
+def write_changelog(src: Path, tree: Path, version: str, suite: str, repo: str,
+                    fetched: str | None = None) -> None:
+    """The entry goes in src's debian/changelog; the commit it names is tree's.
+
+    With fetched (the Debian version the pin names), src is a Debian source
+    fetched at build time, not a git checkout: its own debian/changelog
+    (Debian's history) stays under ours, and must be that version's."""
     if not (src / "debian/control").is_file():
         fail(f"{src / 'debian/control'} does not exist, so there is no changelog to write")
     control = (src / "debian/control").read_text()
-    # The committed changelog, not the working tree's, so running this twice
-    # doesn't stack two entries. Set B commits none: the entry is the file.
-    # (HEAD:./ is relative to src, which may be below its repository's root.)
-    committed = subprocess.run(["git", "-C", str(src), "show", "HEAD:./debian/changelog"],
-                               capture_output=True, text=True)
-    old = committed.stdout if committed.returncode == 0 else ""
+    if fetched:
+        if not (src / "debian/changelog").is_file():
+            fail(f"{src / 'debian/changelog'} does not exist: a fetched Debian source has one")
+        old = (src / "debian/changelog").read_text()
+    else:
+        # The committed changelog, not the working tree's, so running this
+        # twice doesn't stack two entries. Set B commits none: the entry is
+        # the file. (HEAD:./ is relative to src, which may be below its
+        # repository's root.)
+        committed = subprocess.run(["git", "-C", str(src), "show", "HEAD:./debian/changelog"],
+                                   capture_output=True, text=True)
+        old = committed.stdout if committed.returncode == 0 else ""
     top = old.split("\n -- ", 1)[0]
+    if BUILT_FROM in top and fetched:
+        fail("the fetched debian/changelog already starts with a build's generated entry: "
+             "fetch the source afresh for each build.")
     if BUILT_FROM in top:
         fail("the committed debian/changelog starts with a build's generated entry. "
              "Commit the changelog without it: the build adds its own.")
+    if fetched:
+        # The version is built from the pin, the code from the tree: if they
+        # differ (a Debian update fetched under an old pin), the package
+        # would carry one version's code under the other's number, and
+        # Debian's own build of the newer version would replace ours.
+        m = re.match(r"\S+ \(([^)]+)\)", old)
+        have = m.group(1) if m else None
+        if have != fetched:
+            fail(f"the fetched debian/changelog is for {have or 'no version'}, not "
+                 f"--upstream-debian-version {fetched}: the tree isn't the pinned source")
     entry = changelog_entry(control_field(control, "Source"), version, suite, repo,
                             git(tree, "rev-parse", "HEAD"), control_field(control, "Maintainer"),
                             git(tree, "log", "-1", "--format=%cd", "--date=rfc2822"))
@@ -257,6 +303,9 @@ def main() -> None:
     up = ap.add_mutually_exclusive_group()
     up.add_argument("--upstream-version", default=None,
                     help="patch series: the fetched project's version, as its pin records it")
+    up.add_argument("--upstream-debian-version", default=None, metavar="VERSION",
+                    help="patch series of a Debian source package: its own version, revision "
+                         "included (43.0.0-3+deb13u1); the tree's debian/changelog is kept")
     up.add_argument("--upstream-dir", type=Path, default=None,
                     help="patch series: the fetched project's checkout, at the pinned commit; "
                          "its git describe --tags gives the version")
@@ -274,20 +323,25 @@ def main() -> None:
     args = ap.parse_args()
     if args.pr is not None and args.pr <= 0:
         fail(f"--pr must be a pull request number, not {args.pr}")
-    patch_series = args.upstream_version is not None or args.upstream_dir is not None
+    debian_source = args.upstream_debian_version is not None
+    patch_series = (args.upstream_version is not None or args.upstream_dir is not None
+                    or debian_source)
     if patch_series != (args.owner_tag is not None):
-        fail("a patch series needs --owner-tag and one of --upstream-version or --upstream-dir")
+        fail("a patch series needs --owner-tag and one of --upstream-version, "
+             "--upstream-debian-version or --upstream-dir")
     tree = args.version_tree or args.source_dir
     if args.upstream_tag_match is not None and args.upstream_dir is None:
         fail("--upstream-tag-match needs --upstream-dir")
     match = args.upstream_tag_match or mirror_tag_match(tree)
     upstream = (upstream_version(args.upstream_dir, match) if args.upstream_dir is not None
+                else args.upstream_debian_version if debian_source
                 else args.upstream_version)
     version = with_suffixes(package_version(base_version(tree), upstream, args.owner_tag,
-                                            args.epoch), args.suite, args.pr)
+                                            args.epoch, debian_source), args.suite, args.pr)
     if args.write_changelog:
         write_changelog(args.source_dir, tree, version, args.suite,
-                        args.repo or github_repository(tree))
+                        args.repo or github_repository(tree),
+                        fetched=args.upstream_debian_version)
     print(version)
 
 

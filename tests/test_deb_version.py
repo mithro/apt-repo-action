@@ -68,6 +68,23 @@ class PatchSeries(unittest.TestCase):
             with self.subTest(upstream=upstream, epoch=epoch):
                 self.assertEqual(dv.package_version("0.0.post70", upstream, "fpgasonline", epoch), want)
 
+    def test_debian_source_form(self):
+        # A Debian source package's own version, revision included, then ours.
+        for upstream, want in [
+            ("43.0.0-3+deb13u1", "43.0.0-3+deb13u1+welland.0.0.post6"),
+            ("49.0.0-2", "49.0.0-2+welland.0.0.post6"),
+            ("1.2-3-4", "1.2-3-4+welland.0.0.post6"),   # an upstream part with a -
+        ]:
+            with self.subTest(upstream=upstream):
+                self.assertEqual(dv.package_version("0.0.post6", upstream, "welland", None, True),
+                                 want)
+
+    def test_bad_debian_source_fails(self):
+        for bad in ["43.0.0", "1:43.0.0-3", "43.0.0-", "v43.0.0-3", "43.0.0-3 x"]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    dv.package_version("0.0.post6", bad, "welland", None, True)
+
     def test_set_b_is_unchanged(self):
         self.assertEqual(dv.package_version("0.3.post134", None, None, None), "0.3.post134")
         self.assertEqual(dv.package_version("0.1.post5", None, None, 2), "2:0.1.post5")
@@ -142,8 +159,28 @@ class Ordering(unittest.TestCase):
     EPOCH = ["2:0.1+112.g91e6fbe", "2:11.1.0+fpgasonline.0.1.post113~deb13",
              "2:11.1.0+fpgasonline.0.1.post113"]
 
+    # A Debian source package rebuilt with our changes (cryptography-insecure):
+    # the first entry of each is what paramiko-insecure published it as before
+    # the split; a Debian stable update, or a new Debian version, beats any
+    # number of our commits.
+    DEBIAN_SOURCE = [
+        "43.0.0-3+deb13u1+insecure1",
+        "43.0.0-3+deb13u1+welland.0.0.post6~deb13~pr1",
+        "43.0.0-3+deb13u1+welland.0.0.post6~deb13",
+        "43.0.0-3+deb13u1+welland.0.0.post7~deb13",
+        "43.0.0-3+deb13u2+welland.0.0.post7~deb13",
+        "43.0.0-4+welland.0.0.post1~deb13",
+    ]
+    BOOKWORM = ["38.0.4-3+deb12u1+insecure1", "38.0.4-3+deb12u1+welland.0.0.post6~deb12"]
+    # A Debian binNMU of the same source sorts below ours (b < w): it doesn't
+    # replace our build, and our pin needs no change for it.
+    BINNMU = ["49.0.0-2+b1", "49.0.0-2+welland.0.0.post6"]
+    SID = ["49.0.0-2+insecure1", "49.0.0-2+welland.0.0.post6~deb14",
+           "49.0.0-2+welland.0.0.post6"]
+
     def test_order(self):
-        for name in ["ORDER", "PATCH_SERIES", "NFPM", "EPOCH"]:
+        for name in ["ORDER", "PATCH_SERIES", "NFPM", "EPOCH", "DEBIAN_SOURCE", "BOOKWORM", "SID",
+                     "BINNMU"]:
             table = getattr(self, name)
             for lower, higher in zip(table, table[1:]):
                 with self.subTest(table=name, lower=lower, higher=higher):
@@ -335,6 +372,48 @@ class Tree(unittest.TestCase):
             "selftest-src (1.1.1+fpgasonline.0.0.post2~deb12) bookworm; urgency=medium\n\n"
             f"  * Built from example/selftest-src@{sha}\n\n"
             " -- Self Test <selftest@invalid>  Thu, 24 Sep 2026 12:00:00 +0000\n"))
+
+    def test_debian_source_keeps_its_changelog(self):
+        # A Debian source fetched at build time, not a git checkout: Debian's
+        # changelog stays under our entry, and a second run is refused.
+        fetched = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fetched)
+        (fetched / "debian").mkdir()
+        (fetched / "debian/control").write_text(CONTROL)
+        debian = PLACEHOLDER.replace("selftest-src (0.0)", "selftest-src (43.0.0-3+deb13u1)")
+        (fetched / "debian/changelog").write_text(debian)
+        self.commit("two")
+        sha = self.git("rev-parse", "HEAD")
+        args = ["python3", str(SCRIPT), "--source-dir", str(fetched), "--version-tree",
+                str(self.src), "--suite", "trixie", "--upstream-debian-version",
+                "43.0.0-3+deb13u1", "--owner-tag", "welland", "--write-changelog"]
+        r = subprocess.run(args, env=self.env, check=True, capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "43.0.0-3+deb13u1+welland.0.0.post2~deb13")
+        self.assertEqual((fetched / "debian/changelog").read_text(), (
+            "selftest-src (43.0.0-3+deb13u1+welland.0.0.post2~deb13) trixie; urgency=medium\n\n"
+            f"  * Built from example/selftest-src@{sha}\n\n"
+            " -- Self Test <selftest@invalid>  Thu, 24 Sep 2026 12:00:00 +0000\n\n"
+            + debian))
+        again = subprocess.run(args, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(again.returncode, 0)
+        self.assertIn("generated entry", again.stderr)
+
+    def test_debian_source_must_be_the_pinned_version(self):
+        # The pin says one Debian version and the fetched tree is another (a
+        # stable update fetched under an old pin): refused, not built as the
+        # pin's version with the other's code.
+        fetched = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fetched)
+        (fetched / "debian").mkdir()
+        (fetched / "debian/control").write_text(CONTROL)
+        (fetched / "debian/changelog").write_text(
+            PLACEHOLDER.replace("selftest-src (0.0)", "selftest-src (43.0.0-3+deb13u2)"))
+        r = subprocess.run(["python3", str(SCRIPT), "--source-dir", str(fetched), "--version-tree",
+                            str(self.src), "--suite", "trixie", "--upstream-debian-version",
+                            "43.0.0-3+deb13u1", "--owner-tag", "welland", "--write-changelog"],
+                           env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("43.0.0-3+deb13u2, not --upstream-debian-version 43.0.0-3+deb13u1", r.stderr)
 
     def test_nfpm_tree_has_no_debian(self):
         # A Go repository packaged with nfpm has no debian/: printing the

@@ -613,6 +613,19 @@ with the pin instead (fpga-tools' `upstreams.toml`, libpio's pin date), and
 the build passes that. `~deb<R>` and `~pr<P>` follow as for any Set B
 version.
 
+When the fetched project is **a Debian source package** (cryptography-insecure
+rebuilds each suite's `python-cryptography`, renamed), `<upstream version>` is
+that package's own version, revision included, pinned per suite:
+`43.0.0-3+deb13u1+welland.0.0.post6~deb13`. A `3.0 (quilt)` source needs the
+revision, and ours extending Debian's keeps a Debian stable update
+(`+deb13u2`) or a new Debian version sorting above every build of the old one.
+The build passes `--upstream-debian-version 43.0.0-3+deb13u1`, and the
+fetched source's `debian/changelog`, Debian's history, stays under the
+build's entry; the build fails if that changelog is for another version
+than the pin (the code and the version would disagree). A Debian binNMU of
+the same source (`49.0.0-2+b1`) sorts below ours (`b` before `w`), so it
+doesn't replace our build and needs no new pin.
+
 An **epoch** (`2:`) is only for a repository recovering from an earlier
 version scheme, and is declared as a `PKG-VERSION` exception (rpi-qemu).
 
