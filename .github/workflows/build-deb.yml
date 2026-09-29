@@ -200,6 +200,16 @@ jobs:
           path: built-debs/*.deb
           if-no-files-found: error
           retention-days: 14
+      # An Architecture: all repository that bundles into raspbian-<codename>:
+      # the Raspbian suite's packages are this suite's, the same files
+      # (scripts/build-matrix.py, `also`).
+      - uses: actions/upload-artifact@v7
+        if: matrix.also != ''
+        with:
+          name: debs-${{ matrix.also }}-${{ matrix.arch }}
+          path: built-debs/*.deb
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v7
         with:
           name: dbgsym-${{ matrix.suite }}-${{ matrix.arch }}
