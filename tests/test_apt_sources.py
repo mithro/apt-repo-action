@@ -92,9 +92,14 @@ class Validate(unittest.TestCase):
         # docs/packaging.md, "Bundling a dependency repository".
         self.assertFalse(aps.validate([OURS])[0]["bundle"])
         self.assertTrue(aps.validate([{**OURS, "bundle": True}])[0]["bundle"])
-        self.bad({**OURS, "bundle": "yes"}, "`bundle` is true or false")
+        self.bad({**OURS, "bundle": "yes"}, '`bundle` is true, false or "third-party"')
         # Someone else's: never by accident, and only a flat repository.
         self.bad({**FLAT, "bundle": True}, 'bundle = "third-party"')
+        # A `repo` is ours only with the declaring repository's owner.
+        self.assertTrue(aps.validate([{**OURS, "bundle": True}], owner="SomeOne")[0]["bundle"])
+        with self.assertRaisesRegex(aps.Error, "someone/dep-backport isn't mithro's"):
+            aps.validate([{**OURS, "bundle": True}], owner="mithro")
+        self.assertTrue(aps.validate([{**OURS, "bundle": "third-party"}], owner="mithro")[0]["bundle"])
         self.assertTrue(aps.validate([{**FLAT, "bundle": "third-party"}])[0]["bundle"])
         self.bad({**THIRD, "bundle": "third-party"}, "only a flat repository can be bundled")
 

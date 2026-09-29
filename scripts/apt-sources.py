@@ -9,6 +9,7 @@ suite declares where they come from in `.github/apt-packaging.toml`:
     repo = "owner/name"
     suites = ["bookworm"]             # optional: only these suites
     bundle = true                     # optional: publish its packages ours need in our suites
+                                      # (true: the same owner as ours; else "third-party")
     reason = "why"
 
     [[depends]]                       # anything else
@@ -18,7 +19,7 @@ suite declares where they come from in `.github/apt-packaging.toml`:
     components = ["main"]             # omit for a flat repository
     key = "https://example.org/key.gpg"
     suites = ["trixie", "forky"]
-    bundle = "third-party"            # optional, flat only: as bundle = true, for someone else's
+    bundle = "third-party"            # optional, flat only: bundle someone else's
     reason = "why"
 
 `repo` is resolved through the GitHub API (`repos/<repo>/pages`, html_url) to
@@ -71,9 +72,10 @@ CODENAMES = ["bookworm", "trixie", "forky", "sid"]
 KNOWN_SUITES = CODENAMES + [f"raspbian-{c}" for c in CODENAMES if c != "sid"]
 OURS = {"repo", "suites", "bundle", "reason"}
 EXPLICIT = {"name", "url", "suite", "components", "key", "suites", "bundle", "reason"}
-# Bundling re-signs the dependency's packages with our key: for one of ours
-# (`repo`) `bundle = true` says so; for anyone else's the value must say
-# whose they are, so it is never done by accident.
+# Bundling re-signs the dependency's packages with our key. `bundle = true`
+# is only for a `repo` with the same GitHub owner as the repository declaring
+# it; anything else must say `bundle = "third-party"`, so someone else's
+# packages are never signed as ours by accident.
 THIRD_PARTY = "third-party"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")   # what apt reads in sources.list.d
 REPO = re.compile(r"[A-Za-z0-9-]+/([A-Za-z0-9_.-]+)")
@@ -131,8 +133,12 @@ def _dist(template: str, suite: str) -> str:
     return template.format(suite=suite, codename=suite.removeprefix("raspbian-"))
 
 
-def validate(deps: list[dict]) -> list[dict]:
-    """Check every entry and fill in its defaults. Raises Error."""
+def validate(deps: list[dict], owner: str | None = None) -> list[dict]:
+    """Check every entry and fill in its defaults. Raises Error.
+
+    `owner` is the GitHub owner of the repository declaring them: given, a
+    `bundle = true` must name a `repo` of that owner (bundling does; the
+    build, which doesn't bundle, needn't know it)."""
     out, names = [], {}
     for n, d in enumerate(deps, 1):
         where = f"[[depends]] #{n}" + (f" ({d.get('repo') or d.get('name')})"
@@ -155,12 +161,16 @@ def validate(deps: list[dict]) -> list[dict]:
             if unknown:
                 raise Error(f"{where}: unknown suite {', '.join(unknown)} (known: {', '.join(KNOWN_SUITES)})")
         bundle = d.get("bundle", False)
-        if "repo" in d and bundle not in (True, False):
-            raise Error(f"{where}: `bundle` is true or false, not {bundle!r}")
-        if "repo" not in d and bundle not in (False, THIRD_PARTY):
-            raise Error(f"{where}: bundling re-signs this repository's packages with ours, and it isn't "
-                        f"one of ours: say so with bundle = \"{THIRD_PARTY}\" (docs/packaging.md, "
-                        f"\"Bundling a dependency repository\"), not {bundle!r}")
+        if bundle not in (True, False, THIRD_PARTY):
+            raise Error(f"{where}: `bundle` is true, false or \"{THIRD_PARTY}\", not {bundle!r}")
+        if bundle is True:
+            repo = d.get("repo")
+            dep_owner = repo.split("/")[0] if isinstance(repo, str) else None
+            if dep_owner is None or (owner is not None and dep_owner.lower() != owner.lower()):
+                whose = "it isn't a `repo`" if dep_owner is None else f"{repo} isn't {owner}'s"
+                raise Error(f"{where}: bundling re-signs its packages with our key, and {whose}: "
+                            f"say so with bundle = \"{THIRD_PARTY}\" (docs/packaging.md, "
+                            f"\"Bundling a dependency repository\")")
         e = {"reason": reason.strip(), "suites": suites, "bundle": bool(bundle)}
         if "repo" in d:
             m = REPO.fullmatch(d["repo"]) if isinstance(d["repo"], str) else None
