@@ -57,7 +57,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$notes"
 : > "$notes/from-staging"
 : > "$notes/rebuilt"
-keyring=/usr/share/keyrings/apt-repo-action-raspbian.gpg
 pool=/var/cache/apt-repo-action-rebuilt
 max_rounds=25
 max_depth=6
@@ -86,22 +85,9 @@ elif [ -z "$codename" ]; then
   exit 1
 fi
 
-if [ ! -f "$keyring" ]; then
-  echo "::error::$keyring is missing from the Raspbian root: can't verify $codename-staging"
-  exit 1
-fi
-# What the suite alone offers, "package version" per line, from the lists apt
-# already verified: anything installed later at a version not in here came
-# from staging or a rebuild.
-apt-cache dumpavail | awk '/^Package: /{p=$2} /^Version: /{print p, $2}' | sort -u > "$notes/suite-versions"
-archive=http://archive.raspbian.org/raspbian
-{
-  echo "deb [signed-by=$keyring] $archive $codename-staging main contrib non-free rpi"
-  echo "deb-src [signed-by=$keyring] $archive $codename main contrib non-free rpi"
-  echo "deb-src [signed-by=$keyring] $archive $codename-staging main contrib non-free rpi"
-} > /etc/apt/sources.list.d/apt-repo-action-raspbian-staging.list
-dpkg-query -W -f '${Package} ${Version}\n' | sort -u > "$notes/before"
-apt-get update
+# staging.sh records what the suite alone offers, so the end can tell what
+# came from staging or a rebuild, then adds staging and the Sources.
+sh "$here/staging.sh" add "$codename" "$notes" --sources
 
 refresh_pool() {
   (cd "$pool" && dpkg-scanpackages . > Packages) || return 1
@@ -176,13 +162,7 @@ for src in $rebuild; do
 done
 build_deps . 0 || exit 1
 
-dpkg-query -W -f '${Package} ${Version}\n' | sort -u > "$notes/after"
-# Installed or upgraded by this attempt, and at a version the suite lacks.
-comm -13 "$notes/before" "$notes/after" | comm -23 - "$notes/suite-versions" > "$notes/from-staging"
-rm -f "$notes/before" "$notes/after" "$notes/suite-versions"
-n=$(grep -c . "$notes/from-staging" || true)
-echo "from $codename-staging or rebuilt ($n packages):"
-cat "$notes/from-staging"
+sh "$here/staging.sh" report "$notes"
 if [ -s "$notes/rebuilt" ]; then
   echo "rebuilt from Raspbian's source:"
   cat "$notes/rebuilt"

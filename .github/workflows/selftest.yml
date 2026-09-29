@@ -364,6 +364,49 @@ jobs:
             | tar -xO ./usr/share/selftest/hello.txt | tee hello.txt
           grep -qx 'patched by us' hello.txt
 
+  raspbian-staging-harness:
+    # build-deb/raspbian/staging.sh as a repository's end-to-end test uses it
+    # (docs/packaging.md, "Suites"): in a clean container of the raspbian-forky
+    # root, add forky-staging and install a test tool, openssh-server, whose
+    # dependencies (ucf -> libtext-wrapi18n-perl -> libtext-charwidth-perl ->
+    # perl-base 5.42) forky alone couldn't install on 2026-09-30, then report
+    # what came from staging. The root itself never has staging.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Prepare the raspbian-forky root
+        id: root
+        uses: ./build-deb
+        with:
+          suite: raspbian-forky
+          arch: armhf
+          source-dir: tests/fixtures/hello
+          build: "false"
+      - name: A test tool, with staging as a fallback
+        env:
+          IMAGE: ${{ steps.root.outputs.image }}
+          PLATFORM: ${{ steps.root.outputs.platform }}
+        run: |
+          set -eu
+          docker run --rm --platform "$PLATFORM" \
+            -v "$PWD/build-deb/raspbian/staging.sh:/staging.sh:ro" "$IMAGE" sh -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              # The root has no staging of its own.
+              test ! -e /etc/apt/sources.list.d/apt-repo-action-raspbian-staging.list
+              apt-get update
+              if apt-get install -y --no-install-recommends openssh-server; then
+                echo "raspbian forky alone installs openssh-server today"
+              fi
+              sh /staging.sh add forky /notes
+              apt-get install -y --no-install-recommends openssh-server
+              sh /staging.sh report /notes
+              test -f /notes/from-staging
+              # Refuses anything but a codename, and a root without the key.
+              if sh /staging.sh add "forky main" /n2; then exit 1; fi
+              mv /usr/share/keyrings/apt-repo-action-raspbian.gpg /k
+              if sh /staging.sh add forky /n3; then exit 1; fi
+              echo "staging.sh: ok"'
+
   build-deb-raspbian-staging:
     # build-deb/raspbian/build-dep.sh: a Raspbian build whose build
     # dependencies the suite alone can't satisfy takes them from
