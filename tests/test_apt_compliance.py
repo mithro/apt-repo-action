@@ -443,6 +443,206 @@ class Changelog(unittest.TestCase):
         self.assertIsNone(apc.changelog(self.ROOT + ["debian/changelog"], None, "A", False)[0])
         self.assertEqual(apc.changelog(["nfpm.yaml"], None, "B", True), (None, "nfpm build"))
 
+    def test_mirror_is_as_set_b(self):
+        self.assertEqual(apc.changelog(self.ROOT, "/debian/changelog\n", "mirror", False),
+                         (True, "not committed; ignored"))
+        self.assertFalse(apc.changelog(self.ROOT + ["debian/changelog"], None, "mirror", False)[0])
+
+
+# fpgas-online/migen's, on packaging (2026-09-27), trimmed to what matters.
+MIRROR_SYNC = """name: Sync upstream
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: write # push the mirrored branches and tags
+  actions: write # start deb.yml
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - id: mirror
+        run: python3 packaging/sync-mirror.py
+      - if: steps.mirror.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deb.yml --ref packaging --repo "$GITHUB_REPOSITORY"
+"""
+MIRROR_DECL = {"kind": "mirror", "upstream": "https://git.m-labs.hk/M-Labs/migen.git",
+               "mirror": {"build": "master", "ours": ["github-master", "legacy", "experimental"]}}
+
+
+class Mirror(unittest.TestCase):
+    NOW = 1790000000.0  # 2026-09-21T12:53:20Z
+
+    def facts(self, **mirror):
+        m = {"build_present": True, "shared_history": False, "ours": "a" * 40, "theirs": "a" * 40,
+             "theirs_error": None, "sync_runs": []}
+        m.update(mirror)
+        return {"default": "packaging", "mirror": m, "workflows": {"sync-upstream.yml": MIRROR_SYNC}}
+
+    def rules(self, f, decl=MIRROR_DECL):
+        t = {"mirror": apc.mirror_declaration(decl)[0]}
+        return {r: (ok, d) for r, ok, d in apc.mirror_rules(f, t, now=self.NOW)}
+
+    def test_declaration(self):
+        self.assertEqual(apc.mirror_declaration(MIRROR_DECL),
+                         ({"build": "master", "ours": ["github-master", "legacy", "experimental"], "tags": "[0-9]*",
+                           "patches": []}, []))
+        self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "mirror": {"build": "master", "tags": "v[0-9]*"}})[0]["tags"],
+                         "v[0-9]*")
+        self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "upstream": "git@example.org:x/y.git"})[1], [])
+
+    def test_declaration_problems(self):
+        def probs(**kw):
+            return apc.mirror_declaration({**MIRROR_DECL, **kw})[1]
+        self.assertIn("a mirror's `upstream` must be the git URL it copies", probs(upstream=None))
+        self.assertIn("a mirror needs a [mirror] table with `build`", probs(mirror="master"))
+        self.assertIn("[mirror] build must name the branch the package is built from", probs(mirror={}))
+        self.assertIn("[mirror] build master is one of our own branches",
+                      probs(mirror={"build": "master", "ours": ["master"]}))
+        self.assertIn("[mirror] build packaging is one of our own branches", probs(mirror={"build": "packaging"}))
+        self.assertIn("[mirror] ours must be a list of branch names", probs(mirror={"build": "master", "ours": "x"}))
+        self.assertIn("[mirror] has unknown keys branch", probs(mirror={"build": "master", "branch": "x"}))
+        self.assertIn('[mirror] tags must be a glob, such as "[0-9]*" or "v[0-9]*"',
+                      probs(mirror={"build": "master", "tags": ["x"]}))
+
+    def test_sync(self):
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC), (True, "sync-upstream.yml: scheduled, starts deb.yml"))
+        self.assertEqual(apc.mirror_sync(None), (False, "no sync-upstream.yml"))
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace('  schedule:\n    - cron: "0 6 * * *" # daily 06:00 UTC\n', "")),
+                         (False, "not scheduled"))
+        # Only in a comment: it doesn't start anything.
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace("run: gh workflow run", "run: true # gh workflow run")),
+                         (False, "doesn't start deb.yml"))
+        self.assertFalse(apc.mirror_sync(MIRROR_SYNC.replace("name: Sync upstream", "name: Mirror"))[0])
+
+    def test_sync_permissions_and_concurrency(self):
+        no_actions = MIRROR_SYNC.replace("  actions: write # start deb.yml\n", "")
+        self.assertEqual(apc.mirror_sync(no_actions), (False, "doesn't grant actions: write"))
+        racing = MIRROR_SYNC.replace("cancel-in-progress: false", "cancel-in-progress: true")
+        self.assertEqual(apc.mirror_sync(racing), (False, "no concurrency group that waits (two syncs could race)"))
+        # With patches, the sync opens an issue when one doesn't apply.
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC, with_patches=True), (False, "doesn't grant issues: write"))
+        both = MIRROR_SYNC.replace("  actions: write # start deb.yml\n", "  actions: write\n  issues: write\n")
+        self.assertTrue(apc.mirror_sync(both, with_patches=True)[0])
+
+    def test_tags_that_cant_be_listed_fail(self):
+        rs = {"name": "tags", "include": ["refs/tags/*"], "exclude": []}
+        ok, detail = self.rules(self.facts(upstream_tags=None, upstream_tags_error="Connection refused",
+                                           tag_rulesets=[rs]))["PKG-SYNC"]
+        self.assertFalse(ok)
+        self.assertIn("couldn't list upstream's tags", detail)
+
+    PIN = "c" * 40
+
+    def patch_facts(self, **x):
+        pin = {"branch": "patches/axfr", "commit": self.PIN, "tip": self.PIN, "base": "a" * 40,
+               "ahead": 2, "behind": 3}
+        pin.update(x)
+        return {**self.facts(patches=[pin]), "files": []}
+
+    def test_patches(self):
+        decl = {**MIRROR_DECL, "mirror": {**MIRROR_DECL["mirror"], "patches": [{"branch": "patches/axfr",
+                                                                               "commit": self.PIN}]}}
+        self.assertEqual(self.rules(self.patch_facts(), decl)["PKG-PATCHES"],
+                         (True, "patches/axfr: 2 commit(s), 3 behind"))
+        self.assertEqual(self.rules(self.patch_facts(tip="d" * 40), decl)["PKG-PATCHES"],
+                         (False, "patches/axfr is at dddddddddddd, but the pin is cccccccccccc"))
+        self.assertEqual(self.rules(self.patch_facts(tip=None), decl)["PKG-PATCHES"][0], False)
+        self.assertIn("isn't based on master", self.rules(self.patch_facts(base=None), decl)["PKG-PATCHES"][1])
+
+    def test_no_patches_and_committed_patches(self):
+        self.assertEqual(self.rules({**self.facts(), "files": []})["PKG-PATCHES"], (None, "no patches"))
+        ok, detail = self.rules({**self.facts(), "files": ["debian/patches/series"]})["PKG-PATCHES"]
+        self.assertFalse(ok)
+        self.assertIn("packaging commits debian/patches/series", detail)
+
+    def test_patch_declaration_problems(self):
+        probs = apc.mirror_declaration({**MIRROR_DECL, "mirror": {"build": "master", "patches": [
+            {"branch": "axfr", "commit": "abc"}]}})[1]
+        self.assertIn("a patch branch is patches/<topic>, not 'axfr'", probs)
+        self.assertIn("axfr's commit must be a full commit id", probs)
+
+    def test_in_step(self):
+        r = self.rules(self.facts())
+        self.assertEqual(r["PKG-HISTORY"], (True, "packaging shares no history with master"))
+        self.assertEqual(r["PKG-UPSTREAM"], (True, "master is upstream's (aaaaaaaaaaaa)"))
+        self.assertEqual(r["PKG-SYNC"], (True, "sync-upstream.yml: scheduled, starts deb.yml"))
+
+    def test_shared_history(self):
+        self.assertEqual(self.rules(self.facts(shared_history=True))["PKG-HISTORY"],
+                         (False, "packaging shares history with master"))
+
+    def test_upstream_moved_since_a_recent_sync(self):
+        recent = [{"conclusion": None, "created_at": "2026-09-21T12:00:00Z"},  # running: not counted
+                  {"conclusion": "success", "created_at": "2026-09-21T06:00:00Z"}]
+        ok, detail = self.rules(self.facts(theirs="b" * 40, sync_runs=recent))["PKG-UPSTREAM"]
+        self.assertTrue(ok, detail)
+        self.assertIn("upstream moved since the last sync", detail)
+
+    def test_upstream_moved_and_the_sync_is_failing_or_stale(self):
+        failing = [{"conclusion": "failure", "created_at": "2026-09-21T06:00:00Z"}]
+        stale = [{"conclusion": "success", "created_at": "2026-09-18T06:00:00Z"}]
+        for runs, want in ((failing, "last sync failure"), (stale, "last sync success 2026-09-18"), ([], "no sync has run")):
+            ok, detail = self.rules(self.facts(theirs="b" * 40, sync_runs=runs))["PKG-UPSTREAM"]
+            self.assertFalse(ok)
+            self.assertIn(want, detail)
+
+    def test_upstream_unreachable(self):
+        self.assertEqual(self.rules(self.facts(theirs=None, theirs_error="upstream has no master branch"))["PKG-UPSTREAM"],
+                         (False, "upstream: upstream has no master branch"))
+
+    def test_no_build_branch(self):
+        r = self.rules(self.facts(build_present=False))
+        self.assertEqual(r["PKG-HISTORY"], (False, "no master branch"))
+        self.assertEqual(r["PKG-UPSTREAM"], (False, "no master branch"))
+        r = self.rules(self.facts(), decl={**MIRROR_DECL, "mirror": {}})
+        self.assertEqual(r["PKG-UPSTREAM"], (False, "no [mirror] build declared"))
+
+    def target_facts(self, declaration):
+        return {"declaration": declaration, "site": None, "workflows": {"deb.yml": "run: dpkg-buildpackage"},
+                "fork": True, "branches": ["packaging", "master"], "upstream_authors": [], "files": [],
+                "debian/control": "Source: x\n\nPackage: x\nArchitecture: all\n"}
+
+    def test_declared_not_inferred(self):
+        # A GitHub fork with a packaging default branch is Set A, unless it says otherwise.
+        self.assertEqual(apc.target(self.target_facts(None), "fpgasonline")["kind"], "A")
+        decl = ('kind = "mirror"\nupstream = "https://git.m-labs.hk/M-Labs/migen.git"\narchitectures = "all"\n'
+                '[mirror]\nbuild = "master"\n')
+        t = apc.target(self.target_facts(decl), "fpgasonline")
+        self.assertEqual((t["kind"], t["mirror"], t["mirror_problems"]),
+                         ("mirror", {"build": "master", "ours": [], "tags": "[0-9]*", "patches": []}, []))
+
+    # fpgas-online/migen's tag ruleset (2026-09-29): only vX.Y, plus upstream's bare tags.
+    MIGEN_RULESET = {"name": "Enforce vXX.ZZZ version tags (+ upstream migen tags)", "include": ["refs/tags/*"],
+                     "exclude": ["refs/tags/v[0-9].[0-9]", "refs/tags/v[0-9].[0-9][0-9]", "refs/tags/[0-9]*"]}
+    UPSTREAM_TAGS = ["refs/tags/0.5.dev", "refs/tags/0.9.2"]
+
+    def test_ruleset_admits_upstreams_tags(self):
+        self.assertEqual(apc.refused_tags(self.UPSTREAM_TAGS, [self.MIGEN_RULESET]), {})
+
+    def test_ruleset_refuses_upstreams_tags(self):
+        rs = {**self.MIGEN_RULESET, "exclude": self.MIGEN_RULESET["exclude"][:2]}
+        self.assertEqual(apc.refused_tags(self.UPSTREAM_TAGS, [rs]), {rs["name"]: self.UPSTREAM_TAGS})
+        f = self.facts(upstream_tags=self.UPSTREAM_TAGS, tag_rulesets=[rs])
+        ok, detail = self.rules(f)["PKG-SYNC"]
+        self.assertFalse(ok)
+        self.assertIn("refuses upstream's 0.5.dev 0.9.2", detail)
+
+    def test_ref_patterns(self):
+        # fnmatch as GitHub's rulesets read it: * stays within a path part.
+        self.assertTrue(apc.ref_pattern("refs/tags/*").fullmatch("refs/tags/0.9.2"))
+        self.assertFalse(apc.ref_pattern("refs/tags/*").fullmatch("refs/tags/debian/2.90-1"))
+        self.assertTrue(apc.ref_pattern("refs/tags/**").fullmatch("refs/tags/debian/2.90-1"))
+        self.assertTrue(apc.ref_pattern("~ALL").fullmatch("refs/tags/x"))
+        self.assertFalse(apc.ref_pattern("refs/tags/v[0-9].[0-9]").fullmatch("refs/tags/v10.1"))
+
 
 SITE = "https://pkgs.example.com/widget"
 FPR = "9DD7CAB5516449861B2243E613136D7A38B0462E"

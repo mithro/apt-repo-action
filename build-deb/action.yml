@@ -422,6 +422,21 @@ runs:
             if [ "$ARCH" = all ]; then what=-A
             elif [ "$ARCH_ALL" = false ]; then what=-B
             else what=-b; fi
+            # Patches scripts/mirror-patches.py generated (it leaves
+            # debian/patches/.mirror-patches): apply them now, and check every
+            # one was. dpkg-source --before-build skips the whole series, and
+            # exits 0, when the first patch does not apply.
+            if [ -e debian/patches/.mirror-patches ]; then
+              dpkg-source --before-build .
+              want=$(grep -v -e "^#" -e "^[[:space:]]*$" debian/patches/series || true)
+              got=
+              if [ -f .pc/applied-patches ]; then got=$(cat .pc/applied-patches); fi
+              if [ "$got" != "$want" ]; then
+                echo "::error::the generated debian/patches were not all applied (series: $(echo "$want" | grep -c . || true), applied: $(echo "$got" | grep -c . || true)): a patch does not apply to this tree, and dpkg-source would have built without them"
+                exit 1
+              fi
+              echo "all $(echo "$want" | grep -c .) generated patches applied"
+            fi
             dpkg-buildpackage -us -uc "$what"
             # dpkg-buildpackage writes to the parent directory.
             cp ../*.deb /work/out/

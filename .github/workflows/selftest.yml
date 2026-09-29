@@ -278,6 +278,83 @@ jobs:
             exit 1
           fi
 
+  mirror-patches:
+    # A mirror with our own patches (docs/packaging.md, "Our own patches on
+    # a mirror"): a patch branch on the mirrored branch, pinned; the build
+    # generates debian/patches from it, and build-deb's dpkg-buildpackage -b
+    # applies them. The package must carry the patched file.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: A mirrored branch, a patch branch on it, and a pin
+        run: |
+          set -eu
+          git init -q -b master src
+          cd src
+          git config user.name selftest; git config user.email selftest@invalid
+          printf 'upstream\n' > hello.txt
+          git add hello.txt; git commit -qm upstream; git tag 1.0
+          git checkout -qb patches/greeting
+          printf 'patched by us\n' >> hello.txt; git commit -qam "hello.txt: our greeting"
+          git checkout -q master
+          printf 'upstream moved\n' > NEWS; git add NEWS; git commit -qm "upstream moves on"
+          mkdir -p debian/source
+          echo '3.0 (quilt)' > debian/source/format
+          printf 'Source: apt-repo-selftest-mirror\nMaintainer: Self Test <selftest@invalid>\nBuild-Depends: debhelper-compat (= 13)\n\nPackage: apt-repo-selftest-mirror\nArchitecture: all\nDescription: selftest\n selftest\n' > debian/control
+          printf '#!/usr/bin/make -f\n%%:\n\tdh $@\noverride_dh_auto_install:\n\tinstall -D -m644 hello.txt debian/apt-repo-selftest-mirror/usr/share/selftest/hello.txt\n' > debian/rules
+          chmod +x debian/rules
+          mkdir -p ../pkg/.github
+          printf 'kind = "mirror"\nupstream = "https://example.org/x.git"\n[mirror]\nbuild = "master"\n[[mirror.patches]]\nbranch = "patches/greeting"\ncommit = "%s"\n' \
+            "$(git rev-parse patches/greeting)" > ../pkg/.github/apt-packaging.toml
+      - name: Check the patches apply, as the sync does
+        run: python3 scripts/mirror-patches.py --declaration pkg/.github/apt-packaging.toml --source src --check
+      - name: Generate debian/patches
+        run: python3 scripts/mirror-patches.py --declaration pkg/.github/apt-packaging.toml --source src
+      - name: A tree the generated patch no longer fits
+        # As if the tree changed after generating: dpkg-source alone would
+        # skip the series, exit 0, and build unpatched.
+        run: |
+          cp -a src src-broken
+          printf 'changed upstream\n' > src-broken/hello.txt
+      - name: Build it, which must fail
+        id: broken
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: src-broken
+          out-dir: built-broken
+          version-args: --owner-tag selftest --upstream-dir . --upstream-tag-match [0-9]*
+          lintian: "off"
+      - name: Check it failed, and built nothing
+        env:
+          OUTCOME: ${{ steps.broken.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::a tree whose generated patches don't apply was built (outcome: $OUTCOME)"
+            exit 1
+          fi
+          if ls built-broken/*.deb; then
+            echo "::error::a package was built without our patches"
+            exit 1
+          fi
+      - name: Build
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: src
+          version-args: --owner-tag selftest --upstream-dir . --upstream-tag-match [0-9]*
+          lintian: "off"
+      - name: The package carries the patched file
+        run: |
+          set -eu
+          ls built-debs
+          dpkg-deb --fsys-tarfile built-debs/apt-repo-selftest-mirror_*_all.deb \
+            | tar -xO ./usr/share/selftest/hello.txt | tee hello.txt
+          grep -qx 'patched by us' hello.txt
+
   build-deb-refuses:
     runs-on: ubuntu-24.04
     steps:

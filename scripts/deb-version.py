@@ -92,19 +92,22 @@ def base_version(src: Path) -> str:
     return f"0.0.post{git(src, 'rev-list', '--count', 'HEAD')}"
 
 
-def upstream_from_describe(describe: str) -> str:
+def upstream_from_describe(describe: str, strip_prefix: bool = False) -> str:
     """An upstream ``git describe --tags --long`` as a Debian upstream version.
 
     ``v1.1.1-173-g24e46d1`` is ``1.1.1.post173``, ``v11.1.0-0-g...`` is
     ``11.1.0``. A leading v goes; ``-`` in the tag becomes ``~``, so a
     release candidate sorts below its release (``v11.0.0-rc2`` is
-    ``11.0.0~rc2``); ``_`` becomes ``.``.
+    ``11.0.0~rc2``); ``_`` becomes ``.``. With `strip_prefix` (a tag
+    chosen by --upstream-tag-match), a project-name prefix goes too:
+    ``netplan-1.1.2`` is ``1.1.2``.
     """
     m = re.fullmatch(r"(.+)-(\d+)-g[0-9a-f]+", describe)
     if not m:
         fail(f"can't read upstream's git describe {describe!r}")
     tag, n = m.group(1), int(m.group(2))
-    v = re.sub(r"^[vV](?=\d)", "", tag).replace("_", ".").replace("-", "~")
+    prefix = r"^(?:[vV]|[A-Za-z][A-Za-z0-9.+]*?[-_])(?=\d)" if strip_prefix else r"^[vV](?=\d)"
+    v = re.sub(prefix, "", tag).replace("_", ".").replace("-", "~")
     check_upstream(v, f"upstream's tag {tag!r}", " Pass --upstream-version instead.")
     return v if n == 0 else f"{v}.post{n}"
 
@@ -116,10 +119,14 @@ def check_upstream(v: str, what: str, hint: str = "") -> None:
              f"letters, digits and . + ~).{hint}")
 
 
-def upstream_version(up: Path) -> str:
-    """The fetched project's version, from its own tags at the pinned commit."""
+def upstream_version(up: Path, match: str | None = None) -> str:
+    """The fetched project's version, from its own tags at the pinned commit:
+    any tag, or with `match` only those matching that glob (a mirror's
+    `[mirror] tags`), so a packaging or experiment tag upstream
+    (``debian/2.90-1``) is never taken for a version."""
     shallow = git(up, "rev-parse", "--is-shallow-repository") == "true"
-    r = subprocess.run(["git", "-C", str(up), "describe", "--tags", "--long"],
+    r = subprocess.run(["git", "-C", str(up), "describe", "--tags", "--long",
+                        *(["--match", match] if match else [])],
                        capture_output=True, text=True)
     if r.returncode != 0:
         fail(f"upstream tree {up}: git describe --tags found no tag"
@@ -131,7 +138,27 @@ def upstream_version(up: Path) -> str:
     if shallow and describe.rsplit("-", 2)[1] != "0":
         fail(f"upstream tree {up} is a shallow clone past its tag, so the commit count "
              "would be wrong. Clone at the tag, or with the history back to it.")
-    return upstream_from_describe(describe)
+    return upstream_from_describe(describe, strip_prefix=bool(match))
+
+
+def mirror_tag_match(tree: Path) -> str | None:
+    """A mirror's `[mirror] tags` from its declaration in `tree`, the
+    packaging checkout (docs/packaging.md, "Mirrors"): the glob upstream's
+    version tags match, "[0-9]*" by default. None for any other kind."""
+    import tomllib
+    path = tree / ".github/apt-packaging.toml"
+    if not path.is_file():
+        return None
+    try:
+        decl = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        fail(f"{path}: {e}")
+    if decl.get("kind") != "mirror":
+        return None
+    tags = (decl.get("mirror") or {}).get("tags", "[0-9]*")
+    if not isinstance(tags, str) or not tags:
+        fail(f"{path}: [mirror] tags must be a glob, such as \"[0-9]*\" or \"v[0-9]*\"")
+    return tags
 
 
 def package_version(base: str, upstream: str | None, owner_tag: str | None,
@@ -233,6 +260,11 @@ def main() -> None:
     up.add_argument("--upstream-dir", type=Path, default=None,
                     help="patch series: the fetched project's checkout, at the pinned commit; "
                          "its git describe --tags gives the version")
+    ap.add_argument("--upstream-tag-match", default=None, metavar="GLOB",
+                    help="with --upstream-dir: only upstream tags matching GLOB are versions, and "
+                         "a project-name prefix is dropped (netplan-1.1.2 is 1.1.2). Default: a "
+                         "mirror's [mirror] tags (\"[0-9]*\" unless declared), from "
+                         "--version-tree's .github/apt-packaging.toml; any tag otherwise")
     ap.add_argument("--owner-tag", default=None,
                     help="patch series: the owner's tag between the two versions (fpgasonline)")
     ap.add_argument("--epoch", type=int, default=None,
@@ -246,7 +278,10 @@ def main() -> None:
     if patch_series != (args.owner_tag is not None):
         fail("a patch series needs --owner-tag and one of --upstream-version or --upstream-dir")
     tree = args.version_tree or args.source_dir
-    upstream = (upstream_version(args.upstream_dir) if args.upstream_dir is not None
+    if args.upstream_tag_match is not None and args.upstream_dir is None:
+        fail("--upstream-tag-match needs --upstream-dir")
+    match = args.upstream_tag_match or mirror_tag_match(tree)
+    upstream = (upstream_version(args.upstream_dir, match) if args.upstream_dir is not None
                 else args.upstream_version)
     version = with_suffixes(package_version(base_version(tree), upstream, args.owner_tag,
                                             args.epoch), args.suite, args.pr)
