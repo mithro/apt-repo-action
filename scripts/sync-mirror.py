@@ -10,7 +10,15 @@ touched:
 - a tag here that is on the default branch's history (its `v0.0`), even if
   upstream has one of the same name.
 Nothing here is ever deleted: a branch upstream deletes stays, with a
-warning.
+warning (migen's choice; docs/packaging.md marks it as pending Tim's
+confirmation).
+
+The branches are pushed together, atomically; then the tags, not
+atomically, so a tag the repository's tag ruleset refuses is skipped with a
+warning and never holds up the copies. Warnings go to the run's summary too:
+our tag not overwritten, a refused tag, a branch gone upstream, and an
+upstream rewrite of the built branch (its new tip not a descendant of the
+old), after which the package's version can go down.
 
 Prints what changed. With $GITHUB_OUTPUT set, it also writes
 ``build=true|false``: whether `[mirror] build`, the branch the package is
@@ -50,6 +58,40 @@ def run(*args: str, check: bool = True, quiet: bool = False) -> subprocess.Compl
     return r
 
 
+def warn(msg: str) -> None:
+    """A warning in the log and, in a workflow, in the run's summary, where
+    it is seen without opening the log."""
+    print(f"::warning::{msg}", flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write(f"- ⚠️ {msg}\n")
+
+
+def unshallow(remote: str) -> None:
+    """actions/checkout clones one commit deep; ancestry needs the history."""
+    if run("git", "rev-parse", "--is-shallow-repository", quiet=True).stdout.strip() == "true":
+        run("git", "fetch", "--no-tags", "--unshallow", remote, quiet=True)
+
+
+def is_ancestor(a: str, b: str) -> bool:
+    return subprocess.run(["git", "merge-base", "--is-ancestor", f"{a}^{{commit}}", f"{b}^{{commit}}"],
+                          capture_output=True, text=True).returncode == 0
+
+
+def push_tags(remote: str, specs: list[str]) -> list[str]:
+    """Pushes the tags, not atomically, so one a tag ruleset refuses leaves
+    the others; returns the refs refused (git push --porcelain: `!`)."""
+    r = run("git", "push", "--porcelain", remote, *specs, check=False, quiet=True)
+    refused = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0] == "!":
+            refused.append(parts[1].partition(":")[2])
+    if r.returncode != 0 and not refused:
+        raise Error(f"git push of the tags failed ({r.returncode}): {r.stderr.strip()}")
+    return refused
+
+
 def refs(remote: str) -> dict[str, str]:
     """ref name -> object id, for branches and tags (peeled tag lines skipped)."""
     out = run("git", "ls-remote", "--heads", "--tags", remote, quiet=True).stdout
@@ -85,20 +127,11 @@ def ours_by_history(remote: str, default: str, names: list[str]) -> set[str]:
     version tags, which upstream must not overwrite."""
     if not names:
         return set()
-    # actions/checkout clones one commit deep; the ancestry test needs the
-    # history.
-    shallow = run("git", "rev-parse", "--is-shallow-repository", quiet=True).stdout.strip() == "true"
-    run("git", "fetch", "--no-tags", *(["--unshallow"] if shallow else []), remote,
-        f"+refs/heads/{default}:refs/sync-mirror/default",
+    unshallow(remote)
+    run("git", "fetch", "--no-tags", remote, f"+refs/heads/{default}:refs/sync-mirror/default",
         *[f"+{n}:refs/sync-mirror/here/{n.removeprefix('refs/')}" for n in names], quiet=True)
-    mine = set()
-    for n in names:
-        r = subprocess.run(["git", "merge-base", "--is-ancestor",
-                            f"refs/sync-mirror/here/{n.removeprefix('refs/')}^{{commit}}",
-                            "refs/sync-mirror/default"], capture_output=True, text=True)
-        if r.returncode == 0:
-            mine.add(n)
-    return mine
+    return {n for n in names if is_ancestor(f"refs/sync-mirror/here/{n.removeprefix('refs/')}",
+                                            "refs/sync-mirror/default")}
 
 
 def sync(upstream: str, build: str, ours: set[str], remote: str, default: str, dry_run: bool) -> bool:
@@ -113,27 +146,48 @@ def sync(upstream: str, build: str, ours: set[str], remote: str, default: str, d
 
     changed = [n for n, sha in sorted(theirs.items()) if here.get(n) != sha and not our_branch(n)]
     for n in sorted(n for n in theirs if our_branch(n)):
-        print(f"::warning::upstream has {n}, which is one of ours here: not mirrored")
+        warn(f"upstream has {n}, which is one of ours here: not mirrored")
     # A tag here that upstream has too, differently: ours if it is on our
     # default branch's history (packaging's v0.0), else a copy to update.
     clash = [n for n in changed if n.startswith("refs/tags/") and n in here]
     for n in sorted(ours_by_history(remote, default, clash)):
-        print(f"::warning::upstream has {n}, which is one of ours here (on {default}): not mirrored")
+        warn(f"upstream has {n}, which is one of ours here (on {default}): not mirrored")
         changed.remove(n)
     for n in sorted(set(here) - set(theirs)):
         if n.startswith("refs/heads/") and not our_branch(n):
-            print(f"::warning::{n} is gone upstream; left here as it is")
+            warn(f"{n} is gone upstream; left here as it is")
 
+    build_ref = f"refs/heads/{build}"
+    refused = []
     if changed:
         # Exactly the objects upstream's refs point at, into a private
         # namespace, then each pushed to the same name here.
         run("git", "fetch", "--no-tags", upstream,
             *[f"+{n}:refs/sync-mirror/{n.removeprefix('refs/')}" for n in changed])
-        specs = [f"+refs/sync-mirror/{n.removeprefix('refs/')}:{n}" for n in changed]
+        if build_ref in changed and build_ref in here:
+            # A rewrite upstream can make the version's upstream half go
+            # down, and apt then won't upgrade (docs/packaging.md, "Mirrors").
+            unshallow(remote)
+            run("git", "fetch", "--no-tags", remote, f"+{build_ref}:refs/sync-mirror/old/{build}", quiet=True)
+            if not is_ancestor(f"refs/sync-mirror/old/{build}", f"refs/sync-mirror/heads/{build}"):
+                warn(f"upstream rewrote {build}: {here[build_ref][:12]} is not an ancestor of the new "
+                     f"{theirs[build_ref][:12]}, so the package's upstream version may go down, and apt "
+                     "would not upgrade to it (docs/packaging.md, \"Mirrors\")")
+        spec = {n: f"+refs/sync-mirror/{n.removeprefix('refs/')}:{n}" for n in changed}
+        branches = [spec[n] for n in changed if not n.startswith("refs/tags/")]
+        tags = [spec[n] for n in changed if n.startswith("refs/tags/")]
         if dry_run:
-            print("dry run, would push:", *specs, sep="\n  ")
+            print("dry run, would push:", *branches, *tags, sep="\n  ")
         else:
-            run("git", "push", "--atomic", remote, *specs)
+            # The branches together; then the tags, each on its own, so one a
+            # tag ruleset refuses never holds up the copies.
+            if branches:
+                run("git", "push", "--atomic", remote, *branches)
+            refused = push_tags(remote, tags) if tags else []
+            for n in refused:
+                warn(f"{remote} refused {n} (a tag ruleset?): not mirrored. A mirror's tag ruleset must admit "
+                     "upstream's tag names (docs/packaging.md, \"Mirrors\")")
+    changed = [n for n in changed if n not in refused]
     for n in changed:
         print(f"mirrored {n}: {here.get(n, '(new)')[:12]} -> {theirs[n][:12]}")
     if not changed:
