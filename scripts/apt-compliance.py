@@ -76,7 +76,7 @@ ARMOUR = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 
 # (id, group, what compliance means, what to do when it fails)
 RULES = [
-    ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}",
+    ("PKG-DECLARED", "Repository", f"the repository declares its kind in {DECLARATION}, and the build accepts it",
      f"Add {DECLARATION}: kind, and a reason for every exception."),
     ("PKG-BRANCH", "Repository", "default branch is `packaging` (Set A) or `main` (Set B), and it is what publishes",
      "Make the conventional branch the default branch and publish from it."),
@@ -90,22 +90,26 @@ RULES = [
      "Write packaging/README.md: upstream, what we change, how to update."),
     ("PKG-DEBIAN", "Repository", "`debian/` at the root of the default branch (a patch series: `packaging/debian/<name>/`)",
      "Move the packaging to debian/ at the root of the default branch."),
+    ("PKG-CHANGELOG", "Repository", "Set B commits no `debian/changelog`, and `.gitignore` lists it",
+     "Delete the committed debian/changelog and add `debian/changelog` to .gitignore (the build writes it)."),
     ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites",
      f"Fix the [[depends]] entries in {DECLARATION} (docs/packaging.md, \"The declaration\")."),
     ("PKG-WORKFLOW", "Workflow", f"`.github/workflows/{WORKFLOW_FILE}` named `{WORKFLOW_NAME}`",
      f"Rename the build workflow to .github/workflows/{WORKFLOW_FILE} with `name: {WORKFLOW_NAME}`."),
     ("PKG-JOBS", "Workflow", "jobs are only `test`, `build-deb`, `publish-apt`, `release`",
      "Rename the jobs to test / build-deb / publish-apt / release."),
-    ("PKG-TRIGGERS", "Workflow", "push to the default branch, pull_request, workflow_dispatch; nothing else",
-     "Set the triggers to push (default branch), pull_request and workflow_dispatch."),
+    ("PKG-TRIGGERS", "Workflow", "push to the default branch, pull_request, workflow_dispatch; nothing else; any `workflow_run` workflow ignores pull requests",
+     "Set the triggers to push (default branch), pull_request and workflow_dispatch; guard every workflow_run job with `github.event.workflow_run.event != 'pull_request'`."),
     ("PKG-PREVIEW", "Workflow", "pull requests build, and `publish-apt` never runs for them",
      "Build on pull_request and guard publish-apt with the default-branch `if:`."),
     ("PKG-CONCURRENCY", "Workflow", "concurrency group `deb-${{ github.ref }}`, cancelling only pull requests",
      "Add the conventional concurrency block."),
     ("PKG-PUBLISHER", "Workflow", "publishes only through `publish-apt.yml@main`",
      "Publish through <action-repo>/.github/workflows/publish-apt.yml@main."),
-    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main`; no local `deb-version.py`",
-     "Build with <action-repo>/build-deb@main and drop packaging/deb-version.py."),
+    ("PKG-SHARED", "Workflow", "builds with the shared build at `@main` (build-deb.yml, build-deb, or deb-version for nfpm "
+     "and a patch series' own job); no local `deb-version.py`",
+     "Build with <action-repo>/.github/workflows/build-deb.yml@main (or the build-deb action, or deb-version for an nfpm "
+     "build) and drop packaging/deb-version.py."),
     ("PKG-INSTALL-TEST", "Workflow", "an `Install test` step installs the packages in a clean container",
      "Add an `Install test` step."),
     ("PKG-SUITES", "Packages", "the default suites, or the declared ones with a reason",
@@ -118,8 +122,8 @@ RULES = [
     ("PKG-DBGSYM", "Packages", "no `-dbgsym` over 10 MB in the apt repository",
      "Keep debug symbols over 10 MB out of apt (artifact and GitHub Release only)."),
     ("PKG-MAINTAINER", "Metadata", "`Maintainer:` is the expected maintainer", "Set Maintainer: in debian/control."),
-    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup lines",
-     "Add an `## Install` section with the setup lines (README.md, or packaging/README.md for Set A)."),
+    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block for one suite, every published suite named, the key's fingerprint, and each dependency repository's setup",
+     "Give README.md (packaging/README.md for Set A) an `## Install` section with docs/conventions.md's setup block for one suite, a sentence naming every published suite to put in its place, the key's fingerprint, and each dependency repository's setup."),
     ("REPO-PAGES", "Published repository", "Pages built by GitHub Actions, HTTPS enforced",
      "Build Pages from GitHub Actions with HTTPS enforced."),
     ("REPO-KEYS", "Published repository", "`<repo>.gpg` (binary) and `<repo>.asc` (armoured) at the site root",
@@ -306,6 +310,22 @@ def workflows_batch(items: list[tuple[str, str]]) -> dict[tuple[str, str], dict]
 def discover(owners: list[str], action_repo: str) -> tuple[list[dict], list[dict]]:
     repos = [r for o in owners for r in list_repos(o)]
     print(f"discover: {len(repos)} repositories", file=sys.stderr)
+    return classify(repos, action_repo)
+
+
+def named(names: list[str]) -> list[dict]:
+    """The repositories `--repo` names, without listing their owners' others."""
+    repos = []
+    for n in names:
+        r = api(f"repos/{n}")
+        if r is None:
+            raise SystemExit(f"error: no repository {n}")
+        repos.append(r)
+    return repos
+
+
+def classify(repos: list[dict], action_repo: str) -> tuple[list[dict], list[dict]]:
+    """The packaging repositories among `repos`, and the sites without packaging."""
     first = workflows_batch([(r["full_name"], "HEAD") for r in repos])
     found, second = {}, []
     for r in repos:
@@ -344,6 +364,37 @@ def discover(owners: list[str], action_repo: str) -> tuple[list[dict], list[dict
     return sorted(packaging, key=lambda d: d["meta"]["full_name"].lower()), sites
 
 
+def local_files(path: Path) -> list[str]:
+    """The files of a checkout that a commit of everything would hold:
+    tracked ones and untracked ones git doesn't ignore."""
+    r = subprocess.run(["git", "-C", str(path), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                       capture_output=True, text=True, check=True)
+    return sorted({p for p in r.stdout.split("\0") if p and (path / p).is_file()})
+
+
+def local_entry(name: str, path: Path, action_repo: str) -> dict:
+    """`name` as GitHub has it (default branch, what publishes, the live
+    site), but with the workflows of the checkout at `path`."""
+    meta = named([name])[0]
+    found = classify([meta], action_repo)[0]
+    if found:
+        d = found[0]
+    else:  # not publishing yet: a new repository's first pull request
+        r = workflows_batch([(name, "HEAD")])[(name, "HEAD")]
+        if not r["default"]:
+            raise SystemExit(f"error: {name} is empty")
+        d = {"meta": meta, "default": r["default"]["name"], "default_oid": r["default"]["target"]["oid"],
+             "deploy": None, "deploy_oid": None}
+        d["build_ref"], d["build_oid"] = d["default"], d["default_oid"]
+    files = local_files(path)
+    d["local"] = path
+    d["workflows"] = {p.rpartition("/")[2]: (path / p).read_text(errors="replace") for p in files
+                      if re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", p)}
+    if not is_packaging(d["workflows"], action_repo):
+        print(f"warning: {path}'s workflows don't publish an apt repository", file=sys.stderr)
+    return d
+
+
 # --------------------------------------------------------------------------
 # Facts about one packaging repository.
 
@@ -379,14 +430,22 @@ def repo_facts(d: dict, action_repo: str) -> dict:
     f["fork"], f["parent"] = info["fork"], (info.get("parent") or {}).get("full_name")
     f["created_at"] = info["created_at"]
     f["branches"] = [b["name"] for b in api_pages(f"repos/{full}/branches?per_page=100")]
-    tree = api(f"repos/{full}/git/trees/{oid}?recursive=1")
-    f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
-    f["tree_truncated"] = tree.get("truncated", False)
-    f["declaration"] = file_at(full, oid, DECLARATION)
-    for p in ("README.md", "packaging/README.md", "debian/control"):
-        f[p] = file_at(full, oid, p) if p in f["files"] else None
+    if d.get("local"):
+        # --local: the checkout's files, as they would be pushed.
+        f["files"], f["tree_truncated"] = local_files(d["local"]), False
+        def read(p):
+            return (d["local"] / p).read_text(errors="replace") if p in f["files"] else None
+    else:
+        tree = api(f"repos/{full}/git/trees/{oid}?recursive=1")
+        f["files"] = [e["path"] for e in tree["tree"] if e["type"] == "blob"]
+        f["tree_truncated"] = tree.get("truncated", False)
+        def read(p):
+            return file_at(full, oid, p) if p in f["files"] else None
+    f["declaration"] = read(DECLARATION)
+    for p in ("README.md", "packaging/README.md", "debian/control", ".gitignore"):
+        f[p] = read(p)
     ctl = [p for p in f["files"] if re.fullmatch(r"packaging/debian/[^/]+/control(\.in)?", p)]
-    f["other_controls"] = {p: file_at(full, oid, p) for p in ctl[:3]}
+    f["other_controls"] = {p: read(p) for p in ctl[:3]}
     # History imported from upstream: commits by other people, older than the
     # repository itself. (A snapshot has only its importer's commits.)
     ours = our_people(full.split("/")[0])
@@ -448,22 +507,7 @@ def target(f: dict, owner_tag: str | None) -> dict:
             variant = "patch-series"
     t["variant"] = variant or ""
     t["nfpm"] = "nfpm" in wf
-    arch = decl.get("architectures")
-    if arch is None:
-        arch = "all" if all_arch and all_arch <= {"all"} else "any"
-    t["architectures"] = arch
-    archs = [] if arch == "all" else (DEFAULT_ARCH if arch == "any" else list(arch))
-    t["arch_default"] = arch in ("any", "all")
-    suites = decl.get("suites", "default")
-    debian = DEFAULT_DEBIAN if suites == "default" else [s for s in suites if not s.startswith("raspbian-")]
-    t["suites_default"] = suites == "default"
-    want = list(debian)
-    if "armhf" in archs:  # Raspbian is armhf only, and has no sid
-        want += [f"raspbian-{s}" for s in debian if s != "sid"]
-    if suites != "default":
-        want = list(suites)
-    t["suites"] = sorted(want, key=KNOWN_SUITES.index)
-    t["archs"] = archs
+    t.update(declared_matrix(decl if t["declared"] else None, all_arch, f.get("debian/control")))
     t["exceptions"] = dict(decl.get("exceptions", {}))
     t["upstream"] = decl.get("upstream")
     raw = decl.get("depends", [])
@@ -476,12 +520,370 @@ def target(f: dict, owner_tag: str | None) -> dict:
     return t
 
 
+def words(value, what: str) -> list[str]:
+    """A TOML list of strings, or a space-separated string, as the reusable
+    build-deb.yml's scripts/build-matrix.py reads `suites` and
+    `architectures`."""
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        out = list(value)
+    elif isinstance(value, str):
+        out = value.split()
+    else:
+        raise ValueError(f"{what} must be a string or a list of strings, not {value!r}")
+    dups = sorted({v for v in out if out.count(v) > 1})
+    if dups:
+        raise ValueError(f"{what} lists {', '.join(dups)} twice")
+    return out
+
+
+def control_architectures(text: str) -> list[str]:
+    """The Architecture: of each binary package in a debian/control."""
+    archs = []
+    for stanza in re.split(r"\n\s*\n", text):
+        fields = {}
+        for line in stanza.splitlines():
+            if line[:1] in (" ", "\t", "#") or ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            fields[name.strip().lower()] = value.strip()
+        if "package" in fields and "architecture" in fields:
+            archs.append(fields["architecture"])
+    return archs
+
+
+def declared_matrix(decl: dict | None, published: set[str], control: str | None) -> dict:
+    """The suites and architectures a repository should publish: its
+    declaration's `suites` and `architectures` (docs/packaging.md, "The
+    declaration"), read as the reusable build-deb.yml plans its builds
+    (scripts/build-matrix.py), so the checker expects what the build makes.
+    A declaration without `architectures` means the default set, as it does
+    to build-matrix.py. With no declaration (None), the target is inferred:
+    "all" when debian/control's packages and the published ones are all
+    Architecture: all. Both have to agree, since a repository can publish
+    packages built outside its debian/control (paramiko-insecure's
+    python3-cryptography-insecure).
+
+    `problems` are what build-matrix.py would refuse the declaration for,
+    failing every build; an unknown name or a wrong type is one of them,
+    and is then left out, so the rest can still be checked."""
+    inferred = decl is None
+    decl = decl or {}
+    problems = []
+    in_control = control_architectures(control) if control is not None else []
+    arch = decl.get("architectures", None if inferred else "any")
+    if arch is None:
+        seen = set(in_control) | published
+        arch = "all" if seen and seen <= {"all"} else "any"
+    if arch == "default":
+        arch = "any"
+    if arch in ("any", "all"):
+        archs = [] if arch == "all" else list(DEFAULT_ARCH)
+    else:
+        try:
+            archs = words(arch, "architectures")
+        except ValueError as e:
+            problems.append(str(e))
+            archs = []
+        unknown = [a for a in archs if a not in DEFAULT_ARCH]
+        if unknown:
+            problems.append(f"unknown architecture {', '.join(unknown)}")
+            archs = [a for a in archs if a in DEFAULT_ARCH]
+    if in_control:
+        dependent = any(a != "all" for a in in_control)
+        if arch == "all" and dependent:
+            problems.append('architectures = "all", but debian/control has architecture-dependent packages')
+        elif arch != "all" and not dependent:
+            problems.append('every package in debian/control is Architecture: all: declare architectures = "all"')
+    suites = decl.get("suites", "default")
+    if suites == "default":
+        want = list(DEFAULT_DEBIAN)
+        if "armhf" in archs:  # Raspbian is armhf only, and has no sid
+            want += [f"raspbian-{s}" for s in DEFAULT_DEBIAN if s != "sid"]
+    else:
+        try:
+            want = words(suites, "suites")
+        except ValueError as e:
+            problems.append(str(e))
+            want = []
+        unknown = [x for x in want if x not in KNOWN_SUITES]
+        if unknown:
+            problems.append(f"unknown suite {', '.join(unknown)}")
+            want = [x for x in want if x in KNOWN_SUITES]
+        raspbian = [x for x in want if x.startswith("raspbian-")]
+        if raspbian and arch == "all":
+            problems.append(f"{' '.join(raspbian)}: an Architecture: all repository publishes only the Debian suites")
+        elif raspbian and "armhf" not in archs:
+            problems.append(f"{' '.join(raspbian)}: the Raspbian suites are armhf only, and the architectures "
+                            "leave armhf out")
+    return {"architectures": arch, "archs": archs, "arch_default": arch in ("any", "all"),
+            "suites": sorted(want, key=KNOWN_SUITES.index), "suites_default": suites == "default",
+            "matrix_problems": problems}
+
+
 def arch_for(suite: str, t: dict) -> set[str]:
     if not t["archs"]:
         return {"all"}
     if suite.startswith("raspbian-"):
         return {"armhf"} & set(t["archs"])
     return set(t["archs"]) - ({"riscv64"} if suite in NO_RISCV64 else set())
+
+
+# --------------------------------------------------------------------------
+# Rules that read a workflow's structure.
+
+BUILD_RUN = re.compile(r"\b(dpkg-buildpackage|debuild|dpkg-deb\s+(-b|--build)|nfpm)\b")
+WORKFLOW_RUN_GUARD = re.compile(r"github\.event\.workflow_run\.event\s*!=\s*['\"]pull_request['\"]")
+# An `if:` with one of these runs even when a job it needs was skipped.
+RUNS_ANYWAY = re.compile(r"\b(always|failure|cancelled)\(\)")
+
+
+def triggers(w: dict) -> dict:
+    """A workflow's `on:`, as a dict whatever form it was written in."""
+    on = w.get(True, w.get("on", {}))  # YAML 1.1 reads a bare `on` as True
+    if isinstance(on, str):
+        return {on: None}
+    if isinstance(on, list):
+        return {k: None for k in on}
+    return on if isinstance(on, dict) else {}
+
+
+def unguarded_workflow_runs(parsed: dict[str, dict]) -> list[str]:
+    """PKG-TRIGGERS, in every workflow: one chained by `workflow_run` must not
+    act on a run that a pull request triggered. `branches: [main]` there
+    matches the triggering run's branch *name*, which a pull request from a
+    fork's own `main` has too; so each job needs
+    `github.event.workflow_run.event != 'pull_request'` in its `if:`, or
+    needs a job that has it (and doesn't run anyway, `always()`)."""
+    out = []
+    for n, w in sorted(parsed.items()):
+        if not isinstance(w, dict) or "workflow_run" not in triggers(w):
+            continue
+        jobs = {k: j for k, j in (w.get("jobs") or {}).items() if isinstance(j, dict)}
+
+        @functools.cache
+        def guarded(name: str) -> bool:
+            cond = str(jobs[name].get("if", ""))
+            if WORKFLOW_RUN_GUARD.search(cond):
+                return True
+            needs = jobs[name].get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            return not RUNS_ANYWAY.search(cond) and any(guarded(x) for x in needs if x in jobs)
+
+        bad = [name for name in jobs if not guarded(name)]
+        if bad:
+            out.append(f"{n}: workflow_run job{'s' if len(bad) > 1 else ''} {' '.join(bad)} "
+                       "not guarded against pull requests")
+    return out
+
+
+def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) -> tuple[bool, str]:
+    """PKG-INSTALL-TEST: a job that builds the packages has a step named
+    `Install test` that runs something. A mention elsewhere (a comment, a
+    script in the tree, a step in another job) doesn't count.
+
+    A job that builds is the build-deb job, one using the shared build-deb
+    action, or one running dpkg-buildpackage, debuild, dpkg-deb --build or
+    nfpm; a job calling a local reusable workflow is read through, from
+    `workflows` (file name -> parsed). When none of those shows (a build in
+    a script), every job but test, release and the publish is taken as a
+    build job."""
+    shared_step = f"{action_repo}/build-deb".lower()
+    shared_workflow = f"{action_repo}/.github/workflows/build-deb.yml".lower()
+    workflows = workflows or {}
+
+    def flatten(jobs, prefix="", depth=0):
+        for name, j in jobs.items():
+            if not isinstance(j, dict):
+                continue
+            local = re.fullmatch(r"\./\.github/workflows/([^/@]+\.ya?ml)", str(j.get("uses", "")))
+            inner = workflows.get(local.group(1)) if local else None
+            if isinstance(inner, dict) and depth < 3:
+                yield from flatten(inner.get("jobs") or {}, f"{prefix}{name}/", depth + 1)
+            else:
+                yield f"{prefix}{name}", name, j
+
+    all_jobs = list(flatten(jobs))
+    for path, _, j in all_jobs:
+        if str(j.get("uses", "")).partition("@")[0].lower() == shared_workflow:
+            return True, f"{path}: the shared build-deb.yml install-tests"
+    steps = {path: [s for s in (j.get("steps") or []) if isinstance(s, dict)] for path, _, j in all_jobs}
+    builders = [path for path, name, _ in all_jobs if name == "build-deb" or any(
+        str(s.get("uses", "")).partition("@")[0].lower() == shared_step
+        or BUILD_RUN.search(code_lines(str(s.get("run", "")))) for s in steps[path])]
+    if not builders:
+        builders = [path for path, name, j in all_jobs if name not in ("test", "release")
+                    and "/publish-apt.yml@" not in str(j.get("uses", ""))]
+    if not builders:
+        return False, "no job builds the packages"
+    for path in builders:
+        for s in steps[path]:
+            if re.fullmatch(r"Install test( \(.*\))?", str(s.get("name", "")).strip()) and \
+                    (code_lines(str(s.get("run", ""))).strip() or str(s.get("uses", "")).strip()):
+                return True, f"`{s['name']}` in {path}"
+    return False, f"no `Install test` step in {', '.join(builders)}"
+
+
+def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, variant: str) -> tuple[bool, str]:
+    """PKG-SHARED (docs/packaging.md, "The shared actions"): the build is the
+    shared one, at `@main`, and the repository carries no deb-version.py.
+
+    Shared is the reusable build-deb.yml workflow (a job's `uses:`), the
+    build-deb action (a step's `uses:`), or, for a build that can't go
+    through build-deb, the deb-version action giving the shared version: an
+    nfpm build or a patch series' own job. Every use of any of them must be
+    at `@main`, the release job's included, since each repository runs
+    exactly what's on apt-repo-action's main."""
+    repo = action_repo.lower()
+    workflow, action, version = (f"{repo}/.github/workflows/build-deb.yml", f"{repo}/build-deb",
+                                 f"{repo}/deb-version")
+    uses = []
+    for j in jobs.values():
+        if not isinstance(j, dict):
+            continue
+        uses.append(str(j.get("uses", "")))
+        uses += [str(s.get("uses", "")) for s in (j.get("steps") or []) if isinstance(s, dict)]
+    found = {}
+    for u in uses:
+        path, _, ref = u.partition("@")
+        if path.lower() in (workflow, action, version):
+            found.setdefault(path.lower(), set()).add(ref)
+    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)"
+                for path, refs in sorted(found.items()) for ref in sorted(refs) if ref != "main"]
+    if workflow in found:
+        what = "the reusable build-deb.yml"
+    elif action in found:
+        what = "the build-deb action"
+    elif version in found and (nfpm or variant == "patch-series"):
+        what = "nfpm with the deb-version action" if nfpm else "the deb-version action in its own job"
+    elif version in found:
+        what = None
+        off_main.insert(0, "deb-version without build-deb, but neither nfpm nor a patch series")
+    else:
+        what = None
+    detail = "; ".join(off_main) if off_main else what or "own build steps"
+    if local_ver:
+        detail += "; local deb-version.py"
+    return bool(what) and not off_main and not local_ver, detail
+
+
+def key_fingerprints(data: bytes) -> list[str]:
+    """The fingerprints of the primary keys in a binary OpenPGP keyring, as
+    40 (v4) or 64 (v6) upper-case hex digits (RFC 9580, 5.5.4)."""
+    import hashlib
+    out, i = [], 0
+    while i < len(data):
+        b = data[i]
+        if not b & 0x80:
+            break  # not a packet: armoured, or garbage
+        if b & 0x40:  # new format
+            tag, o = b & 0x3F, data[i + 1]
+            if o < 192:
+                n, h = o, 2
+            elif o < 224:
+                n, h = ((o - 192) << 8) + data[i + 2] + 192, 3
+            elif o == 255:
+                n, h = int.from_bytes(data[i + 2:i + 6], "big"), 6
+            else:
+                break  # partial lengths: not in a key
+        else:  # old format
+            tag, lt = (b >> 2) & 0x0F, b & 3
+            if lt == 3:
+                break
+            size = 1 << lt
+            n, h = int.from_bytes(data[i + 1:i + 1 + size], "big"), 1 + size
+        body = data[i + h:i + h + n]
+        if tag == 6 and body:
+            if body[0] == 4:
+                out.append(hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper())
+            elif body[0] == 6:
+                out.append(hashlib.sha256(b"\x9b" + len(body).to_bytes(4, "big") + body).hexdigest().upper())
+        i += h + n
+    return out
+
+
+def install_section(doc: str) -> str | None:
+    """The `## Install` section of a README: from a heading that is exactly
+    `## Install` to the next level-2 heading, ignoring `#` lines in code
+    blocks (a shell comment isn't a heading)."""
+    lines, start, fence = doc.splitlines(), None, False
+    for n, l in enumerate(lines):
+        if l.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        if start is None and re.fullmatch(r"## Install[ \t]*#*[ \t]*", l):
+            start = n + 1
+        elif start is not None and re.match(r"##(?!#)", l):
+            return "\n".join(lines[start:n])
+    return None if start is None else "\n".join(lines[start:])
+
+
+def setup_problems(section: str, name: str, site: str, fingerprints: list[str]) -> list[str]:
+    """What the setup block of docs/conventions.md ("One setup") for `name` at
+    `site` is missing from `section`."""
+    # A shell line continuation, inside quotes or not, is one line.
+    section = re.sub(r"[ \t]*\\\n[ \t]*", " ", section)
+    probs = []
+    if f"{site}/{name}.gpg" not in section or f"/etc/apt/keyrings/{name}.gpg" not in section:
+        probs.append(f"no key download from {site}/{name}.gpg into /etc/apt/keyrings")
+    if not re.search(rf"deb \[signed-by=/etc/apt/keyrings/{re.escape(name)}\.gpg\] {re.escape(site)}/[^\s/]+/ \./",
+                     section):
+        probs.append(f"no sources line for {site}/<suite>/")
+    flat = re.sub(r"\s", "", section).upper()
+    if fingerprints and not any(fp in flat for fp in fingerprints):
+        probs.append("no key fingerprint")
+    return probs
+
+
+@functools.cache
+def pages_site(repo: str) -> str:
+    return ((api(f"repos/{repo}/pages") or {}).get("html_url") or "").rstrip("/")
+
+
+def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list[dict],
+         suites: list[str] = ()) -> tuple[bool, str]:
+    """PKG-DOCS (docs/packaging.md, "Documentation"): an `## Install` section
+    with this repository's setup block (for one suite; the reader puts in
+    their own), naming every published suite, with its key's fingerprint and
+    the setup of each dependency repository, and nothing conventions.md
+    forbids."""
+    section = install_section(doc or "")
+    if section is None:
+        return False, "no `## Install` section"
+    probs = setup_problems(section, name, site, key_fingerprints(key)) if site else ["no Pages site to set up"]
+    # A suite name, but not `trixie` inside `raspbian-trixie`.
+    unnamed = [x for x in suites if not re.search(rf"(?<![\w-]){re.escape(x)}(?![\w-])", section)]
+    if unnamed:
+        probs.append(f"doesn't name the published suite{'s' if len(unnamed) > 1 else ''} {' '.join(unnamed)}")
+    for e in depends:
+        if "repo" in e:
+            dep_site = pages_site(e["repo"])
+            probs += [f"dependency {e['name']}: {p}" for p in
+                      (setup_problems(section, e["name"], dep_site, []) if dep_site else ["no Pages site"])]
+        else:
+            url = e["url"].partition("{")[0]
+            if e["key"] not in section or f"/etc/apt/keyrings/{e['name']}." not in section or url not in section:
+                probs.append(f"dependency {e['name']}: no setup for {url} with {e['key']}")
+    probs += [f"mentions {p}" for p in INDEX_FORBIDDEN if p in section]
+    return not probs, "; ".join(probs) if probs else "Install section with the setup and the key fingerprint"
+
+
+def changelog(files: list[str], gitignore: str | None, kind: str, nfpm: bool) -> tuple[bool | None, str]:
+    """PKG-CHANGELOG (docs/packaging.md, "The changelog"): Set B commits no
+    changelog, a patch series' templates included, and with `debian/` at the
+    root lists `debian/changelog` in .gitignore, so a local build doesn't
+    dirty the tree. Set A keeps its committed one."""
+    if kind != "B":
+        return None, "Set A keeps its changelog" if kind == "A" else "no build of its own"
+    tracked = sorted(p for p in files if p == "debian/changelog" or p.endswith("/debian/changelog")
+                     or re.fullmatch(r"packaging/debian/[^/]+/changelog", p))
+    if tracked:
+        return False, f"commits {', '.join(tracked[:2])}"
+    if "debian/control" not in files:
+        return (None, "nfpm build") if nfpm else (True, "no committed changelog")
+    ignored = {l.strip() for l in (gitignore or "").splitlines()} & {"debian/changelog", "/debian/changelog"}
+    return (True, "not committed; ignored") if ignored else (False, "not committed, but not in .gitignore")
 
 
 # --------------------------------------------------------------------------
@@ -510,6 +912,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     # --- Repository
     if t.get("declaration_error"):
         put("PKG-DECLARED", False, f"{DECLARATION} doesn't parse: {t['declaration_error']}")
+    elif t["declared"] and t["matrix_problems"]:
+        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(t["matrix_problems"]))
     else:
         put("PKG-DECLARED", t["declared"], f"kind {kind}" + (f" ({variant})" if variant else "")
             + ("" if t["declared"] else " — inferred"))
@@ -551,6 +955,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     else:
         where = sorted({p.rsplit("/control", 1)[0] for p in f["files"] if p.endswith("debian/control")})
         put("PKG-DEBIAN", False, "no debian/ at the root" + (f" (found {', '.join(where)})" if where else ""))
+    put("PKG-CHANGELOG", *changelog(f["files"], f[".gitignore"], kind, t["nfpm"]))
     if t["depends_error"]:
         put("PKG-DEPENDS", False, t["depends_error"])
     elif not t["depends"]:
@@ -584,8 +989,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     jobs = w.get("jobs") or {}
     need = {"publish-apt"} if kind == "aggregate" else {"build-deb", "publish-apt"}
     put("PKG-JOBS", need <= set(jobs) and set(jobs) <= JOBS, " ".join(jobs) or "none")
-    on = w.get(True, w.get("on", {}))
-    on = {on: None} if isinstance(on, str) else {k: None for k in on} if isinstance(on, list) else (on or {})
+    on = triggers(w)
     bad = []
     push = on.get("push") or {}
     if "push" not in on:
@@ -602,6 +1006,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         bad.append("schedule")
     if any(isinstance(v, dict) and ({"paths", "paths-ignore"} & set(v)) for v in on.values()):
         bad.append("paths filter")
+    # The other workflows too: one chained to this one by workflow_run.
+    bad += unguarded_workflow_runs({n: x for n, x in parsed.items() if n != wf_name})
     put("PKG-TRIGGERS", not bad, " ".join(str(k) for k in on) + (f" — {'; '.join(bad)}" if bad else ""))
     pub = next((j for j in jobs.values() if isinstance(j, dict) and str(j.get("uses", "")).startswith(publish_uses)), {})
     cond = str(pub.get("if", ""))
@@ -616,24 +1022,15 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         (f"group {conc.get('group') if isinstance(conc, dict) else conc}" if conc else "none"))
     ref = str(pub.get("uses", "")).rpartition("@")[2] if pub else None
     put("PKG-PUBLISHER", ref == "main", f"publish-apt.yml@{ref}" if ref else "not through publish-apt.yml")
-    all_uses = [str(s.get("uses", "")) for j in jobs.values() if isinstance(j, dict)
-                for s in (j.get("steps") or []) if isinstance(s, dict)] + \
-        [str(j.get("uses", "")) for j in jobs.values() if isinstance(j, dict)]
-    shared_builds = {f"{args.action_repo}/build-deb".lower(), f"{args.action_repo}/.github/workflows/build-deb.yml".lower()}
-    shared = [u.partition("@") for u in all_uses if u.partition("@")[0].lower() in shared_builds]
-    off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)" for path, _, ref in shared if ref != "main"]
-    local_ver = "packaging/deb-version.py" in f["files"]
     if kind == "aggregate":
         put("PKG-SHARED", None, "nothing to build")
     else:
-        put("PKG-SHARED", bool(shared) and not off_main and not local_ver,
-            ("; ".join(off_main) if off_main else "shared build" if shared else "own build steps")
-            + ("; local deb-version.py" if local_ver else ""))
-    step_names = {str(s.get("name", "")) for j in jobs.values() if isinstance(j, dict)
-                  for s in (j.get("steps") or []) if isinstance(s, dict)}
-    it = "Install test" in step_names or "packaging/install-test.sh" in f["files"]
-    put("PKG-INSTALL-TEST", None if kind == "aggregate" else it,
-        "nothing to build" if kind == "aggregate" else ("install test" if it else "no install test"))
+        put("PKG-SHARED", *shared_build(jobs, args.action_repo, "packaging/deb-version.py" in f["files"],
+                                        t["nfpm"], variant))
+    if kind == "aggregate":
+        put("PKG-INSTALL-TEST", None, "nothing to build")
+    else:
+        put("PKG-INSTALL-TEST", *install_test(jobs, args.action_repo, parsed))
 
     # --- Packages, from the live site
     site = f["site"] or {"suites": {}}
@@ -708,15 +1105,11 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         found = m.group(1).strip() if m else "none"
         put("PKG-MAINTAINER", found == args.maintainer, found)
     doc_path = "packaging/README.md" if kind == "A" else "README.md"
-    doc = f[doc_path] or ""
-    line = f"signed-by=/etc/apt/keyrings/{f['name']}.gpg]"
-    heading = bool(re.search(r"^##+ Install", doc, re.M))
-    # Installing needs each dependency repository too, on its suites.
-    no_dep = [e["name"] for e in t["depends"] if f"signed-by=/etc/apt/keyrings/{e['name']}.gpg]" not in doc]
-    put("PKG-DOCS", heading and line in doc and not no_dep,
-        f"{doc_path}: " + ("Install section with the setup" if heading and line in doc else
-                           "setup lines but no `## Install`" if line in doc else "no setup lines")
-        + (f"; no setup for dependency repository {', '.join(no_dep)}" if no_dep else ""))
+    site_url = (f["site"] or {}).get("site")
+    key = ((f["site"] or {}).get("root") or {}).get(f"{f['name']}.gpg", (0, b""))[1]
+    ok, detail = docs(f[doc_path], f["name"], site_url, key, t["depends"],
+                      sorted((f["site"] or {}).get("suites") or {}, key=KNOWN_SUITES.index))
+    put("PKG-DOCS", ok, f"{doc_path}: {detail}")
 
     # --- Published repository
     pages = f["pages"]
@@ -786,12 +1179,15 @@ def to_markdown(report: dict) -> str:
 
 CSS = """
 :root{--ground:#f4f7f6;--surface:#ffffff;--ink:#17211e;--muted:#5a6964;--line:#d3dcd8;--accent:#2c5a86;
---pass:#2e7d4f;--pass-bg:#e3f2e8;--fail:#b3261e;--fail-bg:#fbe5e3;--exc:#9a5b00;--exc-bg:#fcefd9;--na:#8a9793;--na-bg:transparent}
+--pass:#2e7d4f;--pass-bg:#e3f2e8;--fail:#b3261e;--fail-bg:#fbe5e3;--exc:#9a5b00;--exc-bg:#fcefd9;--na:#8a9793;--na-bg:transparent;
+--kind-A:#2f5f9e;--kind-A-bg:#e8f0fa;--kind-B:#6a4a9c;--kind-B-bg:#f1ebf8;--kind-aggregate:#4d5d66;--kind-aggregate-bg:#eceff1}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--ground:#101615;--surface:#172020;
 --ink:#e2ebe8;--muted:#98a8a2;--line:#2c3936;--accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;
---fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570}}
+--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570;
+--kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427}}
 :root[data-theme="dark"]{color-scheme:dark;--ground:#101615;--surface:#172020;--ink:#e2ebe8;--muted:#98a8a2;--line:#2c3936;
---accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570}
+--accent:#8cb7e0;--pass:#7fd19c;--pass-bg:#16301f;--fail:#ff9d94;--fail-bg:#3a1a18;--exc:#f2c071;--exc-bg:#35280f;--na:#667570;
+--kind-A:#93b8ea;--kind-A-bg:#18233a;--kind-B:#c2a8ea;--kind-B-bg:#241b35;--kind-aggregate:#a9b7bf;--kind-aggregate-bg:#1d2427}
 body{background:var(--ground);color:var(--ink);font:15px/1.55 "IBM Plex Sans",system-ui,sans-serif;padding:32px 20px 64px}
 main{max-width:1280px;margin:0 auto;display:grid;gap:36px}
 h1,h2,h3{text-wrap:balance;line-height:1.2;margin:0}h1{font-size:28px;font-weight:600}h2{font-size:20px;font-weight:600}
@@ -816,8 +1212,17 @@ td.num{font-variant-numeric:tabular-nums;font-weight:600}
 .todo{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px;display:grid;gap:8px;align-content:start}
 .todo .meta{color:var(--muted);font-size:13px}.todo ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:14px}
 .todo li b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:600}
+tr.kind-A td{background:var(--kind-A-bg)}tr.kind-B td{background:var(--kind-B-bg)}
+tr.kind-aggregate td{background:var(--kind-aggregate-bg)}
+tr.kind-A td.repo{box-shadow:inset 4px 0 var(--kind-A)}tr.kind-B td.repo{box-shadow:inset 4px 0 var(--kind-B)}
+tr.kind-aggregate td.repo{box-shadow:inset 4px 0 var(--kind-aggregate)}
+tr[class^="kind-"] td.kind{font-weight:600}tr.kind-A td.kind{color:var(--kind-A)}tr.kind-B td.kind{color:var(--kind-B)}
+tr.kind-aggregate td.kind{color:var(--kind-aggregate)}
+.k{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:4px}
+.k-A{background:var(--kind-A)}.k-B{background:var(--kind-B)}.k-aggregate{background:var(--kind-aggregate)}
 .rules{font-size:14px}.rules td{text-align:left;white-space:normal}.rules td:first-child{white-space:nowrap}
 """
+KIND_ORDER = {"A": 0, "B": 1, "aggregate": 2}
 SYMBOL = {"pass": "✓", "fail": "✗", "exception": "E", "na": "·"}
 
 
@@ -841,18 +1246,21 @@ def to_html(report: dict) -> str:
            f'<div><b>{len(report["sites_without_packaging"])}</b><span>sites without packaging</span></div></div>',
            '<div class="legend"><span><span class="s pass">✓</span> passes</span><span><span class="s fail">✗</span> fails</span>'
            '<span><span class="s exception">E</span> declared exception</span><span><span class="s na">·</span> does not apply</span></div>'
+           '<div class="legend">Rows by kind: <span><span class="k k-A"></span>Set A, someone else\'s code</span>'
+           '<span><span class="k k-B"></span>Set B, our code</span>'
+           '<span><span class="k k-aggregate"></span>aggregate, collects other repositories\' packages</span></div>'
            "</section>"]
     for g in groups:
         ids = [r[0] for r in RULES if r[1] == g]
         out.append(f"<section><h2>{e(g)}</h2><div class=\"scroll\"><table><thead><tr><th class=\"repo\">repository</th>"
                    "<th class=\"repo\">kind</th><th class=\"repo\">fails</th>"
                    + "".join(f'<th title="{e(RULE[i][2])}">{e(i)}</th>' for i in ids) + "</tr></thead><tbody>")
-        for r in repos:
+        for r in sorted(repos, key=lambda r: (KIND_ORDER.get(r["kind"], len(KIND_ORDER)), r["repo"])):
             n = sum(r["checks"][i]["status"] == "fail" for i in ids)
             cells = "".join(f'<td><span class="s {r["checks"][i]["status"]}" title="{e(i)}: {e(r["checks"][i]["detail"])}">'
                             f'{SYMBOL[r["checks"][i]["status"]]}</span></td>' for i in ids)
             kind = r["kind"] + (f" · {r['variant']}" if r["variant"] else "")
-            out.append(f'<tr><td class="repo"><a href="#todo-{e(r["repo"])}">{e(r["repo"])}</a></td>'
+            out.append(f'<tr class="kind-{e(r["kind"])}"><td class="repo"><a href="#todo-{e(r["repo"])}">{e(r["repo"])}</a></td>'
                        f'<td class="kind">{e(kind)}</td><td class="num">{n or ""}</td>{cells}</tr>')
         out.append("</tbody></table></div></section>")
     out.append('<section><h2>What to do, per repository</h2><div class="todos">')
@@ -884,11 +1292,15 @@ def to_html(report: dict) -> str:
 
 # --------------------------------------------------------------------------
 
-def action_repo_default() -> str | None:
-    r = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "remote", "get-url", "origin"],
-                       capture_output=True, text=True)
-    m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(\.git)?$", r.stdout.strip())
+def origin_repo(path: Path) -> str | None:
+    """owner/name of a checkout's GitHub origin."""
+    r = subprocess.run(["git", "-C", str(path), "remote", "get-url", "origin"], capture_output=True, text=True)
+    m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$", r.stdout.strip())
     return m.group(1) if m else None
+
+
+def action_repo_default() -> str | None:
+    return origin_repo(Path(__file__).resolve().parent)
 
 
 def main() -> int:
@@ -898,7 +1310,12 @@ def main() -> int:
     p.add_argument("--maintainer", help="the Maintainer: every package must have")
     p.add_argument("--action-repo", default=action_repo_default(),
                    help="the repository holding publish-apt.yml (default: this checkout's origin)")
-    p.add_argument("--repo", action="append", default=[], help="check only these repositories (owner/name)")
+    p.add_argument("--repo", action="append", default=[],
+                   help="check only these repositories (owner/name), without scanning their owners' others")
+    p.add_argument("--local", type=Path, metavar="PATH",
+                   help="check the checkout at PATH (its workflows, declaration, debian/, README) instead of what "
+                        "GitHub has; the branch, history and live site still come from GitHub. The repository is "
+                        "--repo, or PATH's origin")
     p.add_argument("--json", type=Path)
     p.add_argument("--markdown", type=Path)
     p.add_argument("--html", type=Path)
@@ -906,22 +1323,40 @@ def main() -> int:
     if not args.action_repo:
         p.error("--action-repo is needed: it can't be read from this checkout's origin")
     owners = dict((o.split("=", 1) + [None])[:2] for o in args.owner)
-    packaging, orphans = discover(list(owners), args.action_repo)
-    found = frozenset(d["meta"]["full_name"].lower() for d in packaging)
-    if args.repo:
-        packaging = [d for d in packaging if d["meta"]["full_name"] in args.repo]
+    if args.local:
+        if len(args.repo) > 1:
+            p.error("--local checks one repository: give at most one --repo")
+        name = args.repo[0] if args.repo else origin_repo(args.local)
+        if not name:
+            p.error(f"--repo is needed: {args.local} has no GitHub origin")
+        args.repo = [name]
+        packaging, orphans = [local_entry(name, args.local.resolve(), args.action_repo)], []
+    elif args.repo:
+        # Only the named repositories: no scan of their owners' others.
+        packaging, orphans = classify(named(args.repo), args.action_repo)
+        for n in sorted(set(args.repo) - {d["meta"]["full_name"] for d in packaging}):
+            print(f"warning: {n} is not a packaging repository", file=sys.stderr)
+    else:
+        packaging, orphans = discover(list(owners), args.action_repo)
+    found = {d["meta"]["full_name"].lower() for d in packaging}
     print(f"discover: {len(packaging)} packaging repositories, {len(orphans)} sites without packaging", file=sys.stderr)
     with ThreadPoolExecutor(6) as ex:
         facts = list(ex.map(lambda d: repo_facts(d, args.action_repo), packaging))
+    targets = [target(f, owners.get(f["repo"].split("/")[0])) for f in facts]
+    if args.repo:
+        # Without a scan, look at each dependency repository itself.
+        deps = sorted({e["repo"] for t in targets for e in t["depends"] if "repo" in e} - found)
+        if deps:
+            found |= {d["meta"]["full_name"].lower() for d in classify(named(deps), args.action_repo)[0]}
     repos = []
-    for f in facts:
+    for f, t in zip(facts, targets):
         tag = owners.get(f["repo"].split("/")[0])
-        t = target(f, tag)
-        checks = check(f, t, args, tag, found)
+        checks = check(f, t, args, tag, frozenset(found))
         repos.append({"repo": f["repo"], "kind": t["kind"], "variant": t["variant"], "declared": t["declared"],
                       "build_ref": f["build_ref"], "build_workflow": f["build_workflow"],
                       "site": (f["site"] or {}).get("site"), "target_suites": t["suites"],
-                      "target_architectures": t["archs"] or ["all"], "checks": checks})
+                      "target_architectures": t["archs"] or ["all"], "checks": checks,
+                      **({"local": str(f["local"])} if f.get("local") else {})})
     import datetime
     report = {"date": datetime.date.today().isoformat(), "owners": list(owners), "action_repo": args.action_repo,
               "repos": repos, "sites_without_packaging": orphans}

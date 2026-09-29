@@ -56,6 +56,33 @@ inputs:
       the committed changelog's version is used as it is.
     required: false
     default: auto
+  lintian:
+    description: >-
+      Run lintian on the built packages (docs/packaging.md, "Package
+      contents"). "warn" (the default): every error and warning lintian finds
+      becomes a warning annotation, and its findings never fail the build.
+      "error": lintian's errors fail the build. "off": don't run it. In both
+      warn and error, lintian not being able to run at all (image, apt,
+      install, a crash) fails the build.
+    required: false
+    default: warn
+  version-tree:
+    description: >-
+      The git checkout, relative to the workspace, whose vX.Y tags and
+      commits give the version and the changelog's commit (default: the
+      source-dir). A patch series builds in the fetched project's tree, so
+      it passes its own checkout here, usually ".".
+    required: false
+    default: ""
+  version-args:
+    description: >-
+      Extra arguments for the shared scripts/deb-version.py, space-separated:
+      a patch series' "--owner-tag fpgasonline --upstream-dir ." (paths are
+      relative to the source-dir) or "--upstream-version 1.1.1", and
+      "--epoch 2" under a declared exception (docs/packaging.md, "Versions").
+      Only with the shared script.
+    required: false
+    default: ""
   github-token:
     description: >-
       Token for the GitHub API, which gives the site of each `repo = ...`
@@ -73,6 +100,12 @@ outputs:
       before installing the built packages; with none declared for the
       suite, install.sh does nothing.
     value: ${{ steps.depends.outputs.path }}
+  lintian-errors:
+    description: "The number of lintian errors (E:) in the built packages; empty with `lintian: off`."
+    value: ${{ steps.lintian.outputs.errors }}
+  lintian-warnings:
+    description: "The number of lintian warnings (W:) in the built packages; empty with `lintian: off`."
+    value: ${{ steps.lintian.outputs.warnings }}
   image:
     description: >-
       The docker image the build ran in: debian:<suite>, or the Raspbian root
@@ -97,6 +130,8 @@ runs:
         ARCH: ${{ inputs.arch }}
         SOURCE_DIR: ${{ inputs.source-dir }}
         VERSION_SCRIPT: ${{ inputs.version-script }}
+        VERSION_TREE: ${{ inputs.version-tree }}
+        VERSION_ARGS: ${{ inputs.version-args }}
         ARCH_ALL: ${{ inputs.arch-all }}
       run: |
         set -eu
@@ -174,6 +209,14 @@ runs:
             fi
             mode=script; script=$VERSION_SCRIPT ;;
         esac
+        if [ "$mode" != shared ] && { [ -n "$VERSION_ARGS" ] || [ -n "$VERSION_TREE" ]; }; then
+          echo "::error::version-args and version-tree are for the shared scripts/deb-version.py, but this build uses version-script $VERSION_SCRIPT ($mode)."
+          exit 1
+        fi
+        if [ -n "$VERSION_TREE" ] && [ ! -d "$GITHUB_WORKSPACE/$VERSION_TREE" ]; then
+          echo "::error::version-tree $VERSION_TREE does not exist"
+          exit 1
+        fi
         {
           echo "platform=$platform"
           echo "image=$image"
@@ -313,18 +356,23 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         ACTION_ROOT: ${{ github.action_path }}/..
         DEPENDS_DIR: ${{ steps.depends.outputs.dir }}
+        VERSION_TREE: ${{ inputs.version-tree }}
+        VERSION_ARGS: ${{ inputs.version-args }}
       run: |
         set -eux
         mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
         depends=()
         if [ -n "$DEPENDS_DIR" ]; then depends=(-v "$DEPENDS_DIR:/work/apt-sources:ro"); fi
+        # The version tree, read-only: the script only reads its tags and commits.
+        tree=()
+        if [ -n "$VERSION_TREE" ]; then tree=(-v "$GITHUB_WORKSPACE/$VERSION_TREE:/work/version-tree:ro"); fi
         docker run --rm --platform "$PLATFORM" \
           -v "$GITHUB_WORKSPACE/$SOURCE_DIR:/work/src" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
-          "${depends[@]}" \
+          "${depends[@]}" "${tree[@]}" \
           -w /work/src \
-          -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
+          -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR -e VERSION_ARGS \
           -e GITHUB_REPOSITORY \
           "$IMAGE" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
@@ -338,9 +386,11 @@ runs:
             apt-get build-dep -y ./
             # git refuses to read a tree owned by another user.
             git config --global --add safe.directory "*"
+            read -ra version_args <<< "$VERSION_ARGS"
+            if [ -d /work/version-tree ]; then version_args+=(--version-tree /work/version-tree); fi
             case "$VERSION_MODE" in
               shared) python3 /work/apt-repo-action/scripts/deb-version.py \
-                        --suite "$SUITE" ${PR:+--pr "$PR"} --write-changelog ;;
+                        --suite "$SUITE" ${PR:+--pr "$PR"} "${version_args[@]}" --write-changelog ;;
               script) python3 "$VERSION_SCRIPT" --write-changelog ;;
             esac
             dpkg-parsechangelog -S Version
@@ -355,3 +405,73 @@ runs:
             cp /work/*.deb /work/out/
             ls -lh /work/out/
           '
+
+    # docs/packaging.md, "Package contents": lintian runs on every build. In
+    # debian:<codename> on the runner's own platform, not the build's: lintian
+    # reads another architecture's .debs as they are, so an emulated build
+    # doesn't run lintian under QEMU too. As a user, since lintian's authors
+    # advise against running it as root.
+    #
+    # `warn` only means lintian's findings don't fail the build. lintian not
+    # being able to run (no image, no mirror, a crash) fails it in every mode:
+    # a build that says it was checked must have been.
+    - name: Lintian
+      id: lintian
+      if: inputs.lintian != 'off'
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        OUT_DIR: ${{ inputs.out-dir }}
+        MODE: ${{ inputs.lintian }}
+        ACTION_ROOT: ${{ github.action_path }}/..
+      run: |
+        set -u
+        # Only for the self-test, to make the install fail: not an input.
+        LINTIAN_PACKAGE=${APT_REPO_ACTION_SELFTEST_LINTIAN_PACKAGE:-lintian}
+        export LINTIAN_PACKAGE
+        case "$MODE" in
+          warn|error) ;;
+          *) echo "::error::lintian must be warn, error or off, not $MODE"; exit 1 ;;
+        esac
+        # Fatal in warn and error mode alike.
+        could_not_run() {
+          echo "::error title=lintian::lintian could not run: $1"
+          exit 1
+        }
+        report=$(mktemp -d "$RUNNER_TEMP/lintian.XXXXXX") || could_not_run "no temporary directory"
+        # Named explicitly: after an emulated build, the local debian:<suite>
+        # tag is the build's architecture's image, and would run under QEMU.
+        case "$RUNNER_ARCH" in
+          X64)   platform=linux/amd64 ;;
+          ARM64) platform=linux/arm64 ;;
+          *) could_not_run "unsupported runner architecture $RUNNER_ARCH" ;;
+        esac
+        docker run --rm --platform "$platform" \
+          -v "$GITHUB_WORKSPACE/$OUT_DIR:/debs:ro" \
+          -v "$report:/report" \
+          -e LINTIAN_PACKAGE \
+          "debian:${SUITE#raspbian-}" bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            echo "lintian runs on $(dpkg --print-architecture)"
+            # A mirror blip is retried rather than failing the build.
+            echo "Acquire::Retries \"3\";" > /etc/apt/apt.conf.d/80-retries
+            apt-get update
+            apt-get install -y --no-install-recommends "$LINTIAN_PACKAGE"
+            useradd -m lintian-runner
+            status=0
+            runuser -u lintian-runner -- lintian --fail-on none --tag-display-limit 0 \
+              /debs/*.deb > /report/lintian.txt || status=$?
+            echo "$status" > /report/status
+          ' || could_not_run "its container failed (exit status $?), see the log above"
+        cat "$report/lintian.txt"
+        status=$(cat "$report/status") || could_not_run "it left no exit status"
+        # Status 1: lintian itself failed (any mode) or, in error mode, found
+        # errors; the annotations say which. Anything else is the script
+        # crashing.
+        rc=0
+        python3 "$ACTION_ROOT/scripts/lintian-report.py" --mode "$MODE" \
+          --status "$status" "$report/lintian.txt" || rc=$?
+        case "$rc" in
+          0|1) exit "$rc" ;;
+          *) could_not_run "scripts/lintian-report.py failed (exit status $rc)" ;;
+        esac
