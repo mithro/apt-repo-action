@@ -385,7 +385,10 @@ jobs:
     #     build-depends on its newest source version, which only a rebuild
     #     has. With none stale anywhere, it says so loudly and proves only
     #     that the build still works.
-    #   rebuild-input: the same, named up front with raspbian-rebuild.
+    #   rebuild-input: the same, named up front with raspbian-rebuild. With
+    #     no stale crate it names rust-schemars-derive anyway (a small crate
+    #     whose build dependencies the archive has), so the rebuild path is
+    #     tested on every run whatever state the archive is in.
     name: build-deb-raspbian-staging (${{ matrix.case }})
     runs-on: ubuntu-24.04-arm
     strategy:
@@ -418,7 +421,7 @@ jobs:
           set -eu
           python3 tests/pick-stale-raspbian.py forky | tee -a "$GITHUB_OUTPUT"
           if ! grep -q '^source=' "$GITHUB_OUTPUT"; then
-            echo "::warning title=Raspbian rebuild::no Rust crate in raspbian forky or forky-staging is older than its source today, so there is nothing to rebuild: this job only checks the build still works, not the rebuild"
+            echo "::warning title=Raspbian rebuild::no rebuildable Rust crate in raspbian forky or forky-staging is older than its source today, so the automatic rebuild goes untested; rebuild-input still rebuilds rust-schemars-derive by name"
           fi
 
       - name: Make the fixture
@@ -452,19 +455,19 @@ jobs:
           suite: raspbian-forky
           arch: armhf
           source-dir: fixture-src
-          raspbian-rebuild: ${{ matrix.case == 'rebuild-input' && steps.pick.outputs.source || '' }}
+          raspbian-rebuild: ${{ matrix.case == 'rebuild-input' && (steps.pick.outputs.source || 'rust-schemars-derive') || '' }}
 
       - name: The rebuild was reported
-        if: startsWith(matrix.case, 'rebuild') && steps.pick.outputs.source != ''
+        if: matrix.case == 'rebuild-input' || (matrix.case == 'rebuild' && steps.pick.outputs.source != '')
         env:
           REBUILT: ${{ steps.build.outputs.rebuilt }}
-          STALE: ${{ steps.pick.outputs.source }}
+          WANT: ${{ steps.pick.outputs.source || 'rust-schemars-derive' }}
         run: |
           set -eu
-          echo "rebuilt: $REBUILT (want $STALE among them)"
+          echo "rebuilt: $REBUILT (want $WANT among them)"
           case " $REBUILT " in
-            *" $STALE "*) ;;
-            *) echo "::error::$STALE should be listed as rebuilt"; exit 1 ;;
+            *" $WANT "*) ;;
+            *) echo "::error::$WANT should be listed as rebuilt"; exit 1 ;;
           esac
 
       - name: The fallback took texinfo's dependencies from staging
