@@ -194,7 +194,10 @@ jobs:
         run: |
           set -eu
           for f in built-debs/*.deb; do
-            if dpkg-deb -c "$f" | grep -E 'etc/crypto-policies|apt-sequoia'; then
+            # Listed first, so a dpkg-deb failure fails the step (set -e)
+            # instead of reading as "no policy in it".
+            contents=$(dpkg-deb -c "$f")
+            if printf '%s\n' "$contents" | grep -E 'etc/crypto-policies|apt-sequoia'; then
               echo "::error::$f carries a crypto policy"
               exit 1
             fi
