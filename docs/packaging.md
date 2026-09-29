@@ -532,6 +532,17 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
 - A repository whose packages are all `Architecture: all` publishes only the
   Debian suites. Raspbian hosts use the Debian suite of the same codename:
   the packages are the same files.
+  - **Unless it bundles an architecture-dependent dependency**
+    ([Bundling a dependency repository](#bundling-a-dependency-repository)):
+    the Debian suite's armhf copy of that dependency is Debian's ARMv7
+    build, which ARMv6 Pis (Zero, Pi 1) can't run. Such a repository MAY
+    list `raspbian-<codename>` (with `<codename>` itself) wherever a
+    `bundle` dependency applies, so an ARMv6 host still adds one
+    repository. That suite holds our packages as built for `<codename>`,
+    the same files (the `~deb<R>` suffix is the codename's), plus the
+    dependency's `raspbian-<codename>` packages; there is no separate
+    Raspbian build, and it is install-tested as armhf in the Raspbian root.
+    paramiko-insecure does this for python3-cryptography-insecure.
 - **When Debian makes a release**, this table changes in a pull request:
   1. The new testing is added.
   2. The new oldstable stops being a default. Repositories opted in to
@@ -1125,7 +1136,9 @@ reason = "python3-paho-mqtt (>= 2) is not in bookworm"
   package of ours is bundled for every architecture the dependency
   repository has it for, since ours installs anywhere; one needed only by
   architecture-dependent packages, for their architectures. The suite's
-  `Architectures` counts them.
+  `Architectures` counts them. In a `raspbian-<codename>` suite that comes
+  from the dependency's `raspbian-<codename>` suite, so an Architecture: all
+  repository can serve ARMv6 hosts too (see [Suites](#suites)).
 - **Which versions.** For each relation, the newest version that satisfies
   it when we publish (by `dpkg --compare-versions`), so several versions
   of one package if relations need them. keep-history keeps earlier ones
