@@ -83,6 +83,18 @@ class PatchSeries(unittest.TestCase):
             with self.subTest(describe=describe):
                 self.assertEqual(dv.upstream_from_describe(describe), want)
 
+    def test_upstream_describe_with_a_match(self):
+        # A tag chosen by --upstream-tag-match loses a project-name prefix too;
+        # without one, the result is exactly as before (openocd-0.12 fails).
+        for describe, want in [
+            ("netplan-1.1.2-4-gabcdef0", "1.1.2.post4"),
+            ("migen_0.9.2-0-gabcdef0", "0.9.2"),
+            ("v1.1.1-173-g24e46d1", "1.1.1.post173"),
+            ("0.9.2-126-gbeffe83", "0.9.2.post126"),
+        ]:
+            with self.subTest(describe=describe):
+                self.assertEqual(dv.upstream_from_describe(describe, strip_prefix=True), want)
+
     def test_bad_upstream_fails(self):
         for bad in ["openocd-0.12-0-gabcdef0", "v1.0:2-0-gabcdef0"]:
             with self.subTest(describe=bad), self.assertRaises(SystemExit):
@@ -243,6 +255,36 @@ class Tree(unittest.TestCase):
         self.commit("two")
         r = self.run_script("--suite", "trixie", "--upstream-dir", str(up), "--owner-tag", "fpgasonline")
         self.assertEqual(r.stdout.strip(), "1.1.1.post3+fpgasonline.0.0.post2~deb13")
+
+    def test_upstream_tag_match(self):
+        # upstream's newest tag is a packaging tag; only 0.9.2 is a version.
+        up = self.upstream_tree("0.9.2", 2)
+        subprocess.run(["git", "-C", str(up), "tag", "debian/0.9.2-1"], check=True, env=self.env)
+        self.commit("two")
+        base = ["--suite", "sid", "--upstream-dir", str(up), "--owner-tag", "fpgasonline"]
+        # Any tag (the default, unchanged): the packaging tag is taken, and refused.
+        self.assertNotEqual(self.run_script(*base, check=False).returncode, 0)
+        r = self.run_script(*base, "--upstream-tag-match", "[0-9]*")
+        self.assertEqual(r.stdout.strip(), "0.9.2.post2+fpgasonline.0.0.post2")
+
+    def test_mirror_declaration_gives_the_match(self):
+        up = self.upstream_tree("0.9.2", 1)
+        subprocess.run(["git", "-C", str(up), "tag", "experiment/x"], check=True, env=self.env)
+        (self.src / ".github").mkdir()
+        decl = self.src / ".github/apt-packaging.toml"
+        base = ["--suite", "sid", "--upstream-dir", str(up), "--owner-tag", "fpgasonline"]
+        decl.write_text('kind = "mirror"\nupstream = "https://example.org/x.git"\n[mirror]\nbuild = "master"\n')
+        self.assertEqual(self.run_script(*base).stdout.strip(), "0.9.2.post1+fpgasonline.0.0.post1")
+        decl.write_text(decl.read_text() + 'tags = "v[0-9]*"\n')
+        self.assertNotEqual(self.run_script(*base, check=False).returncode, 0)  # no v tags
+        # Not a mirror: any tag, as before.
+        decl.write_text('kind = "B"\nvariant = "patch-series"\n')
+        self.assertNotEqual(self.run_script(*base, check=False).returncode, 0)
+
+    def test_upstream_tag_match_needs_upstream_dir(self):
+        r = self.run_script("--suite", "sid", "--upstream-version", "1.0", "--owner-tag", "x",
+                            "--upstream-tag-match", "[0-9]*", check=False)
+        self.assertNotEqual(r.returncode, 0)
 
     def test_patch_series_from_upstream_version(self):
         r = self.run_script("--suite", "sid", "--pr", "4", "--upstream-version", "20260914",
