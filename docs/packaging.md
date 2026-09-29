@@ -948,7 +948,9 @@ Optional. A repository that also publishes its builds as GitHub Releases:
   `## Install` section gives the setup for each
   [dependency repository](#dependency-repositories), for the suites it is
   declared for, before its own. For one of ours that is the same setup
-  block with its name and site.
+  block with its name and site. A
+  [bundled](#bundling-a-dependency-repository) one needs none: users get
+  its packages from ours.
 - `packaging/apt-intro.html` is optional: prose for the index page.
 - The GitHub repository description says what the packages are. For Set A
   it names the upstream: "tmux, with …, packaged for Debian".
@@ -1075,6 +1077,113 @@ For both:
   declaration; `write --suite <suite> --dest <dir>` resolves it, fetches
   the keys and writes `<dir>/install.sh`, which adds them in any Debian
   container with nothing but apt.
+
+#### Bundling a dependency repository
+
+Without more, a user adds every dependency repository as well as ours.
+`bundle` asks publish-apt to serve the dependency repository's packages
+that ours need from our own suites instead, signed with our key, so a user
+adds only ours:
+
+```toml
+[[depends]]
+repo = "mithro/paho-mqtt-bookworm"
+suites = ["bookworm"]
+bundle = true
+reason = "python3-paho-mqtt (>= 2) is not in bookworm"
+```
+
+- **Whose.** Bundling re-signs the dependency's packages with our key, so
+  our users trust them as ours. `bundle = true` is only for a `repo` with
+  the same GitHub owner as the repository declaring it. Anything else, a
+  `repo` of another owner included, must say `bundle = "third-party"`,
+  only when we vouch for that repository; an explicit (non-`repo`) one
+  must also be a flat repository. PKG-DEPENDS applies the same rule.
+- **Which packages.** Each `Depends` and `Pre-Depends` relation of ours
+  that the dependency repository can satisfy (the package at a version the
+  relation allows, or a `Provides`; a versioned relation only by a
+  versioned `Provides`), and what those need from it in turn. What it
+  doesn't have is left to Debian. An alternative Debian would satisfy may
+  be bundled too: whether Debian has it can't be known without the
+  archive, and what a dependency repository has is normally why it was
+  declared. A relation without alternatives on a package the dependency
+  repository has, none of whose versions satisfies it, fails the publish.
+- **Which architectures.** A package needed by an `Architecture: all`
+  package of ours is bundled for every architecture the dependency
+  repository has it for, since ours installs anywhere; one needed only by
+  architecture-dependent packages, for their architectures. The suite's
+  `Architectures` counts them.
+- **Which versions.** For each relation, the newest version that satisfies
+  it when we publish (by `dpkg --compare-versions`), so several versions
+  of one package if relations need them. keep-history keeps earlier ones
+  as it does ours. A client that also has the dependency repository gets
+  whichever version is higher, as apt always does, so nothing needs
+  pinning.
+- **Nothing unverified.** The dependency repository's `InRelease` must
+  verify with its key (only the verified text is read), and, for one of
+  ours, be for this suite. Its `Packages` must match the hash `InRelease`
+  gives, and each `.deb` the `Size` and `SHA256` its `Packages` gives.
+  Each `.deb`'s own control file must also say exactly what its stanza
+  does (`Package`, `Version`, `Architecture`, `Source`, `Multi-Arch`,
+  `Essential` and its relations): our index is made from the files, so a
+  file claiming to be another package, one of ours say, would otherwise
+  enter it. If anything fails, an unreachable repository included, the
+  publish fails:
+  publishing without the dependency would leave our packages
+  uninstallable for anyone using only our repository.
+- **Marked.** Each bundled package's stanza in our signed `Packages` says
+  `Bundled-From: <repository>` (`owner/name`, or the flat URL), and the
+  index page shows it. The compliance rules about our own packages leave
+  bundled ones out.
+- **Building is unchanged.** `build-deb` still adds the dependency
+  repository for the build. The [install test](#builds) offers the
+  bundled packages to apt as a local source and adds only the other
+  dependency repositories, so apt chooses among them (one of several
+  alternatives or versions) as it would from the published repository,
+  which proves that repository is enough. A repository with its own install
+  test does the same:
+
+  ```sh
+  python3 <apt-repo-action>/scripts/bundle-depends.py fetch --suite "$SUITE" \
+    --arch "$ARCH" --debs built-debs --dest bundled-debs --index
+  python3 <apt-repo-action>/scripts/apt-sources.py write --unbundled \
+    --suite "$SUITE" --dest apt-sources
+  # in the container: sh apt-sources/install.sh
+  #   echo "deb [trusted=yes] file:/bundled-debs ./" > /etc/apt/sources.list.d/bundled.list
+  #   apt-get update; apt-get install ./built-debs/*.deb
+  ```
+
+  `trusted=yes` is for the throwaway test container only: every bundled
+  file was already verified as above. Never in anything published.
+- **The README** gives only our repository's setup: PKG-DOCS asks for no
+  setup lines for a bundled dependency repository.
+- **Keeping up.** A newer version in the dependency repository reaches our
+  users at our next publish. To not wait for one, call
+  [`refresh-bundled.yml`](../.github/workflows/refresh-bundled.yml) on a
+  schedule: it runs the same selection over our live packages and the
+  bundled repositories' indexes, and starts the build workflow only when
+  that would bundle something our live site doesn't have, so most days
+  nothing runs:
+
+  ```yaml
+  name: Refresh bundled packages
+  on:
+    schedule: [{cron: "23 4 * * *"}]
+    workflow_dispatch:
+  permissions:
+    contents: read
+    actions: write
+  jobs:
+    refresh:
+      uses: mithro/apt-repo-action/.github/workflows/refresh-bundled.yml@main
+      with:
+        suites: "bookworm trixie forky sid"
+  ```
+
+  A dependency repository starting its dependents' builds instead would
+  need a token able to start workflows in other repositories.
+- [`scripts/bundle-depends.py`](../scripts/bundle-depends.py) does the
+  copying (`fetch`) and the check (`stale`).
 
 The exceptions agreed on 2026-09-25, which each repository's declaration
 should carry:

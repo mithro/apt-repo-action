@@ -1,0 +1,74 @@
+name: Refresh bundled packages
+
+# Reusable. A repository that bundles a dependency repository's packages
+# (docs/packaging.md, "Bundling a dependency repository") serves the version
+# its last publish copied; a newer one reaches its users only when it
+# publishes again. Called on a schedule, this checks whether a bundled
+# repository has something newer than the live site bundles (or bundles
+# nothing from it yet), and only then starts the build workflow on the
+# default branch, which rebuilds and republishes. Nothing newer: nothing runs.
+#
+# Usage (.github/workflows/refresh-bundled.yml in the calling repository):
+#   name: Refresh bundled packages
+#   on:
+#     schedule: [{cron: "23 4 * * *"}]
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#     actions: write      # to start the build workflow
+#   jobs:
+#     refresh:
+#       uses: mithro/apt-repo-action/.github/workflows/refresh-bundled.yml@main
+#       with:
+#         suites: "bookworm trixie forky sid"
+
+on:
+  workflow_call:
+    inputs:
+      suites:
+        description: Space-separated suites the repository publishes.
+        required: true
+        type: string
+      workflow:
+        description: The build workflow to start when something is newer.
+        required: false
+        default: deb.yml
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check out this workflow's own apt-repo-action
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .apt-repo-action
+
+      - name: Is anything bundled out of date?
+        id: stale
+        env:
+          SUITES: ${{ inputs.suites }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          site=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .html_url)
+          python3 .apt-repo-action/scripts/bundle-depends.py stale --suites "$SUITES" --site "$site" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Rebuild and republish
+        if: steps.stale.outputs.stale == 'true'
+        env:
+          WORKFLOW: ${{ inputs.workflow }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          default=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref "$default"
+          echo "started $WORKFLOW on $default" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -247,6 +247,27 @@ jobs:
           done
           ls install-debs/*.deb
 
+      # A dependency repository declared with `bundle` is served from ours
+      # (docs/packaging.md, "Bundling a dependency repository"), so the test
+      # installs its packages from the bundle and adds only the others: it
+      # proves a user needs just this repository.
+      - name: The bundled packages, and the other dependency repositories
+        id: bundle
+        env:
+          SUITE: ${{ matrix.suite }}
+          ARCH: ${{ matrix.arch }}
+          # The declaration build-deb reads: the source tree's, not the checkout's.
+          DECLARATION: source/${{ inputs.source-dir }}/.github/apt-packaging.toml
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p bundled-debs
+          python3 .apt-repo-action/scripts/bundle-depends.py fetch --declaration "$DECLARATION" \
+            --suite "$SUITE" --arch "$ARCH" --debs install-debs --dest bundled-debs --index
+          python3 .apt-repo-action/scripts/apt-sources.py write --unbundled --declaration "$DECLARATION" \
+            --suite "$SUITE" --dest "$RUNNER_TEMP/apt-sources-unbundled" > /dev/null
+          echo "apt-sources=$RUNNER_TEMP/apt-sources-unbundled" >> "$GITHUB_OUTPUT"
+
       # The same image, QEMU and dependency repositories the build had.
       - name: Prepare the suite's container
         id: prepare
@@ -261,7 +282,7 @@ jobs:
         env:
           IMAGE: ${{ steps.prepare.outputs.image }}
           PLATFORM: ${{ steps.prepare.outputs.platform }}
-          APT_SOURCES: ${{ steps.prepare.outputs.apt-sources }}
+          APT_SOURCES: ${{ steps.bundle.outputs.apt-sources }}
           SOURCE_DIR: source/${{ inputs.source-dir }}
           OPTIONS: ${{ inputs.install-test-options }}
         run: |
@@ -270,7 +291,8 @@ jobs:
           # tag at another architecture.
           # shellcheck disable=SC2086 # OPTIONS is a list of docker options
           docker run --rm --platform "$PLATFORM" $OPTIONS \
-            -v "$PWD/install-debs:/debs:ro" -v "$APT_SOURCES:/apt-sources:ro" \
+            -v "$PWD/install-debs:/debs:ro" -v "$PWD/bundled-debs:/bundled:ro" \
+            -v "$APT_SOURCES:/apt-sources:ro" \
             -v "$(cd "$SOURCE_DIR" && pwd):/src:ro" \
             -v "$PWD/.apt-repo-action/scripts/install-test.sh:/install-test.sh:ro" \
             "$IMAGE" sh /install-test.sh

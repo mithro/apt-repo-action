@@ -101,7 +101,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-README | Set A has `packaging/README.md`; a mirror has `README.md` naming its upstream | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
 | PKG-CHANGELOG | Set B and mirrors commit no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |
-| PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
+| PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites; each published suite a `bundle` one applies to holds packages bundled from it | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan; live `Packages` (`Bundled-From:`) |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
 | PKG-TRIGGERS | push to default + pull_request + workflow_dispatch; nothing else; every `workflow_run` job guarded against pull requests | parse YAML, every workflow |
@@ -117,7 +117,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
 | PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
-| PKG-DOCS | a `## Install` section (that exact heading) holding the setup block for one suite, the name of every published suite, the key's fingerprint (read from the live key) and each dependency repository's setup; nothing conventions.md forbids | README, live key |
+| PKG-DOCS | a `## Install` section (that exact heading) holding the setup block for one suite, the name of every published suite, the key's fingerprint (read from the live key) and each dependency repository's setup, except a bundled one's; nothing conventions.md forbids | README, live key |
 | REPO-PAGES | Pages from Actions, HTTPS enforced | GitHub API |
 | REPO-KEYS | `<repo>.gpg` binary, `<repo>.asc` armoured | live site |
 | REPO-LAYOUT | flat signed suites, nothing at the root | live site |

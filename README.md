@@ -32,6 +32,8 @@ versions. This README covers using the workflow.
 | `.github/workflows/sync-mirror.yml` | reusable workflow | A mirror repository's sync: copy upstream's branches and tags exactly, and start `deb.yml` when the built branch moved |
 | `scripts/sync-mirror.py` | script | `sync-mirror.yml`'s copy, driven by the declaration's `upstream` and `[mirror]` |
 | `scripts/apt-sources.py` | script | The dependency repositories a declaration's `[[depends]]` names: resolve, fetch the keys, write an apt setup for `build-deb` and install tests |
+| `scripts/bundle-depends.py` | script | For a `[[depends]]` with `bundle`: copy the packages ours need from it, verified against its signed index, into our suites (publish-apt), and say whether they are out of date |
+| `.github/workflows/refresh-bundled.yml` | reusable workflow | On a schedule: republish when a bundled dependency repository has something newer |
 | `scripts/lintian-report.py` | script | Turn `build-deb`'s lintian run into annotations, a job-summary table and counts |
 | `tests/` + `.github/workflows/selftest.yml` | self-test | Publish with this checkout, then install from it on bookworm, trixie, jammy and noble |
 
@@ -209,6 +211,11 @@ before `apt-get build-dep`, and fails if one can't be fetched and verified.
 Its `apt-sources` output gives the install test the same repositories. See
 [Dependency repositories](docs/packaging.md#dependency-repositories) for
 the explicit form, for a repository that isn't ours.
+
+With `bundle = true`, publish-apt also serves the packages ours need from a
+dependency repository from our own suites, verified against its signed
+index and signed with our key, so users add only our repository
+([Bundling a dependency repository](docs/packaging.md#bundling-a-dependency-repository)).
 
 ## Signing
 

@@ -755,6 +755,12 @@ class Docs(unittest.TestCase):
         apc.pages_site.cache_clear()
         self.assertEqual(self.docs(README, depends=[DEP]), (False, "dependency dep-backport: no Pages site"))
 
+    def test_bundled_dependency_needs_no_setup(self):
+        # docs/packaging.md, "Bundling a dependency repository": served from
+        # ours, so the README sets up only ours.
+        ok, _ = self.docs(README.replace("dep-backport", "elsewhere"), depends=[{**DEP, "bundle": True}])
+        self.assertTrue(ok)
+
     def test_third_party_dependency(self):
         third = {"name": "example", "url": "https://example.org/debian", "suite": "{codename}",
                  "key": "https://example.org/key.asc"}
@@ -812,3 +818,39 @@ class Docs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Bundle(unittest.TestCase):
+    """PKG-DEPENDS: a `bundle` dependency's packages are on the live site."""
+
+    def site(self, **suites):
+        return {"suites": {s: {"bundled": [{"Bundled-From": b, "Architecture": "all"} for b in bs]}
+                           for s, bs in suites.items()}}
+
+    def test_gaps(self):
+        dep = apc.apt_sources.validate([{"repo": "o/dep", "bundle": True, "suites": ["bookworm"], "reason": "r"}])
+        self.assertEqual(apc.bundle_gaps(dep, self.site(bookworm=["o/dep"], trixie=[])), [])
+        self.assertEqual(apc.bundle_gaps(dep, self.site(bookworm=["o/other"])),
+                         ["bookworm bundles nothing from o/dep"])
+        self.assertEqual(apc.bundle_gaps(dep, None), [])  # nothing published yet: nothing to check
+
+    def test_explicit_form_by_its_url(self):
+        dep = apc.apt_sources.validate([{"name": "x", "url": "https://x.example/{suite}", "suite": "./",
+                                         "key": "https://x.example/k.gpg", "bundle": "third-party",
+                                         "reason": "r"}])
+        self.assertEqual(apc.bundle_gaps(dep, self.site(trixie=["https://x.example/trixie/"])), [])
+
+    def test_bundle_true_is_for_the_same_owner(self):
+        # PKG-DEPENDS applies apt-sources.py's rule with the repository's owner.
+        def target(repo):
+            decl = ('kind = "B"\narchitectures = "all"\n'
+                    f'[[depends]]\nrepo = "{repo}"\nbundle = true\nreason = "r"\n')
+            f = {"repo": "mithro/widget", "declaration": decl, "site": None, "workflows": {},
+                 "files": ["debian/control"], "debian/control": "Package: widget\nArchitecture: all\n"}
+            return apc.target(f, None)
+        self.assertIn("someone/dep isn't mithro's", target("someone/dep")["depends_error"])
+        self.assertIsNone(target("Mithro/dep")["depends_error"])
+
+    def test_not_bundled_is_not_checked(self):
+        dep = apc.apt_sources.validate([{"repo": "o/dep", "reason": "r"}])
+        self.assertEqual(apc.bundle_gaps(dep, self.site(trixie=[])), [])

@@ -99,7 +99,13 @@ runs:
           fi
           (
             cd "$dir"
-            dpkg-scanpackages --multiversion . > Packages
+            # Packages bundled from a dependency repository are marked
+            # Bundled-From: <repository> (scripts/bundle-depends.py); the
+            # marks go into the signed index, not the site.
+            bundled=()
+            if [ -f .bundled-override ]; then bundled=(-e .bundled-override); fi
+            dpkg-scanpackages --multiversion "${bundled[@]}" . > Packages
+            rm -f .bundled-override
             gzip -k -f Packages
             # Advertise exactly what this suite holds, "all" included, never
             # an architecture with no packages (docs/packaging.md,

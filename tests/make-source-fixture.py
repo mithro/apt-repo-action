@@ -13,7 +13,10 @@ apt-repo-selftest-dep, which Debian doesn't have, and declares the flat
 repository at <url>/<suite>/ that has it as a `[[depends]]` in
 .github/apt-packaging.toml (docs/packaging.md, "The declaration").
 --declare-only leaves out the Build-Depends, so a build that fails can only
-have failed on the repository itself (a wrong key, no Release).
+have failed on the repository itself (a wrong key, no Release). --bundle
+also makes the package depend on apt-repo-selftest-dep at run time and
+declares the repository with bundle = "third-party" (docs/packaging.md,
+"Bundling a dependency repository").
 
 --patch-series <upstream-dir> also makes a patch series' fetched project: its
 own git repository at <upstream-dir>, tagged v1.1.1 two commits back, with the
@@ -27,7 +30,7 @@ for `--cpu-arch`, the ARM architecture it was compiled for (__ARM_ARCH), so
 a test can tell a Raspbian ARMv6 build from a Debian ARMv7 one.
 
 Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog | --patch-series <dir>]
-           [--depends <url> --depends-key <url> [--declare-only]] [--any]
+           [--depends <url> --depends-key <url> [--declare-only | --bundle]] [--any]
 """
 import argparse
 import os
@@ -99,6 +102,7 @@ def main() -> None:
     ap.add_argument("--depends", metavar="URL", help="the dependency repository's site")
     ap.add_argument("--depends-key", metavar="URL", help="its key")
     ap.add_argument("--declare-only", action="store_true", help="declare it, but don't build-depend on it")
+    ap.add_argument("--bundle", action="store_true", help="depend on it at run time too, and bundle it")
     ap.add_argument("--any", action="store_true", help="add an architecture-dependent package")
     args = ap.parse_args()
     if bool(args.depends) != bool(args.depends_key):
@@ -110,6 +114,12 @@ def main() -> None:
                 "Build-Depends: debhelper-compat (= 13)",
                 "Build-Depends: debhelper-compat (= 13), apt-repo-selftest-dep")
         files[".github/apt-packaging.toml"] = DEPENDS.format(url=args.depends, key=args.depends_key)
+        if args.bundle:
+            files[".github/apt-packaging.toml"] = files[".github/apt-packaging.toml"].replace(
+                'reason = "apt-repo-selftest-dep', 'bundle = "third-party"\nreason = "apt-repo-selftest-dep')
+            files["debian/control"] = files["debian/control"].replace(
+                "Package: apt-repo-selftest-src\nArchitecture: all\n",
+                "Package: apt-repo-selftest-src\nArchitecture: all\nDepends: apt-repo-selftest-dep\n")
     if args.any:
         files.update({name: (HELLO / name).read_text() for name in HELLO_FILES})
     if args.legacy:

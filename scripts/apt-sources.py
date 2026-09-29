@@ -8,6 +8,8 @@ suite declares where they come from in `.github/apt-packaging.toml`:
     [[depends]]                       # one of ours (docs/conventions.md)
     repo = "owner/name"
     suites = ["bookworm"]             # optional: only these suites
+    bundle = true                     # optional: publish its packages ours need in our suites
+                                      # (true: the same owner as ours; else "third-party")
     reason = "why"
 
     [[depends]]                       # anything else
@@ -17,6 +19,7 @@ suite declares where they come from in `.github/apt-packaging.toml`:
     components = ["main"]             # omit for a flat repository
     key = "https://example.org/key.gpg"
     suites = ["trixie", "forky"]
+    bundle = "third-party"            # optional, flat only: bundle someone else's
     reason = "why"
 
 `repo` is resolved through the GitHub API (`repos/<repo>/pages`, html_url) to
@@ -34,6 +37,13 @@ them in /etc/apt, runs `apt-get update` and fails unless every one of them was
 fetched and its signature verified. It needs nothing but apt, so a bare
 container can run it. Nothing applies: DIR gets an install.sh that does
 nothing, and `write` prints 0.
+
+`bundle` (docs/packaging.md, "Bundling a dependency repository") makes
+publish-apt copy the dependency repository's packages that ours need into our
+own suites, re-signed with our key, so users add only our repository;
+scripts/bundle-depends.py does the copying. The build still adds the
+repository; `write --unbundled` leaves the bundled ones out, for an install
+test that gets those packages from the bundle instead.
 
 The API is read with $GH_TOKEN or $GITHUB_TOKEN, at $GITHUB_API_URL.
 
@@ -60,8 +70,13 @@ DECLARATION = ".github/apt-packaging.toml"
 # with scripts/deb-version.py when Debian makes a release.
 CODENAMES = ["bookworm", "trixie", "forky", "sid"]
 KNOWN_SUITES = CODENAMES + [f"raspbian-{c}" for c in CODENAMES if c != "sid"]
-OURS = {"repo", "suites", "reason"}
-EXPLICIT = {"name", "url", "suite", "components", "key", "suites", "reason"}
+OURS = {"repo", "suites", "bundle", "reason"}
+EXPLICIT = {"name", "url", "suite", "components", "key", "suites", "bundle", "reason"}
+# Bundling re-signs the dependency's packages with our key. `bundle = true`
+# is only for a `repo` with the same GitHub owner as the repository declaring
+# it; anything else must say `bundle = "third-party"`, so someone else's
+# packages are never signed as ours by accident.
+THIRD_PARTY = "third-party"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")   # what apt reads in sources.list.d
 REPO = re.compile(r"[A-Za-z0-9-]+/([A-Za-z0-9_.-]+)")
 ARMOUR_BEGIN = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
@@ -118,8 +133,12 @@ def _dist(template: str, suite: str) -> str:
     return template.format(suite=suite, codename=suite.removeprefix("raspbian-"))
 
 
-def validate(deps: list[dict]) -> list[dict]:
-    """Check every entry and fill in its defaults. Raises Error."""
+def validate(deps: list[dict], owner: str | None = None) -> list[dict]:
+    """Check every entry and fill in its defaults. Raises Error.
+
+    `owner` is the GitHub owner of the repository declaring them: given, a
+    `bundle = true` must name a `repo` of that owner (bundling does; the
+    build, which doesn't bundle, needn't know it)."""
     out, names = [], {}
     for n, d in enumerate(deps, 1):
         where = f"[[depends]] #{n}" + (f" ({d.get('repo') or d.get('name')})"
@@ -141,7 +160,18 @@ def validate(deps: list[dict]) -> list[dict]:
             unknown = [s for s in suites if s not in KNOWN_SUITES]
             if unknown:
                 raise Error(f"{where}: unknown suite {', '.join(unknown)} (known: {', '.join(KNOWN_SUITES)})")
-        e = {"reason": reason.strip(), "suites": suites}
+        bundle = d.get("bundle", False)
+        if bundle not in (True, False, THIRD_PARTY):
+            raise Error(f"{where}: `bundle` is true, false or \"{THIRD_PARTY}\", not {bundle!r}")
+        if bundle is True:
+            repo = d.get("repo")
+            dep_owner = repo.split("/")[0] if isinstance(repo, str) else None
+            if dep_owner is None or (owner is not None and dep_owner.lower() != owner.lower()):
+                whose = "it isn't a `repo`" if dep_owner is None else f"{repo} isn't {owner}'s"
+                raise Error(f"{where}: bundling re-signs its packages with our key, and {whose}: "
+                            f"say so with bundle = \"{THIRD_PARTY}\" (docs/packaging.md, "
+                            f"\"Bundling a dependency repository\")")
+        e = {"reason": reason.strip(), "suites": suites, "bundle": bool(bundle)}
         if "repo" in d:
             m = REPO.fullmatch(d["repo"]) if isinstance(d["repo"], str) else None
             if not m:
@@ -175,6 +205,8 @@ def validate(deps: list[dict]) -> list[dict]:
                             f"normally \"./\" with the directory in `url`, not {suite!r}")
             if comps and suite.endswith("/"):
                 raise Error(f"{where}: a `suite` ending in \"/\" is a flat repository, which has no components")
+            if bundle and comps:
+                raise Error(f"{where}: only a flat repository can be bundled")
             e.update(name=name, url=url.rstrip("/"), suite=suite, components=comps,
                      key=_key_url_ok(d["key"], where))
         if e["name"] in names:
@@ -245,7 +277,7 @@ def resolve(entries: list[dict], suite: str) -> list[dict]:
         else:
             r = {"uri": _dist(e["url"], suite) + "/", "dist": _dist(e["suite"], suite),
                  "components": e["components"], "key": e["key"]}
-        r = {"name": e["name"], "repo": e.get("repo"), "reason": e["reason"], **r,
+        r = {"name": e["name"], "repo": e.get("repo"), "reason": e["reason"], "bundle": e["bundle"], **r,
              "keyring": f"{KEYRINGS}/{e['name']}.gpg"}
         r["line"] = " ".join(["deb", f"[signed-by={r['keyring']}]", r["uri"], r["dist"], *r["components"]])
         # How `apt-cache policy` shows the source once it is in use:
@@ -340,6 +372,9 @@ def main() -> int:
                     help=f"the declaration (default: {DECLARATION}); a missing file declares nothing")
     ap.add_argument("--suite", help="the suite being built or installed (resolve, write)")
     ap.add_argument("--dest", type=Path, help="the directory to write (write)")
+    ap.add_argument("--unbundled", action="store_true",
+                    help="leave out the bundled ones (write, resolve): an install test that "
+                         "installs their packages from the bundle")
     args = ap.parse_args()
     try:
         entries = validate(load(args.declaration))
@@ -348,6 +383,8 @@ def main() -> int:
             return 0
         if not args.suite:
             ap.error(f"{args.command} needs --suite")
+        if args.unbundled:
+            entries = [e for e in entries if not e["bundle"]]
         resolved = resolve(entries, args.suite)
         if args.command == "resolve":
             print(json.dumps(resolved, indent=1))
