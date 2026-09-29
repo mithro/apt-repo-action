@@ -1,7 +1,6 @@
 #!/bin/sh
-# Where apt took go-tmux-saver from (the bundled local source), and that the
-# bundled build runs on this suite's system.
+# Where apt took the dependency from, and which ARM architecture its binary
+# was built for: 6 in a raspbian-<codename> suite (docs/packaging.md, "Suites").
 set -eu
-apt-cache policy go-tmux-saver
-dpkg -s go-tmux-saver | grep -E '^(Version|Architecture):'
-apt-repo-selftest-bundle --version
+apt-cache policy apt-repo-selftest-hello
+apt-repo-selftest-bundle --cpu-arch

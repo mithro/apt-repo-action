@@ -7,7 +7,8 @@ Standards-Version: 4.7.0
 
 Package: apt-repo-selftest-bundle
 Architecture: all
-Depends: go-tmux-saver, ${misc:Depends}
+Depends: apt-repo-selftest-hello, ${misc:Depends}
 Description: apt-repo-action self-test: an Architecture: all package that bundles
- Built by the self-test to prove an Architecture: all repository can serve
- raspbian-<codename> with a bundled architecture-dependent dependency.
+ Built by the self-test (selftest-bundle.yml) to prove an Architecture: all
+ repository can serve raspbian-<codename> with a bundled
+ architecture-dependent dependency.
