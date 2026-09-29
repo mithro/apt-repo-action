@@ -310,6 +310,35 @@ jobs:
         run: python3 scripts/mirror-patches.py --declaration pkg/.github/apt-packaging.toml --source src --check
       - name: Generate debian/patches
         run: python3 scripts/mirror-patches.py --declaration pkg/.github/apt-packaging.toml --source src
+      - name: A tree the generated patch no longer fits
+        # As if the tree changed after generating: dpkg-source alone would
+        # skip the series, exit 0, and build unpatched.
+        run: |
+          cp -a src src-broken
+          printf 'changed upstream\n' > src-broken/hello.txt
+      - name: Build it, which must fail
+        id: broken
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: src-broken
+          out-dir: built-broken
+          version-args: --owner-tag selftest --upstream-dir . --upstream-tag-match [0-9]*
+          lintian: "off"
+      - name: Check it failed, and built nothing
+        env:
+          OUTCOME: ${{ steps.broken.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::a tree whose generated patches don't apply was built (outcome: $OUTCOME)"
+            exit 1
+          fi
+          if ls built-broken/*.deb; then
+            echo "::error::a package was built without our patches"
+            exit 1
+          fi
       - name: Build
         uses: ./build-deb
         with:

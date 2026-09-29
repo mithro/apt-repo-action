@@ -192,7 +192,9 @@ maintains patch files by hand:
 
 - **Each change is a branch, `patches/<topic>`** (`patches/streaming-axfr`,
   `patches/dump-config`): our commits, one logical change each, on top of a
-  commit of the built branch. They are ours: the sync never pushes to or
+  commit of the built branch, or on top of an earlier patch branch (a
+  stack: `patches/b` built on `patches/a`, listed after it). A patch branch
+  can't change a binary file: a quilt patch can't carry one. They are ours: the sync never pushes to or
   deletes a `patches/*` branch, and never copies an upstream branch under
   that name.
 - **The declaration pins each one**, in the order they apply:
@@ -212,16 +214,26 @@ maintains patch files by hand:
   the version (its `<X.Y.postN>` half).
 - **The build generates `debian/patches/`**: the shared
   `scripts/mirror-patches.py`, run in `deb.yml` before `build-deb`, writes
-  `git format-patch <base>..<commit>` for each pin (one patch per commit,
-  `<base>` being where the branch leaves the built branch) into
-  `debian/patches/<topic>/`, and the `series`. `packaging`'s
-  `debian/source/format` is `3.0 (quilt)`, and `dpkg-buildpackage -b`
-  applies them before building. `packaging` never commits `debian/patches/`
-  (`PKG-PATCHES`).
+  `git format-patch <base>..<commit>` for each pin (one patch per commit;
+  `<base>` is the earlier pin it is built on, or where the branch leaves the
+  built branch) into `debian/patches/<topic>/`, and the `series`.
+  `packaging`'s `debian/source/format` is `3.0 (quilt)`, and
+  `dpkg-buildpackage -b` applies them before building. `packaging` never
+  commits `debian/patches/` (`PKG-PATCHES`).
+- **A patch that doesn't apply fails the build, never skips it.**
+  `dpkg-source --before-build` tries only the first patch and, when that
+  doesn't apply, takes the whole series as already applied, exits 0, and
+  the package is built without our patches. So:
+  - `mirror-patches.py` applies the series, in order, to a copy of the
+    built tree with dpkg-source's own `patch` options before it writes it,
+    and fails on the first that doesn't apply (and on a binary change);
+  - `build-deb`, given generated patches (`debian/patches/.mirror-patches`),
+    applies them itself and fails unless `.pc/applied-patches` is the whole
+    series.
 - **When upstream moves**, the patches are applied to the new tip as they
   are: while they still apply, nothing needs doing. The sync checks that
-  (`git am` of the generated patches on the new tip) before it starts the
-  build. If one doesn't apply, it **doesn't start the build**, so nothing
+  (the same generation and `patch` check the build makes, on the new tip)
+  before it starts the build. If one doesn't apply, it **doesn't start the build**, so nothing
   broken is published and the last good package stays, and it opens (or
   updates) an issue saying which patch and which upstream commit.
 - **Rebasing a patch branch** is then done by a person, reviewed like any
