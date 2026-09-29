@@ -170,6 +170,13 @@ Description: p
 """
         self.assertEqual(bm.control_architectures(text), ["all", "any", "arm64 armhf"])
 
+    def test_whitespace_only_line_separates(self):
+        # deb822(5): parsers may take a line of only spaces and tabs as a
+        # paragraph separator, and apt-compliance.py does; the two must
+        # agree, or build-deb.yml and PKG-ARCH read different packages.
+        text = "Package: a\nArchitecture: any\n \t\nPackage: b\nArchitecture: all\n"
+        self.assertEqual(bm.control_architectures(text), ["any", "all"])
+
 
 class Command(unittest.TestCase):
     def test_hello_fixture(self):

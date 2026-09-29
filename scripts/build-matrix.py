@@ -31,6 +31,7 @@ Standard library only.
 """
 import argparse
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -72,7 +73,8 @@ def words(value, what: str) -> list[str]:
 def control_architectures(text: str) -> list[str]:
     """The Architecture: of each binary package in a debian/control."""
     archs = []
-    for stanza in text.split("\n\n"):
+    # deb822(5): a line of only spaces and tabs also ends a paragraph.
+    for stanza in re.split(r"\n[ \t]*\n", text):
         fields = {}
         for line in stanza.splitlines():
             if line[:1] in (" ", "\t", "#") or ":" not in line:
