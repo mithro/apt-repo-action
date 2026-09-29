@@ -587,6 +587,17 @@ def control_architectures(text: str) -> list[str]:
     return archs
 
 
+def bundled_suites(decl: dict, suites: list[str]) -> set[str]:
+    """The suites a `bundle` dependency applies to: every suite, or its
+    `suites` (scripts/build-matrix.py's rule)."""
+    out = set()
+    for d in decl.get("depends", []) or []:
+        if isinstance(d, dict) and d.get("bundle") not in (None, False):
+            only = d.get("suites")
+            out |= set(suites) if not only else set(suites) & set(only if isinstance(only, list) else [])
+    return out
+
+
 def declared_matrix(decl: dict | None, published: set[str], control: str | None) -> dict:
     """The suites and architectures a repository should publish: its
     declaration's `suites` and `architectures` (docs/packaging.md, "The
@@ -647,7 +658,17 @@ def declared_matrix(decl: dict | None, published: set[str], control: str | None)
             want = [x for x in want if x in KNOWN_SUITES]
         raspbian = [x for x in want if x.startswith("raspbian-")]
         if raspbian and arch == "all":
-            problems.append(f"{' '.join(raspbian)}: an Architecture: all repository publishes only the Debian suites")
+            # Allowed where a `bundle` dependency applies: the suite then
+            # carries its ARMv6 build (scripts/build-matrix.py does the same).
+            bundled = bundled_suites(decl, raspbian)
+            unbundled = [x for x in raspbian if x not in bundled]
+            missing = [x for x in raspbian if x.removeprefix("raspbian-") not in want]
+            if unbundled:
+                problems.append(f"{' '.join(unbundled)}: an Architecture: all repository publishes only the "
+                                "Debian suites, unless it bundles a dependency repository into the Raspbian suite")
+            elif missing:
+                problems.append(f"{' '.join(missing)}: an Architecture: all repository's Raspbian suite carries "
+                                "the packages built for the Debian suite of its codename, so that suite is needed too")
         elif raspbian and "armhf" not in archs:
             problems.append(f"{' '.join(raspbian)}: the Raspbian suites are armhf only, and the architectures "
                             "leave armhf out")
