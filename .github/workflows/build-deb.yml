@@ -200,6 +200,16 @@ jobs:
           path: built-debs/*.deb
           if-no-files-found: error
           retention-days: 14
+      # An Architecture: all repository that bundles into raspbian-<codename>:
+      # the Raspbian suite's packages are this suite's, the same files
+      # (scripts/build-matrix.py, `also`).
+      - uses: actions/upload-artifact@v7
+        if: matrix.also != ''
+        with:
+          name: debs-${{ matrix.also }}-${{ matrix.arch }}
+          path: built-debs/*.deb
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v7
         with:
           name: dbgsym-${{ matrix.suite }}-${{ matrix.arch }}
@@ -262,6 +272,10 @@ jobs:
         run: |
           set -eu
           mkdir -p bundled-debs
+          # An Architecture: all repository's test runs in a container of the
+          # runner's own architecture (build-deb: arch all), so its bundled
+          # architecture-dependent dependencies are that architecture's.
+          if [ "$ARCH" = all ]; then ARCH=$(dpkg --print-architecture); fi
           python3 .apt-repo-action/scripts/bundle-depends.py fetch --declaration "$DECLARATION" \
             --suite "$SUITE" --arch "$ARCH" --debs install-debs --dest bundled-debs --index
           python3 .apt-repo-action/scripts/apt-sources.py write --unbundled --declaration "$DECLARATION" \

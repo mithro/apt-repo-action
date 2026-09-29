@@ -342,6 +342,13 @@ MATRIX_CASES = [
     ({"suites": ["bookworm", "trixie", "forky", "sid", "raspbian-bookworm", "raspbian-trixie"]}, CONTROL_ANY, False),
     ({"suites": "trixie sid"}, CONTROL_ANY, False),
     ({"architectures": "all", "suites": ["trixie", "raspbian-trixie"]}, CONTROL_ALL, True),
+    # Architecture: all bundling an ARMv6 dependency into Raspbian suites.
+    ({"architectures": "all", "suites": ["bookworm", "trixie", "raspbian-bookworm", "raspbian-trixie"],
+      "depends": [{"repo": "o/dep", "bundle": True, "reason": "r"}]}, CONTROL_ALL, False),
+    ({"architectures": "all", "suites": ["trixie", "raspbian-trixie"],
+      "depends": [{"repo": "o/dep", "bundle": True, "suites": ["trixie"], "reason": "r"}]}, CONTROL_ALL, True),
+    ({"architectures": "all", "suites": ["trixie", "raspbian-forky"],
+      "depends": [{"repo": "o/dep", "bundle": True, "reason": "r"}]}, CONTROL_ALL, True),
     ({"architectures": ["arm64"], "suites": ["trixie", "raspbian-trixie"]}, CONTROL_ANY, True),
     ({"suites": ["trixie", "raspbian-sid"]}, CONTROL_ANY, True),
     ({"suites": ["bookworm"], "architectures": ["amd64", "riscv64"]}, CONTROL_ANY, False),
@@ -412,8 +419,10 @@ class Matrix(unittest.TestCase):
                 self.assertEqual(m["suites"], plan["suites"])
                 t = {"archs": m["archs"]}
                 for suite in plan["suites"]:
+                    # A job's `also` suite gets the same packages.
                     self.assertEqual(apc.arch_for(suite, t),
-                                     {j["arch"] for j in plan["build"] if j["suite"] == suite}, suite)
+                                     {j["arch"] for j in plan["build"]
+                                      if suite in (j["suite"], j.get("also"))}, suite)
 
 
 class Changelog(unittest.TestCase):

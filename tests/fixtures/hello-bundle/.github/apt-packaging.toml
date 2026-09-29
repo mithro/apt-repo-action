@@ -1,0 +1,12 @@
+# The self-test's Architecture: all fixture that bundles an
+# architecture-dependent dependency, and so also publishes raspbian-trixie
+# (docs/packaging.md, "Suites"). go-tmux-saver is one of ours and publishes
+# raspbian-trixie (ARMv6).
+kind = "B"
+architectures = "all"
+suites = ["trixie", "raspbian-trixie"]
+
+[[depends]]
+repo = "mithro/go-tmux-saver"
+bundle = true
+reason = "self-test: a bundled architecture-dependent dependency"
