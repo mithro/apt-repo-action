@@ -23,6 +23,7 @@ versions. This README covers using the workflow.
 | `build-deb/action.yml` | composite | `dpkg-buildpackage` in `debian:<suite>`, or a Raspbian root for `raspbian-<codename>`, for one architecture |
 | `scripts/build-matrix.py` | script | `build-deb.yml`'s plan: suites, architectures, runners, which job builds the `Architecture: all` packages |
 | `scripts/install-test.sh` | script | `build-deb.yml`'s install test, run in a clean container of the suite |
+| `scripts/install-guard.sh` | script | For an end-to-end test that installs tools of its own: fail if they changed anything our packages run with |
 | `collect-debs/action.yml` | composite | Download a run's `debs-<suite>-<arch>` artifacts into one directory per suite (publish-apt's first step) |
 | `scripts/make-index.py` | script | Generate the repository landing page |
 | `scripts/collect-debs.py` | script | List the run's artifacts for `collect-debs`, and regroup their `.deb`s by suite |

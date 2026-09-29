@@ -508,6 +508,22 @@ pull request (see [Mirrors](#mirrors-someone-elses-code-copied-exactly)).
                   apt-get install -y /debs/*.deb
                   ...'
     ```
+  - **An end-to-end test that installs tools of its own** (an SSH server
+    to test against, a client, a stock library to compare with) proves
+    what a user gets only if the tools change nothing ours run with. So,
+    in its container:
+    1. `apt-get dist-upgrade` from the suite alone, so the container is the
+       suite as a user of it has it (an image can lag its archive);
+    2. install ours, from the suite alone (it must succeed), then
+       `scripts/install-guard.sh save <file>`: every package and version
+       now installed, ours and their whole closure;
+    3. install the tools, then `scripts/install-guard.sh check <file>`,
+       which fails, listing them, if any of those changed version or went.
+       Packages the tools add are fine.
+
+    paramiko-insecure's `packaging/e2e.sh` does the same check. When a tool doesn't
+    install from a suite alone, see the Raspbian staging notes under
+    [Suites](#suites);
 
 ## Suites
 
@@ -564,13 +580,26 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
     run-time dependencies, and only where an install test runs. Such a
     package waits for Raspbian to copy staging over, or for its build
     dependencies to be pinned below staging's versions;
-  - a repository's own end-to-end test may need tools only staging can
-    install today (an SSH server to test against, say). It installs **our
-    packages from the suite alone first**, which is what a user gets and
-    must succeed, and only then the test's own tools, with staging as a
-    fallback: `build-deb/raspbian/staging.sh add <codename> <notes>` in the
-    Raspbian root (the same pinned key), and `staging.sh report <notes>` to
-    list what came from staging in the log and summary;
+  - `build-deb/raspbian/staging.sh` (`add <codename> <notes>
+    [--sources]`, `report <notes>`) is how `build-dep.sh` adds staging,
+    verified with the same pinned key, and lists what came from it;
+  - **a test's own tools** on a half-copied codename (see the end-to-end
+    test under [Builds](#builds)) come from the suite too, not from
+    staging, whenever that's possible: staging's newer libraries are
+    exactly what would change what ours run with. When a tool's own
+    package can't install because of a dependency chain the suite can't
+    satisfy, but the tool itself runs from the suite's files, unpack the
+    suite's package without its maintainer scripts (`apt-get download`,
+    `dpkg --unpack`, which checks no Depends), install what it runs with
+    from the suite, do by hand what its postinst would (a system user, say),
+    and check `ldd` finds every library. paramiko-insecure's
+    raspbian-forky test does this for `openssh-server`, whose `ucf` ->
+    `libtext-wrapi18n-perl` -> `libtext-charwidth-perl` needs perl 5.42
+    (only in forky-staging); installing it from staging upgraded the
+    `perl-base` ours run with (`python3` -> `tzdata` -> `debconf` ->
+    `perl-base`), which `install-guard.sh check` caught. Use
+    `staging.sh add` for a tool only when that is impossible, and only
+    with `install-guard.sh check` passing: nothing ours run with changed;
 - A repository whose packages are all `Architecture: all` publishes only the
   Debian suites. Raspbian hosts use the Debian suite of the same codename:
   the packages are the same files.
