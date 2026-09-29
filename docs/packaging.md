@@ -692,6 +692,18 @@ Optional. A repository that also publishes its builds as GitHub Releases:
   [Set B releases](#set-b-our-code));
 - names each `.deb` asset `<suite>_<file>.deb`, since every suite's build
   has the same filename;
+- names each asset the way GitHub stores it, and lists those names in
+  `SHA256SUMS`. GitHub "renames asset filenames that have special
+  characters, non-alphanumeric characters, and leading or trailing
+  periods" (REST API, "Upload a release asset"): `~` becomes `.`, so
+  `trixie_claude-teleport_0.24.post5~deb13_amd64.deb` is stored as
+  `trixie_claude-teleport_0.24.post5.deb13_amd64.deb`, while `+ . _ -` are
+  kept. So every character but letters, digits and `. _ + -` becomes a dot
+  before `SHA256SUMS` is written, and `sha256sum -c SHA256SUMS` passes on
+  the downloaded assets. The Go repositories do this in
+  `packaging/release-assets.sh`, and check it on every build;
+- is made after `publish-apt`, which the release job `needs`: a build whose
+  apt repository didn't deploy isn't released, and a re-run does both;
 - includes everything built, debug symbols too. The apt repository is the
   convenient way to install; the release is the complete record.
 
