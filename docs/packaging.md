@@ -564,6 +564,13 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
     run-time dependencies, and only where an install test runs. Such a
     package waits for Raspbian to copy staging over, or for its build
     dependencies to be pinned below staging's versions;
+  - a repository's own end-to-end test may need tools only staging can
+    install today (an SSH server to test against, say). It installs **our
+    packages from the suite alone first**, which is what a user gets and
+    must succeed, and only then the test's own tools, with staging as a
+    fallback: `build-deb/raspbian/staging.sh add <codename> <notes>` in the
+    Raspbian root (the same pinned key), and `staging.sh report <notes>` to
+    list what came from staging in the log and summary;
 - A repository whose packages are all `Architecture: all` publishes only the
   Debian suites. Raspbian hosts use the Debian suite of the same codename:
   the packages are the same files.
