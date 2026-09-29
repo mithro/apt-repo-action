@@ -61,6 +61,22 @@ class MirrorPatches(unittest.TestCase):
         self.assertIn("+faster", (out / series[1]).read_text())
         self.assertTrue((out / series[0]).read_text().startswith("From 0000000000000000000000000000000000000000"))
 
+    def test_relative_paths_as_the_workflow_runs_it(self):
+        # deb.yml runs it from the workspace: --source src, --out defaulting
+        # to src/debian/patches, both relative.
+        (self.src / "debian/source").mkdir(parents=True)
+        (self.src / "debian/source/format").write_text("3.0 (quilt)\n")
+        d = Path(self.tmp.name) / "decl.toml"
+        d.write_text(f'[[mirror.patches]]\nbranch = "patches/axfr"\ncommit = "{self.pins[0]["commit"]}"\n')
+        r = subprocess.run(["python3", str(SCRIPT), "--declaration", str(d), "--source", "src"],
+                           cwd=self.tmp.name, capture_output=True, text=True, env=ENV)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        patches = self.src / "debian/patches"
+        self.assertEqual((patches / "series").read_text().split(),
+                         ["axfr/0001-axfr-stream-it.patch", "axfr/0002-axfr-faster.patch"])
+        for f in (patches / "series").read_text().split():
+            self.assertTrue((patches / f).is_file(), f)
+
     def test_upstream_moved_patches_still_apply(self):
         self.write("NEWS", "2.93\n", "upstream moves on")
         self.assertIsNone(mp.check(self.src, self.pins))
