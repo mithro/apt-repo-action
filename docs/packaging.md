@@ -521,7 +521,7 @@ pull request (see [Mirrors](#mirrors-someone-elses-code-copied-exactly)).
        which fails, listing them, if any of those changed version or went.
        Packages the tools add are fine.
 
-    paramiko-insecure's `packaging/e2e.sh` does this. When a tool doesn't
+    paramiko-insecure's `packaging/e2e.sh` does the same check. When a tool doesn't
     install from a suite alone, see the Raspbian staging notes under
     [Suites](#suites);
 

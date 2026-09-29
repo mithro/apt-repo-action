@@ -16,12 +16,21 @@
 # the suite's own newer versions, which isn't what this is looking for.
 set -eu
 cmd=${1:?usage: install-guard.sh save|check <file>}
+
+# Fully installed packages only ("ii"): dpkg-query -W also lists removed but
+# not purged ones ("rc") with their old version, and a dependency of ours the
+# tools made apt remove would then look unchanged. A saved package that is
+# now anything but installed counts as removed; one the tools only unpacked
+# ("iU", say) isn't in the saved list and is allowed, like any addition.
+installed() {
+  dpkg-query -W -f '${db:Status-Abbrev} ${Package} ${Version}\n' | awk '$1 == "ii" {print $2, $3}' | sort
+}
 file=${2:?usage: install-guard.sh save|check <file>}
 
 case "$cmd" in
   save)
     mkdir -p "$(dirname "$file")"
-    dpkg-query -W -f '${Package} ${Version}\n' | sort > "$file"
+    installed > "$file"
     echo "install-guard: $(grep -c . "$file") packages installed"
     ;;
   check)
@@ -30,7 +39,7 @@ case "$cmd" in
       exit 1
     fi
     now=$(mktemp)
-    dpkg-query -W -f '${Package} ${Version}\n' | sort > "$now"
+    installed > "$now"
     changed=$(join "$file" "$now" | awk '$2 != $3 {print $1 ": " $2 " -> " $3}')
     gone=$(join -v 1 "$file" "$now" | awk '{print $1 " " $2 " (removed)"}')
     rm -f "$now"
