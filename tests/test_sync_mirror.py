@@ -259,7 +259,9 @@ class SyncMirror(unittest.TestCase):
         for said in ("error: GH009: Secrets detected! This push failed.",
                      "error: GH013: Repository rule violations found for $1. - GITHUB PUSH PROTECTION"):
             with self.subTest(said=said[:20]):
-                self.setUp()
+                if said.startswith("error: GH013"):  # the second: a fresh fixture, the last one cleaned up
+                    self.tearDown()
+                    self.setUp()
                 hook = self.ours / "hooks/update"
                 hook.write_text(f'#!/bin/sh\ncase "$1" in refs/tags/*) echo "{said}" >&2; exit 1 ;; esac\n')
                 hook.chmod(0o755)
