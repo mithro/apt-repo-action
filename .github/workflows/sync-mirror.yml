@@ -1,0 +1,77 @@
+name: Sync a mirror
+
+# Reusable workflow for a mirror repository (docs/packaging.md, "Mirrors"):
+# copies every branch and tag of the declared `upstream` here, exactly
+# (scripts/sync-mirror.py), and when `[mirror] build` moved, starts the
+# repository's deb.yml on its default branch, which builds and publishes it.
+# A push made with the workflow's own token starts no workflow by itself, so
+# this has to.
+#
+# A mirror repository's .github/workflows/sync-upstream.yml is then:
+#
+#   name: Sync upstream
+#   on:
+#     schedule:
+#       - cron: "0 6 * * *"   # daily
+#     workflow_dispatch:
+#   permissions:
+#     contents: write         # push the copies
+#     actions: write          # start deb.yml
+#   concurrency:
+#     group: sync-upstream
+#     cancel-in-progress: false
+#   jobs:
+#     sync:
+#       uses: mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main
+#
+# The caller must grant both permissions: a reusable workflow can only narrow
+# the token it is given, and a caller that grants less ends in
+# startup_failure.
+
+on:
+  workflow_call:
+    inputs:
+      declaration:
+        description: The declaration, relative to the repository's root.
+        type: string
+        required: false
+        default: .github/apt-packaging.toml
+    outputs:
+      build:
+        description: '"true" when the built branch moved, and deb.yml was started.'
+        value: ${{ jobs.sync.outputs.build }}
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.mirror.outputs.build }}
+    steps:
+      # The default branch, whatever ref started the run: the declaration,
+      # and what "ours" means, are the default branch's.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Check out apt-repo-action, at this workflow's commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .apt-repo-action
+          persist-credentials: false
+      - name: Mirror upstream
+        id: mirror
+        env:
+          DECLARATION: ${{ inputs.declaration }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: python3 .apt-repo-action/scripts/sync-mirror.py --declaration "$DECLARATION" --default "$DEFAULT"
+      - name: Build and publish
+        if: steps.mirror.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: gh workflow run deb.yml --ref "$DEFAULT" --repo "$GITHUB_REPOSITORY"
