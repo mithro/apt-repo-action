@@ -26,7 +26,7 @@ jobs:
     # Build a throwaway source tree with THIS checkout of build-deb and check
     # the version it stamped. On a pull request every build is a preview, so
     # ~pr<P> is expected there.
-    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }})
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }}${{ matrix.patch-series && ' patch-series' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -42,6 +42,9 @@ jobs:
           # Set B commits no debian/changelog: the build's entry is the only
           # one in the package (docs/packaging.md, "The changelog").
           - {suite: trixie, arch: all, no-changelog: true, want: "0.3.post1~deb13"}
+          # A patch series builds in the fetched project's tree, versioned
+          # from both (docs/packaging.md, "Versions"), with an epoch.
+          - {suite: bookworm, arch: all, patch-series: true, want: "2:1.1.1.post2+selftest.0.3.post1~deb12"}
     steps:
       - uses: actions/checkout@v5
 
@@ -50,6 +53,7 @@ jobs:
           python3 tests/make-source-fixture.py fixture-src
           ${{ matrix.legacy && '--legacy' || '' }}
           ${{ matrix.no-changelog && '--no-changelog' || '' }}
+          ${{ matrix.patch-series && '--patch-series fixture-upstream' || '' }}
 
       - name: Build with this checkout of build-deb
         id: build
@@ -57,7 +61,9 @@ jobs:
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
-          source-dir: fixture-src
+          source-dir: ${{ matrix.patch-series && 'fixture-upstream' || 'fixture-src' }}
+          version-tree: ${{ matrix.patch-series && 'fixture-src' || '' }}
+          version-args: ${{ matrix.patch-series && '--owner-tag selftest --upstream-dir . --epoch 2' || '' }}
 
       - name: No declaration, so no dependency repositories
         env:
@@ -83,6 +89,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           LEGACY: ${{ matrix.legacy }}
           NO_CHANGELOG: ${{ matrix.no-changelog }}
+          PATCH_SERIES: ${{ matrix.patch-series }}
         run: |
           set -eu
           if [ -n "$PR" ] && [ "$LEGACY" != true ]; then WANT="$WANT~pr$PR"; fi
@@ -91,9 +98,13 @@ jobs:
           echo "version: $got (want $WANT)"
           test "$got" = "$WANT"
           if [ "$LEGACY" != true ]; then
+            # A patch series' changelog is in the fetched tree; the commit
+            # it names is still this repository's (the fixture's).
+            log=fixture-src/debian/changelog
+            if [ "$PATCH_SERIES" = true ]; then log=fixture-upstream/debian/changelog; fi
             sha=$(git -C fixture-src rev-parse HEAD)
-            head -n 3 fixture-src/debian/changelog
-            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" fixture-src/debian/changelog
+            head -n 3 "$log"
+            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" "$log"
           fi
           if [ "$NO_CHANGELOG" = true ]; then
             # Nothing committed, so the package's changelog is the build's
@@ -108,7 +119,7 @@ jobs:
             entries=$(zcat "$log" | grep -cE '^[a-z0-9][a-z0-9.+-]* \(.+\) .+; urgency=')
             echo "changelog entries: $entries (want 1)"
             test "$entries" = 1
-          elif [ "$LEGACY" != true ]; then
+          elif [ "$LEGACY" != true ] && [ "$PATCH_SERIES" != true ]; then
             # The placeholder stays underneath the build's entry.
             grep -q 'Placeholder changelog' fixture-src/debian/changelog
           fi
