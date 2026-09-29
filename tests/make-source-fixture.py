@@ -21,8 +21,8 @@ debian/ files written into it uncommitted, as a patch series renders them
 (docs/packaging.md, "Versions"). Built there with <dir> as the version tree
 and --owner-tag selftest, the version is 1.1.1.post2+selftest.0.3.post1.
 
---any adds an architecture-dependent package, apt-repo-selftest-hello: a C
-command that prints its version for `apt-repo-selftest-hello --version` and,
+--any adds an architecture-dependent package from tests/fixtures/hello/,
+apt-repo-selftest-hello: a C command that prints its version for `apt-repo-selftest-hello --version` and,
 for `--cpu-arch`, the ARM architecture it was compiled for (__ARM_ARCH), so
 a test can tell a Raspbian ARMv6 build from a Debian ARMv7 one.
 
@@ -59,55 +59,10 @@ apt-repo-selftest-src (0.0) unstable; urgency=medium
     "debian/source/format": "3.0 (native)\n",
 }
 
-ANY_PACKAGE = """
-Package: apt-repo-selftest-hello
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: apt-repo-action build-deb self-test command
- Built by the self-test to prove build-deb builds architecture-dependent code.
-"""
-
-ANY_FILES = {
-    "hello.c": r"""#include <stdio.h>
-#include <string.h>
-
-int main(int argc, char **argv) {
-    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
-        puts("apt-repo-selftest-hello " VERSION);
-        return 0;
-    }
-    if (argc > 1 && strcmp(argv[1], "--cpu-arch") == 0) {
-#ifdef __ARM_ARCH
-        printf("%d\n", __ARM_ARCH);
-#else
-        puts("none");
-#endif
-        return 0;
-    }
-    puts("hello");
-    return 0;
-}
-""",
-    "Makefile": """\
-VERSION ?= unknown
-all: apt-repo-selftest-hello
-apt-repo-selftest-hello: hello.c
-\t$(CC) $(CPPFLAGS) $(CFLAGS) -DVERSION='"$(VERSION)"' $(LDFLAGS) -o $@ $<
-install: apt-repo-selftest-hello
-\tinstall -D -m 755 apt-repo-selftest-hello $(DESTDIR)/usr/bin/apt-repo-selftest-hello
-clean:
-\trm -f apt-repo-selftest-hello
-""",
-    "debian/rules": """\
-#!/usr/bin/make -f
-include /usr/share/dpkg/pkg-info.mk
-export VERSION = $(DEB_VERSION)
-%:
-\tdh $@
-override_dh_auto_install:
-\tdh_auto_install --destdir=debian/apt-repo-selftest-hello
-""",
-}
+# --any: the architecture-dependent source tree, which the reusable
+# build-deb.yml's self-test also builds from this repository as it is.
+HELLO = Path(__file__).parent / "fixtures" / "hello"
+HELLO_FILES = ["debian/control", "debian/rules", "hello.c", "Makefile"]
 
 LEGACY = """\
 import argparse, pathlib, re
@@ -156,8 +111,7 @@ def main() -> None:
                 "Build-Depends: debhelper-compat (= 13), apt-repo-selftest-dep")
         files[".github/apt-packaging.toml"] = DEPENDS.format(url=args.depends, key=args.depends_key)
     if args.any:
-        files["debian/control"] += ANY_PACKAGE
-        files.update(ANY_FILES)
+        files.update({name: (HELLO / name).read_text() for name in HELLO_FILES})
     if args.legacy:
         files["packaging/deb-version.py"] = LEGACY
     if args.no_changelog:

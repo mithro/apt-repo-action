@@ -83,6 +83,14 @@ inputs:
       Only with the shared script.
     required: false
     default: ""
+  build:
+    description: >-
+      "true" (the default) builds. "false" only prepares what an install test
+      needs: the image (bootstrapping the Raspbian root when the suite is
+      raspbian-<codename>), QEMU when the architecture needs it, and the
+      dependency repositories (the image, platform and apt-sources outputs).
+    required: false
+    default: "true"
   github-token:
     description: >-
       Token for the GitHub API, which gives the site of each `repo = ...`
@@ -133,11 +141,16 @@ runs:
         VERSION_TREE: ${{ inputs.version-tree }}
         VERSION_ARGS: ${{ inputs.version-args }}
         ARCH_ALL: ${{ inputs.arch-all }}
+        BUILD: ${{ inputs.build }}
       run: |
         set -eu
         case "$ARCH_ALL" in
           true|false) ;;
           *) echo "::error::arch-all is \"$ARCH_ALL\": it takes true or false"; exit 1 ;;
+        esac
+        case "$BUILD" in
+          true|false) ;;
+          *) echo "::error::build is \"$BUILD\": it takes true or false"; exit 1 ;;
         esac
         if [ "$ARCH" = "riscv64" ] && [ "$SUITE" = "bookworm" ]; then
           echo "::error::riscv64 is not an official Debian architecture in bookworm"
@@ -341,6 +354,7 @@ runs:
       run: docker import --platform linux/arm/v6 "$TAR" "$IMAGE"
 
     - name: Build
+      if: inputs.build == 'true'
       shell: bash
       env:
         SUITE: ${{ inputs.suite }}
@@ -366,12 +380,20 @@ runs:
         # The version tree, read-only: the script only reads its tags and commits.
         tree=()
         if [ -n "$VERSION_TREE" ]; then tree=(-v "$GITHUB_WORKSPACE/$VERSION_TREE:/work/version-tree:ro"); fi
+        # The whole git checkout goes in, not only source-dir: the version
+        # is git describe's, and a source-dir below the top has no .git.
+        src="$GITHUB_WORKSPACE/$SOURCE_DIR"
+        if top=$(git -C "$src" rev-parse --show-toplevel); then
+          rel=$(realpath --relative-to="$top" "$src")
+        else
+          top=$src rel=.
+        fi
         docker run --rm --platform "$PLATFORM" \
-          -v "$GITHUB_WORKSPACE/$SOURCE_DIR:/work/src" \
+          -v "$top:/work/repo" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
           "${depends[@]}" "${tree[@]}" \
-          -w /work/src \
+          -w "/work/repo/$rel" \
           -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR -e VERSION_ARGS \
           -e GITHUB_REPOSITORY \
           "$IMAGE" bash -ec '
@@ -402,7 +424,7 @@ runs:
             else what=-b; fi
             dpkg-buildpackage -us -uc "$what"
             # dpkg-buildpackage writes to the parent directory.
-            cp /work/*.deb /work/out/
+            cp ../*.deb /work/out/
             ls -lh /work/out/
           '
 
@@ -417,7 +439,7 @@ runs:
     # a build that says it was checked must have been.
     - name: Lintian
       id: lintian
-      if: inputs.lintian != 'off'
+      if: inputs.lintian != 'off' && inputs.build == 'true'
       shell: bash
       env:
         SUITE: ${{ inputs.suite }}

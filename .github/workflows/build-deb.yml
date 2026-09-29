@@ -1,0 +1,276 @@
+name: Build Debian packages
+
+# Reusable workflow: builds a repository's .debs for every suite and
+# architecture it publishes, install-tests them, and uploads them for
+# publish-apt.yml (docs/packaging.md, "Builds", "Suites", "Architectures").
+#
+# The suites and architectures come from the repository's declaration
+# (.github/apt-packaging.toml), so a repository's deb.yml needs no list:
+#
+#   jobs:
+#     build-deb:
+#       uses: mithro/apt-repo-action/.github/workflows/build-deb.yml@main
+#     publish-apt:
+#       if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+#       needs: build-deb
+#       permissions: {contents: read, pages: write, id-token: write}
+#       uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
+#       with:
+#         suites: ${{ needs.build-deb.outputs.suites }}
+#       secrets:
+#         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+#
+# Each build job runs mithro/apt-repo-action's build-deb action, at the same
+# commit as this workflow: debian:<suite> or a Raspbian root, build
+# dependencies from debian/control, the version from the shared
+# scripts/deb-version.py. Exactly one job per suite also builds the
+# Architecture: all packages. Artifacts: debs-<suite>-<arch>, and
+# dbgsym-<suite>-<arch> for -dbgsym packages over dbgsym-limit-mb, which stay
+# out of apt (docs/packaging.md, "Package contents"). Then one install test
+# per suite, on a native architecture, in a clean container of the image the
+# build used (scripts/install-test.sh).
+
+on:
+  workflow_call:
+    inputs:
+      suites:
+        description: >-
+          "declared" (the default): the declaration's `suites`. "default":
+          packaging.md's default suites. Or the exact suites, space-separated.
+        required: false
+        default: declared
+        type: string
+      architectures:
+        description: >-
+          "declared" (the default): the declaration's `architectures`. "any":
+          packaging.md's default architectures. "all": one Architecture: all
+          build per suite. Or the architectures, space-separated.
+        required: false
+        default: declared
+        type: string
+      source-dir:
+        description: The source tree to build, relative to the repository's root.
+        required: false
+        default: "."
+        type: string
+      version-script:
+        description: build-deb's version-script (auto, shared, none, or a path).
+        required: false
+        default: auto
+        type: string
+      build-deps:
+        description: build-deb's build-deps (only for what debian/control can't declare).
+        required: false
+        default: ""
+        type: string
+      version-tree:
+        description: >-
+          build-deb's version-tree, relative to the repository's root: the
+          checkout whose vX.Y tags give the version, when source-dir is
+          another git tree. Empty (the default): source-dir's own.
+        required: false
+        default: ""
+        type: string
+      version-args:
+        description: >-
+          build-deb's version-args: extra arguments for the shared
+          scripts/deb-version.py, such as "--epoch 2" under a declared
+          exception.
+        required: false
+        default: ""
+        type: string
+      lintian:
+        description: build-deb's lintian (warn, error or off).
+        required: false
+        default: warn
+        type: string
+      dbgsym-limit-mb:
+        description: >-
+          -dbgsym packages larger than this many MB are uploaded as
+          dbgsym-<suite>-<arch> instead of with the packages, so they stay out
+          of apt (docs/packaging.md, "Package contents").
+        required: false
+        default: 10
+        type: number
+      install-test-options:
+        description: >-
+          Extra `docker run` options for the install test's container, such as
+          "--cap-add SYS_ADMIN" for a test that mounts.
+        required: false
+        default: ""
+        type: string
+    outputs:
+      suites:
+        description: The suites built, space-separated, for publish-apt's suites.
+        value: ${{ jobs.plan.outputs.suites }}
+      architectures:
+        description: >-
+          The architectures built, plus "all" when a package is
+          Architecture: all. For information: publish-apt advertises each
+          suite's own architectures, read from its packages.
+        value: ${{ jobs.plan.outputs.architectures }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      install: ${{ steps.plan.outputs.install }}
+      suites: ${{ steps.plan.outputs.suites }}
+      architectures: ${{ steps.plan.outputs.architectures }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: source
+      - name: Check out apt-repo-action, at this workflow's commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .apt-repo-action
+      - name: Plan the builds
+        id: plan
+        env:
+          SOURCE_DIR: source/${{ inputs.source-dir }}
+          SUITES: ${{ inputs.suites }}
+          ARCHITECTURES: ${{ inputs.architectures }}
+        run: >-
+          python3 .apt-repo-action/scripts/build-matrix.py --source-dir "$SOURCE_DIR"
+          --suites "$SUITES" --architectures "$ARCHITECTURES" --github-output "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.suite }} ${{ matrix.arch }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.build) }}
+    steps:
+      # The repository goes in source/, apt-repo-action in .apt-repo-action/,
+      # so nothing of ours lands inside the tree being built.
+      - uses: actions/checkout@v5
+        with:
+          path: source
+          fetch-depth: 0  # full history and tags: the version is git describe's
+      - name: Check out apt-repo-action, at this workflow's commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .apt-repo-action
+
+      - name: Build
+        uses: ./.apt-repo-action/build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          arch-all: ${{ matrix.arch-all }}
+          source-dir: source/${{ inputs.source-dir }}
+          version-script: ${{ inputs.version-script }}
+          version-tree: ${{ inputs.version-tree != '' && format('source/{0}', inputs.version-tree) || '' }}
+          version-args: ${{ inputs.version-args }}
+          build-deps: ${{ inputs.build-deps }}
+          lintian: ${{ inputs.lintian }}
+          out-dir: built-debs
+
+      - name: Keep large debug symbols out of apt
+        env:
+          LIMIT_MB: ${{ inputs.dbgsym-limit-mb }}
+        run: |
+          set -eu
+          limit=$((LIMIT_MB * 1000000))
+          mkdir -p dbgsym-debs
+          for f in built-debs/*-dbgsym_*.deb; do
+            [ -e "$f" ] || continue
+            size=$(stat -c %s "$f")
+            if [ "$size" -gt "$limit" ]; then
+              echo "::notice::$(basename "$f") is $((size / 1000000)) MB, over $LIMIT_MB MB: uploaded as a dbgsym artifact, not published in apt"
+              mv "$f" dbgsym-debs/
+            fi
+          done
+          ls -l built-debs dbgsym-debs
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: debs-${{ matrix.suite }}-${{ matrix.arch }}
+          path: built-debs/*.deb
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dbgsym-${{ matrix.suite }}-${{ matrix.arch }}
+          path: dbgsym-debs/*.deb
+          if-no-files-found: ignore
+          retention-days: 14
+
+  install-test:
+    name: install-test (${{ matrix.suite }} ${{ matrix.arch }})
+    needs: [plan, build]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.install) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: source
+      - name: Check out apt-repo-action, at this workflow's commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .apt-repo-action
+      - uses: actions/download-artifact@v8
+        with:
+          # Exactly this workflow's debs-<suite>-<arch> artifacts: a name
+          # with anything after the architecture (publish-apt also collects
+          # debs-<suite>-<arch>-<more>) is someone else's. download-artifact
+          # matches with minimatch, whose +(...) is "one or more of".
+          pattern: debs-${{ matrix.suite }}-+([a-z0-9])
+          path: downloaded
+          merge-multiple: true
+      - name: The packages this architecture installs
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          mkdir -p install-debs
+          for f in downloaded/*.deb; do
+            case "$f" in
+              *_all.deb|*_"$ARCH".deb) cp -v "$f" install-debs/ ;;
+            esac
+          done
+          ls install-debs/*.deb
+
+      # The same image, QEMU and dependency repositories the build had.
+      - name: Prepare the suite's container
+        id: prepare
+        uses: ./.apt-repo-action/build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          source-dir: source/${{ inputs.source-dir }}
+          build: "false"
+
+      - name: Install test
+        env:
+          IMAGE: ${{ steps.prepare.outputs.image }}
+          PLATFORM: ${{ steps.prepare.outputs.platform }}
+          APT_SOURCES: ${{ steps.prepare.outputs.apt-sources }}
+          SOURCE_DIR: source/${{ inputs.source-dir }}
+          OPTIONS: ${{ inputs.install-test-options }}
+        run: |
+          set -eu
+          # --platform always: an earlier pull may have pointed the image's
+          # tag at another architecture.
+          # shellcheck disable=SC2086 # OPTIONS is a list of docker options
+          docker run --rm --platform "$PLATFORM" $OPTIONS \
+            -v "$PWD/install-debs:/debs:ro" -v "$APT_SOURCES:/apt-sources:ro" \
+            -v "$(cd "$SOURCE_DIR" && pwd):/src:ro" \
+            -v "$PWD/.apt-repo-action/scripts/install-test.sh:/install-test.sh:ro" \
+            "$IMAGE" sh /install-test.sh
