@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs the bundled dependency's command: in raspbian-<codename> that is the
+# dependency's Raspbian (ARMv6) build.
+exec go-tmux-saver "$@"

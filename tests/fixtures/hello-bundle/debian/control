@@ -1,0 +1,13 @@
+Source: apt-repo-selftest-bundle
+Section: misc
+Priority: optional
+Maintainer: apt-repo-action self-test <selftest@invalid>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+
+Package: apt-repo-selftest-bundle
+Architecture: all
+Depends: go-tmux-saver, ${misc:Depends}
+Description: apt-repo-action self-test: an Architecture: all package that bundles
+ Built by the self-test to prove an Architecture: all repository can serve
+ raspbian-<codename> with a bundled architecture-dependent dependency.

@@ -816,6 +816,37 @@ jobs:
       architectures: amd64 arm64 armhf
       dbgsym-limit-mb: 0
 
+  reusable-build-bundle:
+    # An Architecture: all repository bundling an architecture-dependent
+    # dependency (tests/fixtures/hello-bundle, which bundles go-tmux-saver,
+    # one of ours with an ARMv6 raspbian-trixie suite): trixie is built once,
+    # the same files serve raspbian-trixie, and each suite's install test
+    # installs the bundled dependency and runs it -- raspbian-trixie in the
+    # Raspbian root, with go-tmux-saver's Raspbian build.
+    uses: ./.github/workflows/build-deb.yml
+    with:
+      source-dir: tests/fixtures/hello-bundle
+
+  reusable-build-bundle-check:
+    needs: reusable-build-bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: debs-*trixie-all
+          path: artifacts
+      - name: raspbian-trixie has exactly trixie's packages
+        env:
+          SUITES: ${{ needs.reusable-build-bundle.outputs.suites }}
+        run: |
+          set -eu
+          echo "suites: $SUITES"
+          test "$SUITES" = "trixie raspbian-trixie"
+          ls -l artifacts/*
+          (cd artifacts/debs-trixie-all && sha256sum -- *.deb) > trixie.sums
+          (cd artifacts/debs-raspbian-trixie-all && sha256sum -c ../../trixie.sums)
+          test "$(ls artifacts/debs-raspbian-trixie-all | wc -l)" = "$(ls artifacts/debs-trixie-all | wc -l)"
+
   reusable-build-check:
     needs: reusable-build
     runs-on: ubuntu-24.04
