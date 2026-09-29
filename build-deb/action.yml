@@ -83,6 +83,18 @@ inputs:
       Only with the shared script.
     required: false
     default: ""
+  raspbian-rebuild:
+    description: >-
+      For a raspbian-<codename> suite only: source packages to rebuild for
+      armhf in the build's container before installing the build
+      dependencies, space-separated. For when Raspbian's own builders lag
+      behind a source upload, so <codename>-staging has the new source but
+      only an old binary that another package Breaks. Each is built from
+      Raspbian's signed Sources, as Raspbian's builders would, and only
+      exists in the build's container (docs/packaging.md, "Suites";
+      build-deb/raspbian/build-dep.sh).
+    required: false
+    default: ""
   build:
     description: >-
       "true" (the default) builds. "false" only prepares what an install test
@@ -130,6 +142,11 @@ outputs:
       satisfy them ("package version" pairs, space-separated; empty when the
       suite sufficed). docs/packaging.md, "Suites".
     value: ${{ steps.build.outputs.from-staging }}
+  rebuilt:
+    description: >-
+      The source packages a raspbian-<codename> build rebuilt
+      (raspbian-rebuild), as "source version" pairs, space-separated.
+    value: ${{ steps.build.outputs.rebuilt }}
 
 runs:
   using: composite
@@ -366,6 +383,7 @@ runs:
       shell: bash
       env:
         RASPBIAN: ${{ steps.plan.outputs.raspbian }}
+        RASPBIAN_REBUILD: ${{ inputs.raspbian-rebuild }}
         SUITE: ${{ inputs.suite }}
         ARCH: ${{ inputs.arch }}
         ARCH_ALL: ${{ inputs.arch-all }}
@@ -406,7 +424,7 @@ runs:
           "${depends[@]}" "${tree[@]}" \
           -w "/work/repo/$rel" \
           -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR -e VERSION_ARGS \
-          -e GITHUB_REPOSITORY -e RASPBIAN -e APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING \
+          -e GITHUB_REPOSITORY -e RASPBIAN -e RASPBIAN_REBUILD -e APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING \
           "$IMAGE" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
@@ -459,6 +477,16 @@ runs:
         # an output, so it is never a silent part of a published build.
         from=$(tr '\n' ' ' < "$notes/from-staging" | sed 's/ $//')
         echo "from-staging=$from" >> "$GITHUB_OUTPUT"
+        rebuilt=$(tr '\n' ' ' < "$notes/rebuilt" | sed 's/ $//')
+        echo "rebuilt=$rebuilt" >> "$GITHUB_OUTPUT"
+        if [ -n "$rebuilt" ]; then
+          {
+            echo "### $SUITE: rebuilt from Raspbian's source (raspbian-rebuild)"
+            echo
+            sed 's/^/- /' "$notes/rebuilt"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
         if [ -n "$from" ]; then
           {
             echo "### $SUITE: build dependencies from Raspbian ${RASPBIAN}-staging"
