@@ -126,13 +126,19 @@ a mirror.
   permissions:
     contents: write         # push the copies
     actions: write          # start deb.yml
+    issues: write           # with [[mirror.patches]]: say when one doesn't apply
   concurrency:
     group: sync-upstream
     cancel-in-progress: false
   jobs:
     sync:
       uses: mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main
+      # secrets:
+      #   token: ${{ secrets.MIRROR_TOKEN }}   # to copy .github/workflows files
   ```
+
+  If the sync pushed the copies but couldn't start `deb.yml`, the next sync
+  sees nothing new: run **Debian packages** by hand (the run says so).
 
   - it copies every branch and tag of the declared `upstream` here under the
     same name, forced, so each is always identical to upstream's;
