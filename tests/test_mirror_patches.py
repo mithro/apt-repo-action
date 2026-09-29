@@ -145,6 +145,36 @@ class MirrorPatches(unittest.TestCase):
         self.assertEqual(series, ["axfr/0001-axfr-stream-it.patch", "axfr/0002-axfr-faster.patch",
                                   "faster/0001-axfr-fastest.patch"])
 
+    def test_empty_files_refused(self):
+        # A patch that creates (or deletes) an empty file has no hunk: patch
+        # creates nothing, and the check would pass with the file missing.
+        git(self.src, "checkout", "-q", "-b", "patches/empty", "master")
+        (self.src / "EMPTY").write_text("")
+        git(self.src, "add", "EMPTY")
+        git(self.src, "commit", "-q", "-m", "an empty file")
+        git(self.src, "checkout", "-q", "master")
+        pins = [{"branch": "patches/empty", "commit": git(self.src, "rev-parse", "patches/empty"), "topic": "empty"}]
+        with self.assertRaisesRegex(mp.Error, "empty file"):
+            mp.generate(self.src, pins, Path(self.tmp.name) / "patches")
+
+    def test_checks_the_tree_the_build_sees(self):
+        # git archive substitutes $Format:...$ in an export-subst file (and
+        # drops export-ignore ones); the build's checkout doesn't. A patch to
+        # such a file must be checked against the checkout.
+        (self.src / ".gitattributes").write_text("version.txt export-subst\nbuild-only.txt export-ignore\n")
+        (self.src / "version.txt").write_text("version $Format:%H$\n")
+        (self.src / "build-only.txt").write_text("kept by the checkout\n")
+        git(self.src, "add", ".gitattributes", "version.txt", "build-only.txt")
+        git(self.src, "commit", "-q", "-m", "attributes")
+        git(self.src, "checkout", "-q", "-b", "patches/version", "master")
+        (self.src / "version.txt").write_text("version $Format:%H$\npatched\n")
+        (self.src / "build-only.txt").write_text("kept by the checkout\npatched\n")
+        git(self.src, "commit", "-q", "-am", "patch both")
+        git(self.src, "checkout", "-q", "master")
+        pins = [{"branch": "patches/version", "commit": git(self.src, "rev-parse", "patches/version"), "topic": "version"}]
+        self.assertEqual(mp.generate(self.src, pins, Path(self.tmp.name) / "patches"),
+                         ["version/0001-patch-both.patch"])
+
     def test_pinned_commit_not_the_branch_tip(self):
         # The build uses the pin, not whatever the branch has moved to since.
         git(self.src, "checkout", "-q", "patches/dump-config")

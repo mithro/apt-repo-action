@@ -98,8 +98,16 @@ def push_status(r: subprocess.CompletedProcess) -> dict[str, str]:
     return out
 
 
-# What GitHub says when a ruleset refuses a ref (GH013), or a hook does.
-RULESET = ("GH013", "rule violation", "declined")
+# What GitHub says when a ruleset refuses a ref (GH013). Secret scanning's
+# push protection (GH009, or GH013 naming PUSH PROTECTION) is not a
+# ruleset refusal, and fails the run.
+RULESET = ("GH013", "rule violation")
+PROTECTION = ("gh009", "push protection", "cannot contain secrets")
+
+
+def ruleset_refusal(said: str) -> bool:
+    low = said.lower()
+    return not any(x in low for x in PROTECTION) and any(x.lower() in low for x in RULESET)
 
 
 def push_tags(remote: str, specs: list[str]) -> list[str]:
@@ -118,7 +126,7 @@ def push_tags(remote: str, specs: list[str]) -> list[str]:
         if push_status(one).get(ref) in OK_FLAGS:
             continue
         said = one.stdout + one.stderr
-        if not any(x in said for x in RULESET):
+        if not ruleset_refusal(said):
             raise Error(f"pushing {ref} failed, and not by a ruleset: {said.strip().splitlines()[-1:] or one.returncode}")
         refused.append(ref)
     return refused

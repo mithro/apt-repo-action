@@ -253,6 +253,19 @@ class SyncMirror(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
+    def test_push_protection_is_an_error_not_a_refusal(self):
+        # Only a ruleset refusal (GH013) is a warning; secret scanning's push
+        # protection (GH009, or GH013 with PUSH PROTECTION) fails the run.
+        for said in ("error: GH009: Secrets detected! This push failed.",
+                     "error: GH013: Repository rule violations found for $1. - GITHUB PUSH PROTECTION"):
+            with self.subTest(said=said[:20]):
+                self.setUp()
+                hook = self.ours / "hooks/update"
+                hook.write_text(f'#!/bin/sh\ncase "$1" in refs/tags/*) echo "{said}" >&2; exit 1 ;; esac\n')
+                hook.chmod(0o755)
+                with self.assertRaisesRegex(sm.Error, "not by a ruleset"):
+                    self.sync()
+
     def test_new_upstream_archive_tags_are_skipped(self):
         # Upstream has an archive/ tag we don't: still never copied.
         git(self.up, "tag", "archive/patches/x/2026-01-01")
