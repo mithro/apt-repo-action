@@ -83,6 +83,18 @@ inputs:
       Only with the shared script.
     required: false
     default: ""
+  raspbian-rebuild:
+    description: >-
+      For a raspbian-<codename> suite only: source packages to rebuild for
+      armhf in the build's container before installing the build
+      dependencies, space-separated. For when Raspbian's own builders lag
+      behind a source upload, so <codename>-staging has the new source but
+      only an old binary that another package Breaks. Each is built from
+      Raspbian's signed Sources, as Raspbian's builders would, and only
+      exists in the build's container (docs/packaging.md, "Suites";
+      build-deb/raspbian/build-dep.sh).
+    required: false
+    default: ""
   build:
     description: >-
       "true" (the default) builds. "false" only prepares what an install test
@@ -123,6 +135,18 @@ outputs:
   platform:
     description: The docker --platform the build ran with (linux/arm/v6 for Raspbian).
     value: ${{ steps.plan.outputs.platform }}
+  from-staging:
+    description: >-
+      The build dependencies a raspbian-<codename> build had to take from
+      Raspbian's <codename>-staging, because <codename> alone couldn't
+      satisfy them ("package version" pairs, space-separated; empty when the
+      suite sufficed). docs/packaging.md, "Suites".
+    value: ${{ steps.build.outputs.from-staging }}
+  rebuilt:
+    description: >-
+      The source packages a raspbian-<codename> build rebuilt
+      (raspbian-rebuild), as "source version" pairs, space-separated.
+    value: ${{ steps.build.outputs.rebuilt }}
 
 runs:
   using: composite
@@ -353,10 +377,45 @@ runs:
         IMAGE: ${{ steps.plan.outputs.image }}
       run: docker import --platform linux/arm/v6 "$TAR" "$IMAGE"
 
+    # Raspbian is built for ARMv6, which has no dmb instruction: its code
+    # (rustc and cargo among it) issues memory barriers as the CP15
+    # operation mcr p15, 0, rX, c7, c10, 5. An arm64 kernel running AArch32
+    # code traps and emulates those by default (abi.cp15_barrier = 1), and
+    # under that emulation Raspbian trixie's and forky's rustc spin forever
+    # in their codegen coordinator: a hello world never finishes, where the
+    # same binaries take 2 s under QEMU and under 1 s with the barriers run
+    # by the CPU itself (abi.cp15_barrier = 2, which every ARMv8 CPU with
+    # AArch32 supports). So that is what a Raspbian build gets. It is a
+    # setting of the runner's kernel, not of the container, and GitHub's
+    # runners are thrown away after the job; on a self-hosted runner it
+    # stays set. Failing to set it fails the build: it would otherwise hang
+    # until the job's timeout.
+    - name: Let ARMv6 code run its CP15 barriers in hardware
+      if: steps.plan.outputs.raspbian != '' && runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        set -eu
+        f=/proc/sys/abi/cp15_barrier
+        if [ ! -e "$f" ]; then
+          echo "this kernel has no $f: nothing to set"
+          exit 0
+        fi
+        was=$(cat "$f")
+        if [ "$was" != 2 ]; then
+          if ! sudo sysctl -w abi.cp15_barrier=2; then
+            echo "::error::couldn't set abi.cp15_barrier to 2 (it is $was) with sudo sysctl. An arm64 runner builds Raspbian suites only with passwordless sudo (GitHub's runners have it; a self-hosted runner needs it, or abi.cp15_barrier = 2 set beforehand): under the kernel's default CP15 barrier emulation, Raspbian's ARMv6 rustc never finishes (build-deb/raspbian/README.md)"
+            exit 1
+          fi
+        fi
+        echo "abi.cp15_barrier: $was -> $(cat "$f")"
+
     - name: Build
+      id: build
       if: inputs.build == 'true'
       shell: bash
       env:
+        RASPBIAN: ${{ steps.plan.outputs.raspbian }}
+        RASPBIAN_REBUILD: ${{ inputs.raspbian-rebuild }}
         SUITE: ${{ inputs.suite }}
         ARCH: ${{ inputs.arch }}
         ARCH_ALL: ${{ inputs.arch-all }}
@@ -375,6 +434,7 @@ runs:
       run: |
         set -eux
         mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
+        notes=$(mktemp -d "$RUNNER_TEMP/build-notes.XXXXXX")
         depends=()
         if [ -n "$DEPENDS_DIR" ]; then depends=(-v "$DEPENDS_DIR:/work/apt-sources:ro"); fi
         # The version tree, read-only: the script only reads its tags and commits.
@@ -391,11 +451,12 @@ runs:
         docker run --rm --platform "$PLATFORM" \
           -v "$top:/work/repo" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
+          -v "$notes:/work/notes" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
           "${depends[@]}" "${tree[@]}" \
           -w "/work/repo/$rel" \
           -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR -e VERSION_ARGS \
-          -e GITHUB_REPOSITORY \
+          -e GITHUB_REPOSITORY -e RASPBIAN -e RASPBIAN_REBUILD -e APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING \
           "$IMAGE" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
@@ -404,8 +465,10 @@ runs:
             # The declared dependency repositories, if any: fails unless
             # each one is fetched and its signature verified.
             if [ -e /work/apt-sources/install.sh ]; then sh /work/apt-sources/install.sh; fi
-            # Build dependencies come from debian/control (docs/packaging.md, "Builds").
-            apt-get build-dep -y ./
+            # Build dependencies come from debian/control (docs/packaging.md,
+            # "Builds"); a Raspbian suite falls back to <codename>-staging
+            # when it alone cannot satisfy them (build-deb/raspbian/build-dep.sh).
+            bash /work/apt-repo-action/build-deb/raspbian/build-dep.sh "$RASPBIAN" /work/notes
             # git refuses to read a tree owned by another user.
             git config --global --add safe.directory "*"
             read -ra version_args <<< "$VERSION_ARGS"
@@ -450,6 +513,32 @@ runs:
             for f in $debs; do cp "../$f" /work/out/; done
             ls -lh /work/out/
           '
+        # What came from Raspbian staging, if anything: in the summary and as
+        # an output, so it is never a silent part of a published build.
+        from=$(tr '\n' ' ' < "$notes/from-staging" | sed 's/ $//')
+        echo "from-staging=$from" >> "$GITHUB_OUTPUT"
+        rebuilt=$(tr '\n' ' ' < "$notes/rebuilt" | sed 's/ $//')
+        echo "rebuilt=$rebuilt" >> "$GITHUB_OUTPUT"
+        if [ -n "$rebuilt" ]; then
+          {
+            echo "### $SUITE: rebuilt from Raspbian's source"
+            echo
+            echo "Raspbian's armhf binaries of these were older than its own sources (found from apt's message, or named in raspbian-rebuild), so they were built here, with nocheck:"
+            echo
+            sed 's/^/- /' "$notes/rebuilt"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ -n "$from" ]; then
+          {
+            echo "### $SUITE: build dependencies from Raspbian ${RASPBIAN}-staging"
+            echo
+            echo "raspbian $RASPBIAN alone couldn't satisfy the build dependencies, so these came from ${RASPBIAN}-staging. The install test checks the packages built still install from raspbian $RASPBIAN alone."
+            echo
+            sed 's/^/- /' "$notes/from-staging"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=Raspbian staging::$SUITE took $(grep -c . "$notes/from-staging") build dependencies from ${RASPBIAN}-staging (listed in the step summary)"
+        fi
 
     # docs/packaging.md, "Package contents": lintian runs on every build. In
     # debian:<codename> on the runner's own platform, not the build's: lintian

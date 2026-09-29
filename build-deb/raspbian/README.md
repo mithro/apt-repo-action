@@ -105,3 +105,27 @@ are collisions). And that key still has to be the one the source's
 Checked with sqv 1.3.0 on 2026-09-27 against the `InRelease` of trixie (apt
 3.0.3) and forky (apt 3.3.3, same policy date): exit 1
 under the default policy, exit 0 under the override.
+
+## ARMv6 memory barriers on an arm64 runner
+
+Raspbian is built for ARMv6, which has no `dmb` instruction, so its code
+issues memory barriers as the CP15 operation `mcr p15, 0, rX, c7, c10, 5`.
+build-deb runs armhf natively on the `ubuntu-24.04-arm` runners, and their
+arm64 kernel traps and emulates those instructions by default
+(`abi.cp15_barrier = 1`). Under that emulation Raspbian trixie's rustc
+(1.85.0+dfsg3-1+rpi1) and forky's never finish: on 2026-09-29 a hello world
+spun in rustc's codegen coordinator for as long as it was left, while the
+same binaries took 2 s under QEMU and under 1 s with the barriers run by
+the CPU (`abi.cp15_barrier = 2`; `abi.swp` made no difference). Debian's
+armhf is ARMv7 and uses `dmb`, and Raspbian bookworm's rustc 1.63 doesn't
+hit it.
+
+So on an arm64 runner a Raspbian build (and an install test's preparation)
+first sets `abi.cp15_barrier = 2`, which every ARMv8 CPU with AArch32
+supports, and fails if it can't. It is the runner kernel's setting: GitHub's
+runners are discarded after the job, and on a self-hosted runner it stays
+set. Setting it needs passwordless sudo: a self-hosted arm64 runner without
+it fails Raspbian builds with a message saying so, unless
+`abi.cp15_barrier = 2` is set on it beforehand (for instance in
+`/etc/sysctl.d/`). The self-test `build-deb-raspbian-rust` builds a small crate with cargo
+in each Raspbian suite.

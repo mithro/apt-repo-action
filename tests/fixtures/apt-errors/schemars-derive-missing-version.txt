@@ -1,0 +1,6 @@
+E: Unable to satisfy dependencies. Reached two conflicting assignments:
+   1. builddeps:./:armhf=1 is selected for install
+   2. builddeps:./:armhf Depends librust-schemars-derive-dev (>= 1.2.2-2)
+      but none of the choices are installable:
+      [no choices]
+E: Unable to satisfy dependencies. Reached two conflicting assignments:

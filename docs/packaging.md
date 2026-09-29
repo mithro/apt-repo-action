@@ -529,6 +529,41 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
   a Debian release doesn't silently change what a directory holds.
 - Raspbian has no sid. 64-bit Raspberry Pi OS is Debian arm64 plus
   `archive.raspberrypi.com`, so the Debian suites serve it.
+- **Raspbian builds every release in `<codename>-staging`** and copies it
+  into `<codename>` in batches, so a testing codename can be half-copied
+  for weeks. From 2026-08, raspbian `forky` carried about 600 packages
+  rebuilt for perl 5.42 while its own perl was still 5.40: nothing that
+  build-depends on texinfo or a perl XS module could install its build
+  dependencies from `forky` alone. A `raspbian-*` suite is still built
+  then, never dropped:
+  - `build-deb` installs the build dependencies from `<codename>` first,
+    and only if that fails adds `<codename>-staging` (signed with the same
+    archive key) and tries again
+    ([`build-deb/raspbian/build-dep.sh`](../build-deb/raspbian/build-dep.sh));
+  - Raspbian's builders also lag behind source uploads: on 2026-09-29,
+    forky-staging had 920 source packages newer than their armhf binary
+    (91 of them Rust crates), and an old binary can be what another package
+    Breaks. While the build dependencies still don't install, `build-deb`
+    rebuilds, from Raspbian's own signed sources, the packages apt's message
+    names whose source is newer than their binary (with the `nocheck`
+    profile), and tries again. `raspbian-rebuild` names sources to rebuild
+    up front;
+  - what came from staging or was rebuilt is listed in the step summary, a
+    warning and `build-deb`'s `from-staging` and `rebuilt` outputs;
+  - staging and the rebuilt packages are only ever *installed* in the
+    build's own container, never in the image. But what the build
+    compiles from them can end up in the published package: a statically
+    linked Rust crate, headers, generated code. That code is Raspbian's
+    own (from its signed archive and sources; a rebuild is built with
+    `nocheck`, so its tests don't run), and every such package is listed
+    in the step summary and the `from-staging` / `rebuilt` outputs;
+  - the install test runs in a clean container of the image, which has
+    `<codename>` alone, so a package whose *run-time* dependencies only
+    staging or a rebuild has (a library version that `dh_shlibdeps` took
+    from staging, say) fails it and isn't published. That only covers
+    run-time dependencies, and only where an install test runs. Such a
+    package waits for Raspbian to copy staging over, or for its build
+    dependencies to be pinned below staging's versions;
 - A repository whose packages are all `Architecture: all` publishes only the
   Debian suites. Raspbian hosts use the Debian suite of the same codename:
   the packages are the same files.
@@ -807,7 +842,13 @@ that sorts wrongly. Each one is a recorded exception.
     root bootstrapped from archive.raspbian.org (see
     [`build-deb/raspbian/`](../build-deb/raspbian/README.md)), installing the build dependencies from
     `debian/control`, after adding the suite's
-    [dependency repositories](#dependency-repositories);
+    [dependency repositories](#dependency-repositories); a Raspbian suite
+    whose build dependencies it alone can't satisfy falls back to
+    `<codename>-staging`, which [Suites](#suites) describes;
+  - on an arm64 runner, runs Raspbian's ARMv6 memory barriers in hardware
+    (`abi.cp15_barrier = 2`): under the kernel's default emulation,
+    Raspbian trixie's and forky's rustc never finish (see
+    [ARMv6 memory barriers](../build-deb/raspbian/README.md#armv6-memory-barriers-on-an-arm64-runner));
   - in a Raspbian root (trixie on), apt accepts signing keys bound with
     SHA-1 self-signatures, as Raspbian's own key is; apt can't limit that
     to one source, so it applies to a dependency repository declared for a

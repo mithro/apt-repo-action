@@ -1,0 +1,15 @@
+E: Unable to satisfy dependencies. Reached two conflicting assignments:
+   1. librust-tiff-dev:armhf=0.11.3-2 is selected for install because:
+       1. builddeps:./:armhf=1 is selected for install
+       2. builddeps:./:armhf=1 Depends librust-pyo3-dev (>= 0.28)
+       3. librust-pyo3-dev:armhf Depends librust-chrono-tz-0.10-dev
+       4. librust-chrono-tz-dev:armhf Depends librust-chrono-tz-build-0.5+case-insensitive-dev
+       5. librust-chrono-tz-build-dev:armhf=0.5.0-1 Depends librust-phf-codegen-dev (>= 0.11)
+       6. librust-phf-codegen-dev:armhf Depends librust-phf-generator-0.11+default-dev
+       7. librust-phf-generator-dev:armhf Depends librust-criterion-0.5+default-dev
+       8. librust-criterion-dev:armhf Depends librust-plotters-0.3+area-series-dev
+       9. librust-plotters-dev:armhf Depends librust-image-0.25+bmp-dev
+      10. librust-image-dev:armhf Depends librust-tiff-0.11+default-dev (>= 0.11.2)
+   2. librust-tiff-dev:armhf Depends librust-weezl-0.1+default-dev (>= 0.1.8)
+      but none of the choices are installable:
+      [no choices]
