@@ -74,6 +74,8 @@ def load(path: Path) -> list[dict]:
 def generate(src: Path, patches: list[dict], out: Path, head: str = "HEAD") -> list[str]:
     """Writes each pin's patches under `out`/<topic>/ and `out`/series;
     returns the series (paths relative to `out`)."""
+    # git -C <src> reads a relative -o from <src>: make both absolute.
+    src, out = src.resolve(), out.resolve()
     series = []
     for p in patches:
         if git(src, "cat-file", "-e", f"{p['commit']}^{{commit}}", check=False).returncode:
