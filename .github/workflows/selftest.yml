@@ -766,8 +766,14 @@ jobs:
         run: |
           set -eu
           cat apt-repo/trixie/Packages
-          grep -A10 '^Package: apt-repo-selftest-dep$' apt-repo/trixie/Packages \
-            | grep -qx "Bundled-From: http://$HOST:8766/trixie/"
+          # The whole stanza: the field comes after the description.
+          mark=$(awk -v RS= '/(^|\n)Package: apt-repo-selftest-dep\n/' apt-repo/trixie/Packages \
+            | sed -n 's/^Bundled-From: //p')
+          echo "Bundled-From: $mark"
+          test "$mark" = "http://$HOST:8766/trixie/"
+          # Ours isn't marked.
+          test -z "$(awk -v RS= '/(^|\n)Package: apt-repo-selftest-src\n/' apt-repo/trixie/Packages \
+            | sed -n 's/^Bundled-From: //p')"
           test ! -e apt-repo/trixie/.bundled-override
           grep -q 'bundled from' apt-repo/index.html
           nohup python3 -m http.server -d apt-repo -b "$HOST" 8767 > our-server.log 2>&1 &
