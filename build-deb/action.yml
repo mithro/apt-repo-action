@@ -123,6 +123,13 @@ outputs:
   platform:
     description: The docker --platform the build ran with (linux/arm/v6 for Raspbian).
     value: ${{ steps.plan.outputs.platform }}
+  from-staging:
+    description: >-
+      The build dependencies a raspbian-<codename> build had to take from
+      Raspbian's <codename>-staging, because <codename> alone couldn't
+      satisfy them ("package version" pairs, space-separated; empty when the
+      suite sufficed). docs/packaging.md, "Suites".
+    value: ${{ steps.build.outputs.from-staging }}
 
 runs:
   using: composite
@@ -354,9 +361,11 @@ runs:
       run: docker import --platform linux/arm/v6 "$TAR" "$IMAGE"
 
     - name: Build
+      id: build
       if: inputs.build == 'true'
       shell: bash
       env:
+        RASPBIAN: ${{ steps.plan.outputs.raspbian }}
         SUITE: ${{ inputs.suite }}
         ARCH: ${{ inputs.arch }}
         ARCH_ALL: ${{ inputs.arch-all }}
@@ -375,6 +384,7 @@ runs:
       run: |
         set -eux
         mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
+        notes=$(mktemp -d "$RUNNER_TEMP/build-notes.XXXXXX")
         depends=()
         if [ -n "$DEPENDS_DIR" ]; then depends=(-v "$DEPENDS_DIR:/work/apt-sources:ro"); fi
         # The version tree, read-only: the script only reads its tags and commits.
@@ -391,11 +401,12 @@ runs:
         docker run --rm --platform "$PLATFORM" \
           -v "$top:/work/repo" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
+          -v "$notes:/work/notes" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
           "${depends[@]}" "${tree[@]}" \
           -w "/work/repo/$rel" \
           -e SUITE -e ARCH -e ARCH_ALL -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR -e VERSION_ARGS \
-          -e GITHUB_REPOSITORY \
+          -e GITHUB_REPOSITORY -e RASPBIAN -e APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING \
           "$IMAGE" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
@@ -404,8 +415,10 @@ runs:
             # The declared dependency repositories, if any: fails unless
             # each one is fetched and its signature verified.
             if [ -e /work/apt-sources/install.sh ]; then sh /work/apt-sources/install.sh; fi
-            # Build dependencies come from debian/control (docs/packaging.md, "Builds").
-            apt-get build-dep -y ./
+            # Build dependencies come from debian/control (docs/packaging.md,
+            # "Builds"); a Raspbian suite falls back to <codename>-staging
+            # when it alone can't satisfy them (build-deb/raspbian/build-dep.sh).
+            sh /work/apt-repo-action/build-deb/raspbian/build-dep.sh "$RASPBIAN" /work/notes
             # git refuses to read a tree owned by another user.
             git config --global --add safe.directory "*"
             read -ra version_args <<< "$VERSION_ARGS"
@@ -442,6 +455,20 @@ runs:
             cp ../*.deb /work/out/
             ls -lh /work/out/
           '
+        # What came from Raspbian staging, if anything: in the summary and as
+        # an output, so it is never a silent part of a published build.
+        from=$(tr '\n' ' ' < "$notes/from-staging" | sed 's/ $//')
+        echo "from-staging=$from" >> "$GITHUB_OUTPUT"
+        if [ -n "$from" ]; then
+          {
+            echo "### $SUITE: build dependencies from Raspbian ${RASPBIAN}-staging"
+            echo
+            echo "raspbian $RASPBIAN alone couldn't satisfy the build dependencies, so these came from ${RASPBIAN}-staging. The install test checks the packages built still install from raspbian $RASPBIAN alone."
+            echo
+            sed 's/^/- /' "$notes/from-staging"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=Raspbian staging::$SUITE took $(grep -c . "$notes/from-staging") build dependencies from ${RASPBIAN}-staging (listed in the step summary)"
+        fi
 
     # docs/packaging.md, "Package contents": lintian runs on every build. In
     # debian:<codename> on the runner's own platform, not the build's: lintian
