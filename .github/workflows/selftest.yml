@@ -364,6 +364,30 @@ jobs:
             | tar -xO ./usr/share/selftest/hello.txt | tee hello.txt
           grep -qx 'patched by us' hello.txt
 
+  install-guard:
+    # scripts/install-guard.sh (docs/packaging.md, "Builds"): unchanged
+    # passes; a changed version and a removed package are listed and fail;
+    # check without a saved list fails.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: The guard in a clean container
+        run: |
+          set -eu
+          docker run --rm -v "$PWD/scripts/install-guard.sh:/g.sh:ro" debian:trixie sh -ec '
+            sh /g.sh save /n/saved
+            sh /g.sh check /n/saved
+            # Forge a change: the saved libc6 was another version, and a
+            # saved package is no longer installed.
+            sed -i "s/^libc6 .*/libc6 0.0-old/" /n/saved
+            echo "zz-gone 1.0" >> /n/saved
+            if sh /g.sh check /n/saved > /n/out 2>&1; then cat /n/out; exit 1; fi
+            cat /n/out
+            grep -qx "libc6: 0.0-old -> .*" /n/out
+            grep -qx "zz-gone 1.0 (removed)" /n/out
+            if sh /g.sh check /n/none; then exit 1; fi
+            echo "install-guard: ok"'
+
   raspbian-staging-harness:
     # build-deb/raspbian/staging.sh as a repository's end-to-end test uses it
     # (docs/packaging.md, "Suites"): in a clean container of the raspbian-forky
