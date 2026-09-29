@@ -37,11 +37,14 @@
 # to rebuild up front. Everything taken from staging or rebuilt is listed in
 # <notes-dir>/from-staging and <notes-dir>/rebuilt.
 #
-# staging and the rebuilt packages are only ever in this throwaway build
-# container. The image, and so the install test that runs in a clean
-# container of it, has the suite alone: a package built here whose run-time
-# dependencies only staging (or a rebuild) has fails the install test instead
-# of being published.
+# staging and the rebuilt packages are only ever installed in this throwaway
+# build container, never in the image. What the build compiles from them can
+# still end up in its packages (statically linked Rust crates, headers): it is
+# Raspbian's own code, and each is listed in the notes. The image, and so the
+# install test that runs in a clean container of it, has the suite alone: a
+# package whose run-time dependencies only staging (or a rebuild) has fails
+# the install test instead of being published. That covers run-time
+# dependencies only, and only where an install test runs.
 #
 # APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING=always skips step 1, so the
 # self-test proves the fallback however the archive is today. It is read from

@@ -550,12 +550,20 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
     up front;
   - what came from staging or was rebuilt is listed in the step summary, a
     warning and `build-deb`'s `from-staging` and `rebuilt` outputs;
-  - staging is only ever in the build's own container. The install test
-    runs in a clean container of the image, which has `<codename>` alone,
-    so a package needing anything only staging has (a library version
-    that `dh_shlibdeps` took from staging, say) fails it and isn't
-    published. Such a package waits for Raspbian to copy staging over, or
-    for its build dependencies to be pinned below staging's versions.
+  - staging and the rebuilt packages are only ever *installed* in the
+    build's own container, never in the image. But what the build
+    compiles from them can end up in the published package: a statically
+    linked Rust crate, headers, generated code. That code is Raspbian's
+    own (from its signed archive and sources; a rebuild is built with
+    `nocheck`, so its tests don't run), and every such package is listed
+    in the step summary and the `from-staging` / `rebuilt` outputs;
+  - the install test runs in a clean container of the image, which has
+    `<codename>` alone, so a package whose *run-time* dependencies only
+    staging or a rebuild has (a library version that `dh_shlibdeps` took
+    from staging, say) fails it and isn't published. That only covers
+    run-time dependencies, and only where an install test runs. Such a
+    package waits for Raspbian to copy staging over, or for its build
+    dependencies to be pinned below staging's versions;
 - A repository whose packages are all `Architecture: all` publishes only the
   Debian suites. Raspbian hosts use the Debian suite of the same codename:
   the packages are the same files.

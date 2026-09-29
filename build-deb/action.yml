@@ -403,7 +403,7 @@ runs:
         was=$(cat "$f")
         if [ "$was" != 2 ]; then
           if ! sudo sysctl -w abi.cp15_barrier=2; then
-            echo "::error::couldn't set abi.cp15_barrier to 2 (it is $was): Raspbian's ARMv6 rustc hangs under the kernel's CP15 barrier emulation (build-deb/action.yml, this step)"
+            echo "::error::couldn't set abi.cp15_barrier to 2 (it is $was) with sudo sysctl. An arm64 runner builds Raspbian suites only with passwordless sudo (GitHub's runners have it; a self-hosted runner needs it, or abi.cp15_barrier = 2 set beforehand): under the kernel's default CP15 barrier emulation, Raspbian's ARMv6 rustc never finishes (build-deb/raspbian/README.md)"
             exit 1
           fi
         fi
@@ -513,7 +513,9 @@ runs:
         echo "rebuilt=$rebuilt" >> "$GITHUB_OUTPUT"
         if [ -n "$rebuilt" ]; then
           {
-            echo "### $SUITE: rebuilt from Raspbian's source (raspbian-rebuild)"
+            echo "### $SUITE: rebuilt from Raspbian's source"
+            echo
+            echo "Raspbian's armhf binaries of these were older than its own sources (found from apt's message, or named in raspbian-rebuild), so they were built here, with nocheck:"
             echo
             sed 's/^/- /' "$notes/rebuilt"
             echo

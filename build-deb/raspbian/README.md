@@ -124,5 +124,8 @@ So on an arm64 runner a Raspbian build (and an install test's preparation)
 first sets `abi.cp15_barrier = 2`, which every ARMv8 CPU with AArch32
 supports, and fails if it can't. It is the runner kernel's setting: GitHub's
 runners are discarded after the job, and on a self-hosted runner it stays
-set. The self-test `build-deb-raspbian-rust` builds a small crate with cargo
+set. Setting it needs passwordless sudo: a self-hosted arm64 runner without
+it fails Raspbian builds with a message saying so, unless
+`abi.cp15_barrier = 2` is set on it beforehand (for instance in
+`/etc/sysctl.d/`). The self-test `build-deb-raspbian-rust` builds a small crate with cargo
 in each Raspbian suite.
