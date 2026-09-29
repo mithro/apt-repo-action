@@ -840,6 +840,17 @@ class Bundle(unittest.TestCase):
                                          "reason": "r"}])
         self.assertEqual(apc.bundle_gaps(dep, self.site(trixie=["https://x.example/trixie/"])), [])
 
+    def test_bundle_true_is_for_the_same_owner(self):
+        # PKG-DEPENDS applies apt-sources.py's rule with the repository's owner.
+        def target(repo):
+            decl = ('kind = "B"\narchitectures = "all"\n'
+                    f'[[depends]]\nrepo = "{repo}"\nbundle = true\nreason = "r"\n')
+            f = {"repo": "mithro/widget", "declaration": decl, "site": None, "workflows": {},
+                 "files": ["debian/control"], "debian/control": "Package: widget\nArchitecture: all\n"}
+            return apc.target(f, None)
+        self.assertIn("someone/dep isn't mithro's", target("someone/dep")["depends_error"])
+        self.assertIsNone(target("Mithro/dep")["depends_error"])
+
     def test_not_bundled_is_not_checked(self):
         dep = apc.apt_sources.validate([{"repo": "o/dep", "reason": "r"}])
         self.assertEqual(apc.bundle_gaps(dep, self.site(trixie=[])), [])
