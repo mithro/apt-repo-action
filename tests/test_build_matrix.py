@@ -47,6 +47,24 @@ class Defaults(unittest.TestCase):
             n = sum(1 for j in p["build"] if j["suite"] == suite and j["arch-all"] == "true")
             self.assertEqual(n, 1, suite)
 
+    def test_all_bundling_into_raspbian(self):
+        # paramiko-insecure: pure Python, bundling an arch-dependent
+        # dependency whose ARMv6 build is in its raspbian suites.
+        decl = {"architectures": "all",
+                "suites": ["bookworm", "trixie", "raspbian-bookworm", "raspbian-trixie"],
+                "depends": [{"repo": "o/dep", "bundle": True, "reason": "r"}]}
+        p = bm.plan(decl, ALL_ONLY, "declared", "declared")
+        self.assertEqual(p["suites"], ["bookworm", "trixie", "raspbian-bookworm", "raspbian-trixie"])
+        # Built once per Debian suite, and the same files uploaded again for
+        # the Raspbian suite of the codename: no Raspbian build job.
+        self.assertEqual(jobs(p), [("bookworm", "all", "ubuntu-24.04", "true"),
+                                   ("trixie", "all", "ubuntu-24.04", "true")])
+        self.assertEqual([j.get("also") for j in p["build"]], ["raspbian-bookworm", "raspbian-trixie"])
+        # The Raspbian suites are install-tested in the Raspbian root (armhf).
+        self.assertIn({"suite": "raspbian-trixie", "arch": "armhf", "runner": "ubuntu-24.04-arm"},
+                      p["install"])
+        self.assertEqual(p["architectures"], "all")
+
     def test_no_arch_all_packages(self):
         p = bm.plan({}, ANY_ONLY, "declared", "declared")
         self.assertEqual(p["architectures"], "amd64 i386 arm64 armhf riscv64")
@@ -131,6 +149,16 @@ class Refuses(unittest.TestCase):
     def test_raspbian_with_all(self):
         self.check({"architectures": "all"}, ALL_ONLY, suites="trixie raspbian-trixie",
                    match="Architecture: all")
+
+    def test_raspbian_with_all_and_bundle_elsewhere(self):
+        # A bundle for bookworm only doesn't make raspbian-trixie useful.
+        decl = {"architectures": "all", "depends": [
+            {"repo": "o/dep", "bundle": True, "suites": ["bookworm"], "reason": "r"}]}
+        self.check(decl, ALL_ONLY, suites="trixie raspbian-trixie", match="unless it bundles")
+
+    def test_raspbian_with_all_needs_its_debian_suite(self):
+        decl = {"architectures": "all", "depends": [{"repo": "o/dep", "bundle": True, "reason": "r"}]}
+        self.check(decl, ALL_ONLY, suites="trixie raspbian-forky", match="Debian suite of its codename")
 
     def test_raspbian_without_armhf(self):
         self.check({"architectures": ["arm64"]}, ANY_ONLY, suites="trixie raspbian-trixie", match="armhf")

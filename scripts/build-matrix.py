@@ -9,7 +9,10 @@ out which suites and architectures to build (docs/packaging.md, "Suites" and
 - ``build``: the build matrix, one job per suite and architecture, each with
   its runner and whether it also builds the Architecture: all packages
   (exactly one job per suite does, so no two jobs publish different files
-  under the same name);
+  under the same name). An Architecture: all repository that bundles a
+  dependency into raspbian-<codename> has no Raspbian job: the <codename>
+  job carries ``also: raspbian-<codename>`` and uploads the same files for
+  it too;
 - ``install``: one install test per suite, on a native architecture;
 - ``suites``: the suites, for publish-apt;
 - ``architectures``: the architectures built, plus ``all`` when a package is
@@ -70,6 +73,17 @@ def words(value, what: str) -> list[str]:
     return out
 
 
+def bundled_suites(declaration: dict, suites: list[str]) -> set[str]:
+    """The suites a `bundle` dependency applies to (docs/packaging.md,
+    "Bundling a dependency repository"): every suite, or its `suites`."""
+    out = set()
+    for d in declaration.get("depends", []) or []:
+        if isinstance(d, dict) and d.get("bundle") not in (None, False):
+            only = d.get("suites")
+            out |= set(suites) if not only else set(suites) & set(only if isinstance(only, list) else [])
+    return out
+
+
 def control_architectures(text: str) -> list[str]:
     """The Architecture: of each binary package in a debian/control."""
     archs = []
@@ -121,15 +135,34 @@ def plan(declaration: dict, control: list[str], suites_input: str, archs_input: 
             raise Error(f"unknown suite {', '.join(unknown)} (known: {' '.join(KNOWN_SUITES)})")
         suites.sort(key=KNOWN_SUITES.index)
     raspbian = [s for s in suites if s in RASPBIAN]
+    # An Architecture: all repository publishes only the Debian suites, which
+    # Raspbian hosts use: its packages are the same files. Unless it bundles a
+    # dependency repository into a raspbian suite: that suite then carries the
+    # dependency's ARMv6 build (docs/packaging.md, "Suites"), and our packages
+    # are the ones built for the Debian suite of the same codename.
+    copied = {}
     if raspbian and all_arch:
-        raise Error(f"{' '.join(raspbian)}: a repository whose packages are all Architecture: all "
-                    "publishes only the Debian suites, which Raspbian hosts use")
-    if raspbian and "armhf" not in archs:
+        bundled = bundled_suites(declaration, raspbian)
+        unbundled = [s for s in raspbian if s not in bundled]
+        if unbundled:
+            raise Error(f"{' '.join(unbundled)}: a repository whose packages are all Architecture: all "
+                        "publishes only the Debian suites, which Raspbian hosts use, unless it bundles "
+                        "a dependency repository into the Raspbian suite")
+        missing = [s for s in raspbian if s.removeprefix("raspbian-") not in suites]
+        if missing:
+            raise Error(f"{' '.join(missing)}: an Architecture: all repository's Raspbian suite carries the "
+                        f"packages built for the Debian suite of its codename, so that suite is needed too")
+        copied = {s.removeprefix("raspbian-"): s for s in raspbian}
+    elif raspbian and "armhf" not in archs:
         raise Error(f"{' '.join(raspbian)}: the Raspbian suites are armhf only, and the "
                     "architectures leave armhf out")
 
     build, install = [], []
     for s in suites:
+        if s in copied.values():
+            # Built with its Debian suite (below); installed in the Raspbian root.
+            install.append({"suite": s, "arch": "armhf", "runner": RUNNER["armhf"]})
+            continue
         if s in RASPBIAN:
             built = ["armhf"]
         else:
@@ -138,8 +171,11 @@ def plan(declaration: dict, control: list[str], suites_input: str, archs_input: 
             continue
         first = next(a for a in PREFERENCE + ["all"] if a in built)
         for a in built:
-            build.append({"suite": s, "arch": a, "runner": RUNNER[a],
-                          "arch-all": "true" if a == first else "false"})
+            job = {"suite": s, "arch": a, "runner": RUNNER[a],
+                   "arch-all": "true" if a == first else "false"}
+            if s in copied:
+                job["also"] = copied[s]   # uploaded again as debs-<also>-<arch>
+            build.append(job)
         install.append({"suite": s, "arch": first, "runner": RUNNER[first]})
     if not build:
         raise Error(f"nothing to build: no architecture of {' '.join(archs)} is built for "
@@ -150,7 +186,7 @@ def plan(declaration: dict, control: list[str], suites_input: str, archs_input: 
     if has_all or all_arch:
         advertised.append("all")
     return {"build": build, "install": install, "suites": [s for s in suites if any(
-        j["suite"] == s for j in build)], "architectures": " ".join(advertised)}
+        j["suite"] == s or j.get("also") == s for j in build)], "architectures": " ".join(advertised)}
 
 
 def main() -> int:
