@@ -88,6 +88,16 @@ class Validate(unittest.TestCase):
         for host in ("127.0.0.1:8000", "172.17.0.1:8766", "[::1]"):
             aps.validate([{**FLAT, "key": f"http://{host}/k.gpg"}])
 
+    def test_bundle(self):
+        # docs/packaging.md, "Bundling a dependency repository".
+        self.assertFalse(aps.validate([OURS])[0]["bundle"])
+        self.assertTrue(aps.validate([{**OURS, "bundle": True}])[0]["bundle"])
+        self.bad({**OURS, "bundle": "yes"}, "`bundle` is true or false")
+        # Someone else's: never by accident, and only a flat repository.
+        self.bad({**FLAT, "bundle": True}, 'bundle = "third-party"')
+        self.assertTrue(aps.validate([{**FLAT, "bundle": "third-party"}])[0]["bundle"])
+        self.bad({**THIRD, "bundle": "third-party"}, "only a flat repository can be bundled")
+
 
 class Load(unittest.TestCase):
     def setUp(self):
@@ -254,6 +264,17 @@ class Write(unittest.TestCase):
         self.assertEqual((self.dir / "out/checks").read_text(), "")
         r = subprocess.run(["sh", str(self.dir / "out/install.sh")], capture_output=True, text=True, check=True)
         self.assertIn("no extra apt repositories", r.stdout)
+
+    def test_unbundled(self):
+        # An install test that gets a bundled repository's packages from the
+        # bundle adds only the others.
+        (self.dir / "d.toml").write_text(
+            '[[depends]]\nname = "flat"\nurl = "https://example.net/{suite}/"\nsuite = "./"\n'
+            'key = "https://example.net/flat.gpg"\nbundle = "third-party"\nreason = "r"\n')
+        r = subprocess.run(["python3", str(SCRIPT), "resolve", "--unbundled", "--declaration",
+                            str(self.dir / "d.toml"), "--suite", "trixie"],
+                           capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(r.stdout), [])
 
     def test_cli_error(self):
         (self.dir / "a.toml").write_text('[[depends]]\nrepo = "a/b"\n')
