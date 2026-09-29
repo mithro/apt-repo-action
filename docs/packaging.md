@@ -194,7 +194,8 @@ maintains patch files by hand:
   `patches/dump-config`): our commits, one logical change each, on top of a
   commit of the built branch, or on top of an earlier patch branch (a
   stack: `patches/b` built on `patches/a`, listed after it). A patch branch
-  can't change a binary file: a quilt patch can't carry one. They are ours: the sync never pushes to or
+  can't change a binary file, or create or delete an empty one: a quilt
+  patch can't carry either. They are ours: the sync never pushes to or
   deletes a `patches/*` branch, and never copies an upstream branch under
   that name.
 - **The declaration pins each one**, in the order they apply:
@@ -224,9 +225,11 @@ maintains patch files by hand:
   `dpkg-source --before-build` tries only the first patch and, when that
   doesn't apply, takes the whole series as already applied, exits 0, and
   the package is built without our patches. So:
-  - `mirror-patches.py` applies the series, in order, to a copy of the
-    built tree with dpkg-source's own `patch` options before it writes it,
-    and fails on the first that doesn't apply (and on a binary change);
+  - `mirror-patches.py` applies the series, in order, to a checkout of the
+    built commit (as the build's is: not `git archive`, which honours
+    `export-subst` and `export-ignore`) with dpkg-source's own `patch`
+    options before it writes it, and fails on the first that doesn't apply
+    (and on a binary change, or an empty file created or deleted);
   - `build-deb`, given generated patches (`debian/patches/.mirror-patches`),
     applies them itself and fails unless `.pc/applied-patches` is the whole
     series.

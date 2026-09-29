@@ -17,11 +17,12 @@ branch, before build-deb:
 
     mirror-patches.py --declaration .github/apt-packaging.toml --source src
 
-Every generated series is applied, in order, to a copy of the built tree
+Every generated series is applied, in order, to a checkout of the built commit
 with dpkg-source's own `patch` options before it is written out, and a
 patch that doesn't apply fails it: dpkg-source --before-build would
 otherwise skip the whole series and build unpatched, with exit 0. A patch
-branch that changes a binary file is refused (quilt can't carry one). A
+branch that changes a binary file, or creates or deletes an empty one, is
+refused (quilt can't carry either). A
 patch branch built on another (a stack) starts from that one's pin. With
 --check, the same, into a scratch directory, saying which doesn't apply:
 what the sync runs before it starts a build.
@@ -114,18 +115,21 @@ def base_of(src: Path, patches: list[dict], i: int, head: str) -> str:
 def apply_series(src: Path, head: str, out: Path, series: list[str]) -> None:
     """Applies the series, in order, to a copy of `head`'s tree with
     dpkg-source's patch options; raises Conflict at the first that fails."""
+    # A checkout, as the build's is, not `git archive`: that honours
+    # .gitattributes export-subst and export-ignore, and the build doesn't.
     with tempfile.TemporaryDirectory() as tmp:
-        archive = subprocess.Popen(["git", "-C", str(src), "archive", head], stdout=subprocess.PIPE)
-        subprocess.run(["tar", "-x", "-C", tmp], stdin=archive.stdout, check=True)
-        if archive.wait():
-            raise Error(f"git archive {head} failed")
-        for f in series:
-            with open(out / f) as fh:
-                r = subprocess.run(PATCH, cwd=tmp, stdin=fh, capture_output=True, text=True,
-                                   env={**os.environ, "LC_ALL": "C", "PATCH_GET": "0"})
-            if r.returncode:
-                why = (r.stdout + r.stderr).strip().splitlines()
-                raise Conflict(f.split("/", 1)[0], f, why[-1] if why else f"patch exit {r.returncode}")
+        wt = Path(tmp) / "tree"
+        git(src, "worktree", "add", "--quiet", "--detach", str(wt), head)
+        try:
+            for f in series:
+                with open(out / f) as fh:
+                    r = subprocess.run(PATCH, cwd=wt, stdin=fh, capture_output=True, text=True,
+                                       env={**os.environ, "LC_ALL": "C", "PATCH_GET": "0"})
+                if r.returncode:
+                    why = (r.stdout + r.stderr).strip().splitlines()
+                    raise Conflict(f.split("/", 1)[0], f, why[-1] if why else f"patch exit {r.returncode}")
+        finally:
+            git(src, "worktree", "remove", "--force", str(wt), check=False)
 
 
 def generate(src: Path, patches: list[dict], out: Path, head: str = "HEAD") -> list[str]:
@@ -153,6 +157,12 @@ def generate(src: Path, patches: list[dict], out: Path, head: str = "HEAD") -> l
                 raise Error(f"{p['branch']}: {Path(f).name} changes a binary file, which a quilt patch "
                             "can't carry (patch applies none of it, silently). Keep binary changes out of "
                             "patch branches.")
+            # e69de29 is git's empty blob: such a file has no hunk, and patch
+            # creates (or removes) nothing.
+            if re.search(r"^index (0+\.\.e69de29[0-9a-f]*|e69de29[0-9a-f]*\.\.0+)$", text, re.M):
+                raise Error(f"{p['branch']}: {Path(f).name} creates or deletes an empty file, which a quilt "
+                            "patch can't carry (patch does nothing, silently). Give the file content, or "
+                            "create it in debian/rules.")
         series += [str(Path(f).relative_to(out)) for f in files]
     (out / "series").write_text("".join(f"{x}\n" for x in series))
     apply_series(src, head, out, series)
@@ -179,7 +189,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=None, help="default: <source>/debian/patches")
     ap.add_argument("--head", default="HEAD", help="the built commit (default HEAD)")
     ap.add_argument("--check", action="store_true",
-                    help="only check that the patches apply to --head, with git am")
+                    help="only check that the patches apply to --head, as the build applies them "
+                         "(dpkg-source's patch options, on a checkout of --head)")
     args = ap.parse_args()
     try:
         patches = load(args.declaration)
