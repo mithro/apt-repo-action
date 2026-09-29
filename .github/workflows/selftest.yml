@@ -649,6 +649,153 @@ jobs:
               dpkg-query -W apt-repo-selftest-dep apt-repo-selftest-src
             '
 
+  publish-bundle:
+    # A dependency repository declared with `bundle` (docs/packaging.md,
+    # "Bundling a dependency repository"): its packages ours need are copied
+    # into our suite, verified against its signed index, and served with our
+    # key, so a client that adds only our repository installs ours. The
+    # dependency repository is a throwaway served from the runner on the
+    # docker bridge; it breaks after the build in the failing cases, so only
+    # the bundling can fail them, and must.
+    name: publish-bundle (${{ matrix.case }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: bundled, want: success}
+          - {case: tampered dependency, want: failure}
+          - {case: unreachable dependency, want: failure}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Make the dependency repository and our key
+        id: fixture
+        run: |
+          set -eu
+          tests/make-fixture.sh dep-repo trixie "$RUNNER_TEMP/dep.asc" apt-repo-selftest-dep
+          tests/make-fixture.sh "$RUNNER_TEMP/unused" trixie "$RUNNER_TEMP/ours.asc"
+          {
+            echo "dep-key<<END_OF_KEY"; cat "$RUNNER_TEMP/dep.asc"; echo "END_OF_KEY"
+            echo "our-key<<END_OF_KEY"; cat "$RUNNER_TEMP/ours.asc"; echo "END_OF_KEY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Index and sign the dependency repository
+        uses: ./
+        with:
+          apt-root: dep-repo
+          suites: trixie
+          gpg-private-key: ${{ steps.fixture.outputs.dep-key }}
+
+      - name: Serve it on the docker bridge
+        id: serve
+        run: |
+          set -eu
+          host=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          nohup python3 -m http.server -d dep-repo -b "$host" 8766 > dep-server.log 2>&1 &
+          for _ in $(seq 30); do
+            if curl -fsS -o /dev/null "http://$host:8766/trixie/InRelease"; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null "http://$host:8766/trixie/InRelease"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
+      - name: Make the fixture source tree, bundling the repository
+        env:
+          HOST: ${{ steps.serve.outputs.host }}
+        run: |
+          set -eu
+          python3 tests/make-source-fixture.py fixture-src --no-changelog --bundle \
+            --depends "http://$HOST:8766" --depends-key "http://$HOST:8766/apt-repo-action.gpg"
+          cat fixture-src/.github/apt-packaging.toml
+
+      - name: Build with this checkout of build-deb
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+
+      - name: Break the dependency repository
+        if: matrix.want == 'failure'
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -eu
+          case "$CASE" in
+            "tampered dependency") echo tampered >> dep-repo/trixie/apt-repo-selftest-dep_1.0_all.deb ;;
+            "unreachable dependency") pkill -f "http.server -d dep-repo" ;;
+          esac
+
+      - name: Bundle, as publish-apt does
+        id: bundle
+        continue-on-error: ${{ matrix.want == 'failure' }}
+        run: |
+          set -eu
+          mkdir -p apt-repo/trixie
+          cp built-debs/*.deb apt-repo/trixie/
+          python3 scripts/bundle-depends.py fetch --declaration fixture-src/.github/apt-packaging.toml \
+            --suite trixie --debs apt-repo/trixie
+
+      - name: Check the outcome
+        env:
+          OUTCOME: ${{ steps.bundle.outcome }}
+          WANT: ${{ matrix.want }}
+        run: |
+          set -eu
+          echo "bundle: $OUTCOME (want $WANT)"
+          test "$OUTCOME" = "$WANT"
+          ls apt-repo/trixie
+          if [ "$WANT" = failure ] && ls apt-repo/trixie/apt-repo-selftest-dep_*.deb; then
+            echo "::error::a package was bundled although its repository couldn't be verified"
+            exit 1
+          fi
+
+      - name: Index and sign ours, with the bundled package
+        if: matrix.want == 'success'
+        uses: ./
+        with:
+          apt-root: apt-repo
+          suites: trixie
+          gpg-private-key: ${{ steps.fixture.outputs.our-key }}
+
+      - name: The bundled package is marked, and served from ours alone
+        if: matrix.want == 'success'
+        env:
+          HOST: ${{ steps.serve.outputs.host }}
+        run: |
+          set -eu
+          cat apt-repo/trixie/Packages
+          grep -A10 '^Package: apt-repo-selftest-dep$' apt-repo/trixie/Packages \
+            | grep -qx "Bundled-From: http://$HOST:8766/trixie/"
+          test ! -e apt-repo/trixie/.bundled-override
+          grep -q 'bundled from' apt-repo/index.html
+          nohup python3 -m http.server -d apt-repo -b "$HOST" 8767 > our-server.log 2>&1 &
+          for _ in $(seq 30); do
+            if curl -fsS -o /dev/null "http://$HOST:8767/trixie/InRelease"; then break; fi
+            sleep 1
+          done
+          # Only our repository: the dependency repository is never added.
+          docker run --rm -e HOST "debian:trixie" sh -ec '
+            apt-get update > /dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates > /dev/null
+            install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL "http://$HOST:8767/apt-repo-action.gpg" -o /etc/apt/keyrings/ours.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/ours.gpg] http://$HOST:8767/trixie/ ./" \
+              > /etc/apt/sources.list.d/ours.list
+            apt-get update
+            apt-get install -y apt-repo-selftest-src
+            dpkg-query -W apt-repo-selftest-src apt-repo-selftest-dep
+            apt-cache policy apt-repo-selftest-dep | grep -F "http://$HOST:8767/trixie"
+          '
+          # Nothing newer upstream: a scheduled refresh starts nothing.
+          python3 scripts/bundle-depends.py stale --declaration fixture-src/.github/apt-packaging.toml \
+            --suites trixie --site "http://$HOST:8767" | tee stale.txt
+          grep -qx "stale: no" stale.txt
+          # An install test adds no bundled repository.
+          test "$(python3 scripts/apt-sources.py write --unbundled \
+            --declaration fixture-src/.github/apt-packaging.toml --suite trixie --dest unbundled)" = 0
+
   reusable-build:
     # The reusable build-deb.yml, as a repository calls it, on the committed
     # tests/fixtures/hello tree: an Architecture: all package and an
