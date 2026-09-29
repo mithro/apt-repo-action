@@ -20,11 +20,11 @@ In what follows, `<repo>` is the GitHub repository name, and `<owner-tag>` is
 ## Three kinds of repository
 
 Every packaging repository is one of three kinds. Look at whose code it is,
-and where it lives:
+and how we follow it:
 
-| | Set A: someone else's code, on GitHub | Mirror: someone else's code, hosted elsewhere | Set B: our code |
+| | Set A: someone else's code, forked | Mirror: someone else's code, copied exactly | Set B: our code |
 |---|---|---|---|
-| what it is | An upstream project on GitHub we fork and package, usually with our own patches | An exact copy of a project that isn't on GitHub, packaged unchanged | A project we wrote |
+| what it is | An upstream project we fork and package, usually with our own patches | An exact copy of an upstream project, packaged unchanged | A project we wrote |
 | examples | netplan, tmux, usdr-lib | migen (git.m-labs.hk) | rpi-hwid, sensors2mqtt, nfsroot-watchdog |
 | default branch | **`packaging`** | **`packaging`**, with no history in common with upstream's | **`main`** |
 | upstream history | kept, on the `upstream` branch | kept, on branches under upstream's own names | n/a |
@@ -32,14 +32,17 @@ and where it lives:
 | `debian/` | at the root of `packaging` | at the root of `packaging` | at the root of `main` |
 | version | upstream's version + `+<owner-tag><M>` | upstream's `git describe` + `+<owner-tag>.` ours | from our own `git describe` |
 
-Any repository we own or actively develop is Set B, never a mirror.
-Everything after [Set B](#set-b-our-code) applies to all three.
+Whether someone else's code is Set A or a mirror is chosen per repository,
+and is Tim's call. An upstream that isn't on GitHub is normally a mirror; one
+on GitHub is normally Set A, but may be a mirror too. A repository we own or
+actively develop is never a mirror (a GitHub fork we actively develop is
+Set A). Everything after [Set B](#set-b-our-code) applies to all three.
 
 ### Set A: someone else's code
 
-Set A is for an upstream on GitHub that we fork, patch, and bring up to date
-by a reviewed pull request. An upstream that isn't on GitHub is normally a
-[mirror](#mirrors-someone-elses-code-hosted-elsewhere) instead; one that
+Set A is for an upstream we fork, patch, and bring up to date by a reviewed
+pull request, usually one on GitHub. An upstream that isn't on GitHub is
+normally a [mirror](#mirrors-someone-elses-code-copied-exactly) instead; one that
 also carries our own patches is [an open question](#open-question-someone-elses-code-with-our-own-patches),
 and stays Set A until it is answered.
 
@@ -84,11 +87,12 @@ is no `upstream` branch. `packaging/` names the exact source version and its
 `.dsc` checksum, and the version follows Debian's backport form (see
 [Versions](#versions)).
 
-### Mirrors: someone else's code, hosted elsewhere
+### Mirrors: someone else's code, copied exactly
 
-A mirror repository packages software whose upstream isn't on GitHub (or is
-treated as if it weren't: migen's GitHub repository was archived when the
-project moved to git.m-labs.hk). It keeps two things apart:
+A mirror repository packages an upstream it copies exactly: usually one that
+isn't on GitHub (migen moved to git.m-labs.hk, and its GitHub repository was
+archived), and, by choice per repository, some that are. It keeps two things
+apart:
 1. **the packaging**: one branch with the build, the sync and nothing else;
 2. **exact copies of upstream**, synchronised automatically.
 
@@ -100,8 +104,9 @@ a mirror.
 
 - **`packaging`** is the default branch. It is an orphan branch: it has no
   history in common with any upstream branch (`git merge-base` finds
-  nothing). It holds only `debian/`, `packaging/`, `.github/`, `README.md`
-  and `.gitignore`, never upstream's files. Its first commit is tagged
+  nothing). It holds only what the build and the sync need (typically
+  `debian/`, `packaging/`, `.github/`, `README.md` and `.gitignore`), never
+  upstream's files. Its first commit is tagged
   `v0.0`, so our half of the version counts from there.
 - **Upstream's branches and tags** are here under upstream's own names
   (`master`), as exact copies, force-updated by the sync. Nothing of ours is
@@ -132,8 +137,11 @@ a mirror.
 
   - it copies every branch and tag of the declared `upstream` here under the
     same name, forced, so each is always identical to upstream's;
-  - it never deletes anything (a branch upstream deletes stays, with a
-    warning), and never touches `packaging`, `[mirror] ours`, or a tag on
+  - **pending Tim's confirmation:** it never deletes anything (a branch
+    upstream deletes stays here, with a warning). That is how migen's sync
+    was written, not yet a decided rule: "identical" copies would delete
+    them too;
+  - it never touches `packaging`, `[mirror] ours`, or a tag on
     `packaging`'s history (its `v0.0`), whatever upstream has;
   - when `[mirror] build`, the branch the package is built from, moved, it
     starts `deb.yml` on `packaging` (`gh workflow run deb.yml --ref
@@ -142,6 +150,12 @@ a mirror.
 
   It needs `contents: write` (to push the copies) and `actions: write` (to
   start `deb.yml`).
+- **The tag ruleset admits upstream's tags.** A mirror copies upstream's
+  tags under their own names, so a ruleset that restricts tag names (our
+  "only `vX.Y`" one) MUST also admit upstream's: migen's excludes
+  `refs/tags/[0-9]*` as well. `PKG-SYNC` checks each upstream tag against the
+  active tag rulesets. A tag a ruleset refuses is skipped, with a warning, and
+  never holds up the branches.
 - **`deb.yml`** runs on a push to `packaging`, when the sync starts it, and
   on pull requests (which never publish). It checks out `packaging`, and the
   build branch into `src/`, copies `debian/` into `src/`, and builds `src/`.
@@ -353,7 +367,7 @@ jobs:
 
 A backport's sync checks Debian's archive for a newer source version instead.
 A mirror's sync copies upstream exactly and starts the build itself, with no
-pull request (see [Mirrors](#mirrors-someone-elses-code-hosted-elsewhere)).
+pull request (see [Mirrors](#mirrors-someone-elses-code-copied-exactly)).
 
 ## Builds
 
@@ -549,13 +563,28 @@ shared script: `scripts/deb-version.py --upstream-dir src --version-tree .
 --owner-tag <owner-tag>`, run in `packaging`'s checkout with the build branch
 in `src/`.
 - `<upstream version>` is upstream's own `git describe --tags --long` on the
-  build branch. Any tag counts, not only `v`-prefixed ones, so migen's bare
-  `0.9.2` gives `0.9.2.post126` 126 commits later.
+  build branch, over the tags matching `[mirror] tags` (default `[0-9]*`,
+  migen's bare `0.9.2`; `v[0-9]*` for `v`-prefixed ones), so a packaging or
+  experiment tag upstream (`debian/2.90-1`) is never read as a version. The
+  tag is normalised: a leading `v` or project-name prefix goes, `-` becomes
+  `~` (a release candidate sorts below its release) and `_` becomes `.`.
+  migen's `0.9.2` gives `0.9.2.post126` 126 commits later. The script reads
+  `[mirror] tags` from the declaration in `--version-tree` itself; a patch
+  series passes `--upstream-tag-match` instead, or, without it, any tag
+  counts, as before.
 - `<X.Y.postN>` is `packaging`'s own `git describe --match 'v[0-9]*'`,
   counted from the `v0.0` tag on its first commit.
 
 migen publishes `0.9.2.post126+fpgasonline.0.0.post7~deb13` this way.
 Either a new upstream commit or a new packaging commit raises it.
+
+**When upstream rewrites its history**, the copy follows it, and the upstream
+half of the version can go *down* (fewer commits since the tag, or an older
+tag): apt then won't upgrade to the new build, and that suite keeps the old
+package. The sync warns in its run summary when the built branch's new tip
+isn't a descendant of the old one. A new commit on `packaging` doesn't help
+(the upstream half is compared first); the way out is an epoch, recorded as
+a `PKG-VERSION` exception.
 
 ### The suite and preview suffixes
 
@@ -847,7 +876,7 @@ repository.
 
 ```toml
 kind = "A"                  # "A": someone else's code, on GitHub; "B": ours;
-                            # "mirror": someone else's, hosted elsewhere;
+                            # "mirror": someone else's, copied exactly;
                             # "aggregate": collects packages built elsewhere
 variant = "backport"        # optional: "backport" (A) or "patch-series" (B)
 upstream = "https://github.com/tmux/tmux"      # Set A; a mirror's: the git URL copied
@@ -880,6 +909,7 @@ upstream = "https://git.m-labs.hk/M-Labs/migen.git"   # what is copied (git ls-r
 [mirror]
 build = "master"                                  # the branch the package is built from
 ours = ["github-master", "legacy", "experimental"]  # our branches besides packaging: never synced
+tags = "[0-9]*"                                   # optional: upstream's version tags ("v[0-9]*"...)
 ```
 
 ### Dependency repositories
