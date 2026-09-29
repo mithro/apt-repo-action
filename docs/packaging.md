@@ -1094,30 +1094,41 @@ reason = "python3-paho-mqtt (>= 2) is not in bookworm"
 ```
 
 - **Whose.** Bundling re-signs the dependency's packages with our key, so
-  our users trust them as ours. `bundle = true` is for one of ours (the
-  `repo` form). Someone else's must say `bundle = "third-party"`, only when
-  we vouch for that repository, and must be a flat repository.
-- **Which packages.** The `Depends` and `Pre-Depends` of our packages,
-  followed through the dependency repository's own packages: whatever it
-  has that ours name (an alternative or a virtual package included), and
-  what those need from it in turn. What it doesn't have is left to Debian.
-  An alternative Debian would satisfy may be bundled too: whether Debian
-  has it can't be known without the archive, and what a dependency
-  repository has is normally why it was declared.
+  our users trust them as ours. `bundle = true` is only for a `repo` with
+  the same GitHub owner as the repository declaring it. Anything else, a
+  `repo` of another owner included, must say `bundle = "third-party"`,
+  only when we vouch for that repository; an explicit (non-`repo`) one
+  must also be a flat repository. PKG-DEPENDS applies the same rule.
+- **Which packages.** Each `Depends` and `Pre-Depends` relation of ours
+  that the dependency repository can satisfy (the package at a version the
+  relation allows, or a `Provides`; a versioned relation only by a
+  versioned `Provides`), and what those need from it in turn. What it
+  doesn't have is left to Debian. An alternative Debian would satisfy may
+  be bundled too: whether Debian has it can't be known without the
+  archive, and what a dependency repository has is normally why it was
+  declared. A relation without alternatives on a package the dependency
+  repository has, none of whose versions satisfies it, fails the publish.
 - **Which architectures.** A package needed by an `Architecture: all`
   package of ours is bundled for every architecture the dependency
   repository has it for, since ours installs anywhere; one needed only by
   architecture-dependent packages, for their architectures. The suite's
   `Architectures` counts them.
-- **Which versions.** The newest the dependency repository has when we
-  publish. keep-history keeps earlier ones as it does ours. A client that
-  also has the dependency repository gets whichever version is higher, as
-  apt always does, so nothing needs pinning.
+- **Which versions.** For each relation, the newest version that satisfies
+  it when we publish (by `dpkg --compare-versions`), so several versions
+  of one package if relations need them. keep-history keeps earlier ones
+  as it does ours. A client that also has the dependency repository gets
+  whichever version is higher, as apt always does, so nothing needs
+  pinning.
 - **Nothing unverified.** The dependency repository's `InRelease` must
   verify with its key (only the verified text is read), and, for one of
   ours, be for this suite. Its `Packages` must match the hash `InRelease`
-  gives, and each `.deb` the `Size` and `SHA256` its `Packages` gives. If
-  anything fails, an unreachable repository included, the publish fails:
+  gives, and each `.deb` the `Size` and `SHA256` its `Packages` gives.
+  Each `.deb`'s own control file must also say exactly what its stanza
+  does (`Package`, `Version`, `Architecture`, `Source`, `Multi-Arch`,
+  `Essential` and its relations): our index is made from the files, so a
+  file claiming to be another package, one of ours say, would otherwise
+  enter it. If anything fails, an unreachable repository included, the
+  publish fails:
   publishing without the dependency would leave our packages
   uninstallable for anyone using only our repository.
 - **Marked.** Each bundled package's stanza in our signed `Packages` says
@@ -1125,26 +1136,34 @@ reason = "python3-paho-mqtt (>= 2) is not in bookworm"
   index page shows it. The compliance rules about our own packages leave
   bundled ones out.
 - **Building is unchanged.** `build-deb` still adds the dependency
-  repository for the build. The [install test](#builds) installs the
-  bundled packages from the bundle and adds only the other dependency
-  repositories, which proves the published repository is enough. A
-  repository with its own install test does the same:
+  repository for the build. The [install test](#builds) offers the
+  bundled packages to apt as a local source and adds only the other
+  dependency repositories, so apt chooses among them (one of several
+  alternatives or versions) as it would from the published repository,
+  which proves that repository is enough. A repository with its own install
+  test does the same:
 
   ```sh
   python3 <apt-repo-action>/scripts/bundle-depends.py fetch --suite "$SUITE" \
-    --arch "$ARCH" --debs built-debs --dest bundled-debs
+    --arch "$ARCH" --debs built-debs --dest bundled-debs --index
   python3 <apt-repo-action>/scripts/apt-sources.py write --unbundled \
     --suite "$SUITE" --dest apt-sources
-  # in the container: sh apt-sources/install.sh; apt-get install ./built-debs/*.deb ./bundled-debs/*.deb
+  # in the container: sh apt-sources/install.sh
+  #   echo "deb [trusted=yes] file:/bundled-debs ./" > /etc/apt/sources.list.d/bundled.list
+  #   apt-get update; apt-get install ./built-debs/*.deb
   ```
+
+  `trusted=yes` is for the throwaway test container only: every bundled
+  file was already verified as above. Never in anything published.
 - **The README** gives only our repository's setup: PKG-DOCS asks for no
   setup lines for a bundled dependency repository.
 - **Keeping up.** A newer version in the dependency repository reaches our
   users at our next publish. To not wait for one, call
   [`refresh-bundled.yml`](../.github/workflows/refresh-bundled.yml) on a
-  schedule: it starts the build workflow only when a bundled repository
-  has something newer than our live site bundles (or we bundle nothing
-  from it yet), so most days nothing runs:
+  schedule: it runs the same selection over our live packages and the
+  bundled repositories' indexes, and starts the build workflow only when
+  that would bundle something our live site doesn't have, so most days
+  nothing runs:
 
   ```yaml
   name: Refresh bundled packages
