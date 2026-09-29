@@ -15,12 +15,18 @@ repository at <url>/<suite>/ that has it as a `[[depends]]` in
 --declare-only leaves out the Build-Depends, so a build that fails can only
 have failed on the repository itself (a wrong key, no Release).
 
+--patch-series <upstream-dir> also makes a patch series' fetched project: its
+own git repository at <upstream-dir>, tagged v1.1.1 two commits back, with the
+debian/ files written into it uncommitted, as a patch series renders them
+(docs/packaging.md, "Versions"). Built there with <dir> as the version tree
+and --owner-tag selftest, the version is 1.1.1.post2+selftest.0.3.post1.
+
 --any adds an architecture-dependent package from tests/fixtures/hello/,
 apt-repo-selftest-hello: a C command that prints its version for `apt-repo-selftest-hello --version` and,
 for `--cpu-arch`, the ARM architecture it was compiled for (__ARM_ARCH), so
 a test can tell a Raspbian ARMv6 build from a Debian ARMv7 one.
 
-Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog]
+Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog | --patch-series <dir>]
            [--depends <url> --depends-key <url> [--declare-only]] [--any]
 """
 import argparse
@@ -88,6 +94,8 @@ def main() -> None:
     how.add_argument("--legacy", action="store_true")
     # The legacy script edits the committed placeholder, so it needs one.
     how.add_argument("--no-changelog", action="store_true")
+    how.add_argument("--patch-series", metavar="UPSTREAM_DIR", type=Path,
+                     help="also make a fetched upstream tree there, holding the debian/ files")
     ap.add_argument("--depends", metavar="URL", help="the dependency repository's site")
     ap.add_argument("--depends-key", metavar="URL", help="its key")
     ap.add_argument("--declare-only", action="store_true", help="declare it, but don't build-depend on it")
@@ -125,6 +133,25 @@ def main() -> None:
     git("commit", "-q", "-m", "fixture")
     git("tag", "-a", "v0.3", "-m", "v0.3")
     git("commit", "-q", "--allow-empty", "-m", "one after the tag")
+
+    if args.patch_series:
+        up = args.patch_series
+
+        def upgit(*a: str) -> None:
+            subprocess.run(["git", "-C", str(up), *a], check=True, env=env)
+
+        up.mkdir(parents=True)
+        upgit("init", "-q", "-b", "master")
+        upgit("commit", "-q", "--allow-empty", "-m", "upstream's release")
+        upgit("tag", "-a", "v1.1.1", "-m", "v1.1.1")
+        upgit("commit", "-q", "--allow-empty", "-m", "upstream, one after")
+        upgit("commit", "-q", "--allow-empty", "-m", "upstream, two after")
+        # Rendered, not committed: the build writes the whole changelog.
+        for name, text in files.items():
+            if name.startswith("debian/") and name != "debian/changelog":
+                (up / name).parent.mkdir(parents=True, exist_ok=True)
+                (up / name).write_text(text)
+        (up / "debian/rules").chmod(0o755)
 
 
 if __name__ == "__main__":

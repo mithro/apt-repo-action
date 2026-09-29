@@ -26,7 +26,7 @@ jobs:
     # Build a throwaway source tree with THIS checkout of build-deb and check
     # the version it stamped. On a pull request every build is a preview, so
     # ~pr<P> is expected there.
-    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }})
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }}${{ matrix.patch-series && ' patch-series' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -35,12 +35,16 @@ jobs:
           - {suite: trixie, arch: all, want: "0.3.post1~deb13"}
           - {suite: sid, arch: amd64, want: "0.3.post1"}
           - {suite: bookworm, arch: arm64, want: "0.3.post1~deb12"}    # under QEMU
+          - {suite: trixie, arch: armhf, want: "0.3.post1~deb13"}      # under QEMU
           # A repository still carrying its own packaging/deb-version.py
           # keeps using it (tmux, scanbd) until it is migrated.
           - {suite: trixie, arch: all, legacy: true, want: "9.9"}
           # Set B commits no debian/changelog: the build's entry is the only
           # one in the package (docs/packaging.md, "The changelog").
           - {suite: trixie, arch: all, no-changelog: true, want: "0.3.post1~deb13"}
+          # A patch series builds in the fetched project's tree, versioned
+          # from both (docs/packaging.md, "Versions"), with an epoch.
+          - {suite: bookworm, arch: all, patch-series: true, want: "2:1.1.1.post2+selftest.0.3.post1~deb12"}
     steps:
       - uses: actions/checkout@v5
 
@@ -49,6 +53,7 @@ jobs:
           python3 tests/make-source-fixture.py fixture-src
           ${{ matrix.legacy && '--legacy' || '' }}
           ${{ matrix.no-changelog && '--no-changelog' || '' }}
+          ${{ matrix.patch-series && '--patch-series fixture-upstream' || '' }}
 
       - name: Build with this checkout of build-deb
         id: build
@@ -56,7 +61,9 @@ jobs:
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
-          source-dir: fixture-src
+          source-dir: ${{ matrix.patch-series && 'fixture-upstream' || 'fixture-src' }}
+          version-tree: ${{ matrix.patch-series && 'fixture-src' || '' }}
+          version-args: ${{ matrix.patch-series && '--owner-tag selftest --upstream-dir . --epoch 2' || '' }}
 
       - name: No declaration, so no dependency repositories
         env:
@@ -66,12 +73,23 @@ jobs:
           test -z "$(cat "$APT_SOURCES/checks")"
           sh "$APT_SOURCES/install.sh" | grep -q 'no extra apt repositories'
 
+      - name: lintian ran, and found the fixture's missing copyright file
+        env:
+          ERRORS: ${{ steps.build.outputs.lintian-errors }}
+          WARNINGS: ${{ steps.build.outputs.lintian-warnings }}
+        run: |
+          set -eu
+          echo "lintian: $ERRORS errors, $WARNINGS warnings"
+          # The fixture has no debian/copyright: lintian's no-copyright-file.
+          test "$ERRORS" -ge 1
+
       - name: Check the version and changelog
         env:
           WANT: ${{ matrix.want }}
           PR: ${{ github.event.pull_request.number }}
           LEGACY: ${{ matrix.legacy }}
           NO_CHANGELOG: ${{ matrix.no-changelog }}
+          PATCH_SERIES: ${{ matrix.patch-series }}
         run: |
           set -eu
           if [ -n "$PR" ] && [ "$LEGACY" != true ]; then WANT="$WANT~pr$PR"; fi
@@ -80,9 +98,13 @@ jobs:
           echo "version: $got (want $WANT)"
           test "$got" = "$WANT"
           if [ "$LEGACY" != true ]; then
+            # A patch series' changelog is in the fetched tree; the commit
+            # it names is still this repository's (the fixture's).
+            log=fixture-src/debian/changelog
+            if [ "$PATCH_SERIES" = true ]; then log=fixture-upstream/debian/changelog; fi
             sha=$(git -C fixture-src rev-parse HEAD)
-            head -n 3 fixture-src/debian/changelog
-            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" fixture-src/debian/changelog
+            head -n 3 "$log"
+            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" "$log"
           fi
           if [ "$NO_CHANGELOG" = true ]; then
             # Nothing committed, so the package's changelog is the build's
@@ -97,7 +119,7 @@ jobs:
             entries=$(zcat "$log" | grep -cE '^[a-z0-9][a-z0-9.+-]* \(.+\) .+; urgency=')
             echo "changelog entries: $entries (want 1)"
             test "$entries" = 1
-          elif [ "$LEGACY" != true ]; then
+          elif [ "$LEGACY" != true ] && [ "$PATCH_SERIES" != true ]; then
             # The placeholder stays underneath the build's entry.
             grep -q 'Placeholder changelog' fixture-src/debian/changelog
           fi
@@ -172,7 +194,10 @@ jobs:
         run: |
           set -eu
           for f in built-debs/*.deb; do
-            if dpkg-deb -c "$f" | grep -E 'etc/crypto-policies|apt-sequoia'; then
+            # Listed first, so a dpkg-deb failure fails the step (set -e)
+            # instead of reading as "no policy in it".
+            contents=$(dpkg-deb -c "$f")
+            if printf '%s\n' "$contents" | grep -E 'etc/crypto-policies|apt-sequoia'; then
               echo "::error::$f carries a crypto policy"
               exit 1
             fi
@@ -279,6 +304,157 @@ jobs:
             echo "::error::a package was built without its version"
             exit 1
           fi
+
+  build-deb-lintian:
+    # `lintian: error` fails a build with a lintian error (the fixture has
+    # no debian/copyright), and `lintian: off` doesn't run it at all. The
+    # default, `warn`, is what every build-deb job above runs.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Make two fixture source trees, one per build
+        run: |
+          python3 tests/make-source-fixture.py fixture-src
+          python3 tests/make-source-fixture.py fixture-off
+      - name: lintian errors fail the build with lintian error
+        id: error
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+          lintian: error
+      - name: lintian off
+        id: off
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-off
+          out-dir: built-debs-off
+          lintian: "off"
+      - name: Check the outcomes
+        env:
+          OUTCOME: ${{ steps.error.outcome }}
+          ERRORS: ${{ steps.error.outputs.lintian-errors }}
+          OFF_ERRORS: ${{ steps.off.outputs.lintian-errors }}
+        run: |
+          set -eu
+          echo "lintian: error: $OUTCOME with $ERRORS errors; off: '$OFF_ERRORS'"
+          test "$OUTCOME" = failure
+          test "$ERRORS" -ge 1
+          test -z "$OFF_ERRORS"
+          ls built-debs-off/*.deb
+
+  build-deb-lintian-cannot-run:
+    # lintian failing to run at all (here: its package can't be installed)
+    # fails the build in warn mode as well as error mode: warn only forgives
+    # lintian's findings.
+    name: build-deb-lintian-cannot-run (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {mode: warn, want: failure}
+          - {mode: error, want: failure}
+    env:
+      APT_REPO_ACTION_SELFTEST_LINTIAN_PACKAGE: no-such-package-apt-repo-selftest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: Build, with lintian uninstallable
+        id: build
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: fixture-src
+          lintian: ${{ matrix.mode }}
+      - name: Check the outcome
+        env:
+          OUTCOME: ${{ steps.build.outcome }}
+          WANT: ${{ matrix.want }}
+          ERRORS: ${{ steps.build.outputs.lintian-errors }}
+        run: |
+          set -eu
+          echo "outcome: $OUTCOME (want $WANT); lintian errors: '$ERRORS'"
+          test "$OUTCOME" = "$WANT"
+          # lintian never ran, so there are no counts.
+          test -z "$ERRORS"
+          ls built-debs/*.deb
+
+  deb-version-action:
+    # The version for a build outside build-deb (docs/packaging.md, "The
+    # shared actions"): an nfpm package, as the Go repositories build, and a
+    # patch series' own job. nfpm must keep the version exactly as given.
+    name: deb-version (${{ matrix.case }} ${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: nfpm, suite: trixie, args: "", want: "0.3.post1~deb13"}
+          - {case: nfpm, suite: sid, args: "", want: "0.3.post1"}
+          - {case: patch-series, suite: forky,
+             args: "--owner-tag fpgasonline --upstream-version 20260914",
+             want: "20260914+fpgasonline.0.3.post1~deb14"}
+    env:
+      NFPM_VERSION: 2.47.0
+      NFPM_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: The version, with this checkout of deb-version
+        id: version
+        uses: ./deb-version
+        with:
+          suite: ${{ matrix.suite }}
+          source-dir: fixture-src
+          version-args: ${{ matrix.args }}
+      - name: Check it
+        env:
+          GOT: ${{ steps.version.outputs.version }}
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          echo "version: $GOT (want $WANT)"
+          test "$GOT" = "$WANT"
+      - name: Package it with nfpm, as a Go repository does
+        if: matrix.case == 'nfpm'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          curl -fsSL -o nfpm.deb \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          echo "$NFPM_SHA256  nfpm.deb" | sha256sum -c
+          sudo dpkg -i nfpm.deb
+          mkdir -p dist
+          printf '#!/bin/sh\necho selftest\n' > dist/apt-repo-selftest-nfpm
+          cat > nfpm.yaml <<'NFPM'
+          name: apt-repo-selftest-nfpm
+          arch: amd64
+          platform: linux
+          version: ${VERSION}
+          version_schema: none
+          maintainer: apt-repo-action self-test <selftest@invalid>
+          description: apt-repo-action deb-version self-test fixture
+          contents:
+            - src: ./dist/apt-repo-selftest-nfpm
+              dst: /usr/bin/apt-repo-selftest-nfpm
+              file_info:
+                mode: 0755
+          NFPM
+          nfpm package -p deb -f nfpm.yaml -t dist/
+          ls dist/
+          got=$(dpkg-deb -f dist/*.deb Version)
+          echo "package version: $got (want $VERSION)"
+          test "$got" = "$VERSION"
 
   build-deb-depends:
     # A build dependency only a declared [[depends]] repository has
@@ -484,6 +660,65 @@ jobs:
           assert r["keyring"] == "/etc/apt/keyrings/choosealicense.com.gpg", r["keyring"]
           EOF
 
+  collect-debs-upload:
+    # Artifacts for collect-debs below: one that its pattern is the only
+    # match for, and three for the other, suites with and without a dash.
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - {name: debs-trixie-amd64-selftest-one, deb: one_1_amd64.deb}
+          - {name: debs-bookworm-selftest-many, deb: many-a_1_all.deb}
+          - {name: debs-trixie-amd64-selftest-many, deb: many-b_1_amd64.deb}
+          - {name: debs-raspbian-trixie-armhf-selftest-many, deb: many-c_1_armhf.deb}
+    steps:
+      - name: A placeholder .deb
+        env:
+          DEB: ${{ matrix.deb }}
+        run: mkdir out && echo placeholder > "out/$DEB"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: out/
+
+  collect-debs:
+    # publish-apt.yml's first half, with the workflow's read-only token, as
+    # every caller's publish job has it. download-artifact v5+ extracts a
+    # lone matching artifact with no <name>/ directory, so "one" is the case
+    # that broke the regroup.
+    needs: collect-debs-upload
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: one
+            want: "trixie/one_1_amd64.deb"
+          - case: many
+            want: "bookworm/many-a_1_all.deb trixie/many-b_1_amd64.deb raspbian-trixie/many-c_1_armhf.deb"
+    name: collect-debs (${{ matrix.case }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: Collect
+        id: collect
+        uses: ./collect-debs
+        with:
+          suites: bookworm trixie raspbian-trixie
+          pattern: debs-*-selftest-${{ matrix.case }}
+          dest: apt-repo
+      - name: Each .deb is in its suite, and nothing else is
+        env:
+          WANT: ${{ matrix.want }}
+          COUNT: ${{ steps.collect.outputs.count }}
+        run: |
+          set -eu
+          (cd apt-repo && find . -type f | sed 's|^\./||' | sort) > got
+          # shellcheck disable=SC2086 # one path per word
+          printf '%s\n' $WANT | sort > want
+          diff -u want got
+          test "$COUNT" = "$(wc -l < want)"
+          for s in bookworm trixie raspbian-trixie; do test -d "apt-repo/$s"; done
+
   publish:
     runs-on: ubuntu-latest
     steps:
@@ -521,6 +756,49 @@ jobs:
           grep -q '^Label: apt-repo-action$' apt-repo/trixie/Release
           fpr=$(gpg --show-keys --with-colons apt-repo/apt-repo-action.gpg | awk -F: '/^fpr/ {print $10; exit}')
           grep -q "$fpr" apt-repo/index.html
+
+      # Suites holding different architectures, published with a caller's
+      # usual list: each Release advertises only what its suite holds
+      # (docs/packaging.md, "Architectures").
+      - name: Build suites with different architectures
+        run: |
+          set -eu
+          deb() {  # deb <suite> <arch>
+            d=$(mktemp -d)
+            mkdir -p "$d/DEBIAN"
+            printf 'Package: apt-repo-selftest-%s\nVersion: 1.0\nArchitecture: %s\nMaintainer: apt-repo-action self-test <selftest@invalid>\nDescription: apt-repo-action self-test fixture\n' \
+              "$2" "$2" > "$d/DEBIAN/control"
+            mkdir -p "apt-repo-arches/$1"
+            dpkg-deb --build --root-owner-group "$d" "apt-repo-arches/$1/apt-repo-selftest-$2_1.0_$2.deb"
+          }
+          deb bookworm all
+          deb bookworm amd64
+          deb bookworm arm64
+          deb raspbian-trixie armhf
+
+      - name: Index and sign suites with different architectures
+        uses: ./
+        with:
+          apt-root: apt-repo-arches
+          suites: bookworm raspbian-trixie
+          architectures: amd64 arm64 armhf riscv64 all
+          gpg-private-key: ${{ steps.fixture.outputs.private-key }}
+
+      - name: Each Release advertises only its suite's architectures
+        run: |
+          set -eu
+          for want in "bookworm:all amd64 arm64" "raspbian-trixie:armhf"; do
+            suite=${want%%:*}
+            got=$(sed -n 's/^Architectures: //p' "apt-repo-arches/$suite/Release")
+            echo "$suite: Architectures: $got"
+            if [ "$got" != "${want#*:}" ]; then
+              echo "::error::$suite's Release advertises '$got', not '${want#*:}'"
+              exit 1
+            fi
+            grep -q "^Architectures: $got\$" "apt-repo-arches/$suite/InRelease"
+          done
+          # The all-only suites above still say all.
+          grep -q '^Architectures: all$' apt-repo/trixie/Release
 
       - name: carry-over.py copies a live repository byte for byte
         run: |

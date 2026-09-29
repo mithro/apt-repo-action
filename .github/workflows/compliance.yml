@@ -1,0 +1,66 @@
+name: Compliance report
+
+# Every night, run scripts/apt-compliance.py over every packaging repository
+# of the owners below and keep the report as this run's artifact and summary
+# (docs/compliance-plan.md, section 4). It changes nothing anywhere: it opens
+# no issues and publishes nothing.
+#
+# The owners, their version tags and the maintainer are here, not in the
+# script, which knows only what the conventions mean.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      owners:
+        description: Owners to scan, space-separated, each OWNER=TAG (empty = the defaults below).
+        required: false
+        default: ""
+      maintainer:
+        description: The Maintainer every package must have (empty = the default below).
+        required: false
+        default: ""
+
+env:
+  DEFAULT_OWNERS: mithro=welland fpgas-online=fpgasonline
+  DEFAULT_MAINTAINER: Tim 'mithro' Ansell <me@mith.ro>
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compliance
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Check every packaging repository
+        env:
+          # Every repository it reads is public: the run's own token suffices.
+          GH_TOKEN: ${{ github.token }}
+          OWNERS: ${{ inputs.owners || env.DEFAULT_OWNERS }}
+          MAINTAINER: ${{ inputs.maintainer || env.DEFAULT_MAINTAINER }}
+        run: |
+          set -eu
+          args=()
+          for o in $OWNERS; do args+=(--owner "$o"); done
+          mkdir -p report
+          uv run scripts/apt-compliance.py "${args[@]}" \
+            --maintainer "$MAINTAINER" --action-repo "$GITHUB_REPOSITORY" \
+            --json report/report.json --markdown report/report.md --html report/report.html
+          cat report/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compliance-report
+          path: report/
+          if-no-files-found: error
