@@ -139,6 +139,30 @@ jobs:
           pattern: ${{ inputs.artifact-pattern }}
           dest: apt-repo
 
+      # The packages ours need from dependency repositories declared with
+      # `bundle` (docs/packaging.md, "Bundling a dependency repository"),
+      # verified against their signed indexes, so users add only this
+      # repository. Before keep-history, so the size limit counts them and
+      # their earlier versions are kept like ours. Nothing declared: nothing
+      # happens. A dependency that can't be fetched and verified fails the
+      # publish, rather than publishing packages that can't be installed.
+      - name: Bundle packages from dependency repositories
+        shell: bash
+        env:
+          SUITES: ${{ inputs.suites }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for suite in $SUITES; do
+            python3 .apt-repo-action/scripts/bundle-depends.py fetch \
+              --suite "$suite" --debs "apt-repo/$suite" | tee -a bundled.txt
+          done
+          if [ -s bundled.txt ]; then
+            { echo "### Bundled from dependency repositories"; echo '```'; cat bundled.txt; echo '```'; } \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+          rm -f bundled.txt
+
       - name: Find the caller's index page fragment
         id: intro
         shell: bash

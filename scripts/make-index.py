@@ -75,26 +75,38 @@ sudo apt update</pre>
 """
 
 
-def packages_in(suite_dir: pathlib.Path) -> list[tuple[str, str, str]]:
-    """Read (package, version, architecture) out of a suite's Packages file."""
+def packages_in(suite_dir: pathlib.Path) -> list[tuple[str, str, str, str]]:
+    """Read (package, version, architecture, bundled-from) out of a suite's
+    Packages file; bundled-from is the dependency repository a bundled
+    package came from (scripts/bundle-depends.py), or ""."""
     packages_file = suite_dir / "Packages"
     if not packages_file.is_file():
         return []
-    found: dict[tuple[str, str], tuple[str, str, str]] = {}
+    found: dict[tuple[str, str], tuple[str, str, str, str]] = {}
     for stanza in packages_file.read_text().split("\n\n"):
         def field(name: str) -> str:
             m = re.search(rf"^{name}: (.+)$", stanza, re.MULTILINE)
             return m.group(1).strip() if m else ""
 
         name, version, arch = field("Package"), field("Version"), field("Architecture")
+        origin = field("Bundled-From")
         if not name:
             continue
         # Several versions accumulate; show the newest by dpkg ordering, which
         # for the git-describe scheme is plain string order on the .postN tail.
         key = (name, arch)
         if key not in found or version > found[key][1]:
-            found[key] = (name, version, arch)
+            found[key] = (name, version, arch, origin)
     return sorted(found.values())
+
+
+def origin_html(origin: str) -> str:
+    """Where a bundled package came from: a GitHub repository, linked, or a URL."""
+    if not origin:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", origin):
+        return f'bundled from <a href="https://github.com/{html.escape(origin)}">{html.escape(origin)}</a>'
+    return f"bundled from {html.escape(origin)}"
 
 
 def fingerprint(keyring: pathlib.Path) -> str:
@@ -139,22 +151,31 @@ def main() -> None:
     base = (args.site_url or f"https://{args.repo.split('/')[0]}.github.io/{repo_name}").rstrip("/")
     intro = pathlib.Path(args.intro_html).read_text() if args.intro_html else ""
 
-    rows = []
+    rows, bundled = [], set()
     for suite in args.suites.split():
-        for name, version, arch in packages_in(root / suite):
+        for name, version, arch, origin in packages_in(root / suite):
+            if origin:
+                bundled.add(origin)
             rows.append(
                 f"<tr><td><code>{html.escape(name)}</code></td>"
                 f"<td>{html.escape(version)}</td>"
                 f"<td>{html.escape(arch)}</td>"
-                f"<td>{html.escape(suite)}</td></tr>"
+                f"<td>{html.escape(suite)}</td>"
+                f"<td>{origin_html(origin)}</td></tr>"
             )
     packages = (
-        "<table><tr><th>Package<th>Version<th>Arch<th>Suite</tr>"
+        "<table><tr><th>Package<th>Version<th>Arch<th>Suite<th>From</tr>"
         + "".join(rows)
         + "</table>"
         if rows
         else "<p class='muted'>No packages indexed.</p>"
     )
+    if bundled:
+        packages += (
+            "<p class='muted'>Packages marked with a repository are bundled: copied, after "
+            "checking them against that repository's signed index, from a repository these "
+            "packages depend on, and signed with this repository's key, so this repository "
+            "is the only one to add.</p>")
 
     setup = "".join(
         SETUP.format(suite=suite, base=base, keyring=keyring,
