@@ -438,8 +438,16 @@ runs:
               echo "all $(echo "$want" | grep -c .) generated patches applied"
             fi
             dpkg-buildpackage -us -uc "$what"
-            # dpkg-buildpackage writes to the parent directory.
-            cp ../*.deb /work/out/
+            # dpkg-buildpackage writes to the parent directory, which for a
+            # source-dir below the checkout is a directory of the checkout:
+            # other builds in the same job leave their .debs there too. So
+            # only this build'"'"'s, as debian/files lists them.
+            debs=$(awk '"'"'$1 ~ /\.u?deb$/ {print $1}'"'"' debian/files)
+            if [ -z "$debs" ]; then
+              echo "::error::debian/files lists no packages: nothing was built"
+              exit 1
+            fi
+            for f in $debs; do cp "../$f" /work/out/; done
             ls -lh /work/out/
           '
 
