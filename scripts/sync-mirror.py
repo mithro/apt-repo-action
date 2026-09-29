@@ -98,10 +98,15 @@ def push_status(r: subprocess.CompletedProcess) -> dict[str, str]:
     return out
 
 
+# What GitHub says when a ruleset refuses a ref (GH013), or a hook does.
+RULESET = ("GH013", "rule violation", "declined")
+
+
 def push_tags(remote: str, specs: list[str]) -> list[str]:
     """Pushes the tags, not atomically; any a first push didn't take (a tag
     ruleset refusing one can refuse the whole push, GH013) are pushed one by
-    one, so a refused tag never holds up the others. Returns those refused."""
+    one, so a refused tag never holds up the others. Returns those a ruleset
+    refused; any other failure (auth, network) is an Error."""
     r = run("git", "push", "--porcelain", remote, *specs, check=False, quiet=True)
     done = {ref for ref, flag in push_status(r).items() if flag in OK_FLAGS}
     refused = []
@@ -110,8 +115,12 @@ def push_tags(remote: str, specs: list[str]) -> list[str]:
         if ref in done:
             continue
         one = run("git", "push", "--porcelain", remote, spec, check=False, quiet=True)
-        if push_status(one).get(ref) not in OK_FLAGS:
-            refused.append(ref)
+        if push_status(one).get(ref) in OK_FLAGS:
+            continue
+        said = one.stdout + one.stderr
+        if not any(x in said for x in RULESET):
+            raise Error(f"pushing {ref} failed, and not by a ruleset: {said.strip().splitlines()[-1:] or one.returncode}")
+        refused.append(ref)
     return refused
 
 
@@ -218,8 +227,8 @@ def sync(upstream: str, build: str, ours: set[str], remote: str, default: str, d
     # A tag here that upstream has too, differently: ours if it is an
     # archive/ tag or on our default branch's history (packaging's v0.0),
     # else a copy to update.
-    for n in sorted(n for n in changed if n.startswith("refs/tags/archive/") and n in here):
-        warn(f"upstream has {n}, which is one of ours here: not mirrored")
+    for n in sorted(n for n in changed if n.startswith("refs/tags/archive/")):
+        warn(f"upstream has {n}, in our archive/ namespace: not mirrored")
         changed.remove(n)
     clash = [n for n in changed if n.startswith("refs/tags/") and n in here]
     for n in sorted(ours_by_history(remote, default, clash)):

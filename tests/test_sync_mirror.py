@@ -124,7 +124,7 @@ class SyncMirror(unittest.TestCase):
     def test_a_refused_tag_does_not_stop_the_branches(self):
         # As a tag ruleset refusing upstream's names: the remote's update hook.
         hook = self.ours / "hooks/update"
-        hook.write_text('#!/bin/sh\ncase "$1" in refs/tags/0.9*) echo "refused by ruleset" >&2; exit 1 ;; esac\n')
+        hook.write_text('#!/bin/sh\ncase "$1" in refs/tags/0.9*) echo "error: GH013: Repository rule violations found for $1" >&2; exit 1 ;; esac\n')
         hook.chmod(0o755)
         git(self.up, "tag", "1.0")
         self.assertTrue(self.sync())
@@ -237,11 +237,28 @@ class SyncMirror(unittest.TestCase):
 
     def test_build_output_survives_refused_tags(self):
         hook = self.ours / "hooks/update"
-        hook.write_text('#!/bin/sh\ncase "$1" in refs/tags/*) exit 1 ;; esac\n')
+        hook.write_text('#!/bin/sh\ncase "$1" in refs/tags/*) echo "error: GH013: Repository rule violations found for $1" >&2; exit 1 ;; esac\n')
         hook.chmod(0o755)
         self.assertTrue(self.sync())
         self.assertEqual(self.output()["build"], "true")
         self.assertIn("refused refs/tags/0.9.2", self.summary.read_text())
+
+    def test_a_tag_push_failing_otherwise_fails_the_run(self):
+        # Not a ruleset (auth, network): an error, not a warning.
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with self.assertRaisesRegex(sm.Error, "not by a ruleset"):
+                sm.push_tags(str(Path(self.tmp.name) / "no-such-remote.git"), ["+refs/tags/x:refs/tags/x"])
+        finally:
+            os.chdir(cwd)
+
+    def test_new_upstream_archive_tags_are_skipped(self):
+        # Upstream has an archive/ tag we don't: still never copied.
+        git(self.up, "tag", "archive/patches/x/2026-01-01")
+        self.sync()
+        self.assertNotIn("refs/tags/archive/patches/x/2026-01-01", self.here())
+        self.assertIn("in our archive/ namespace", self.summary.read_text())
 
     def test_declaration(self):
         self.decl.write_text('kind = "B"\n')
