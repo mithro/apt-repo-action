@@ -53,6 +53,23 @@ inputs:
       install, a crash) fails the build.
     required: false
     default: warn
+  version-tree:
+    description: >-
+      The git checkout, relative to the workspace, whose vX.Y tags and
+      commits give the version and the changelog's commit (default: the
+      source-dir). A patch series builds in the fetched project's tree, so
+      it passes its own checkout here, usually ".".
+    required: false
+    default: ""
+  version-args:
+    description: >-
+      Extra arguments for the shared scripts/deb-version.py, space-separated:
+      a patch series' "--owner-tag fpgasonline --upstream-dir ." (paths are
+      relative to the source-dir) or "--upstream-version 1.1.1", and
+      "--epoch 2" under a declared exception (docs/packaging.md, "Versions").
+      Only with the shared script.
+    required: false
+    default: ""
   github-token:
     description: >-
       Token for the GitHub API, which gives the site of each `repo = ...`
@@ -91,6 +108,8 @@ runs:
         ARCH: ${{ inputs.arch }}
         SOURCE_DIR: ${{ inputs.source-dir }}
         VERSION_SCRIPT: ${{ inputs.version-script }}
+        VERSION_TREE: ${{ inputs.version-tree }}
+        VERSION_ARGS: ${{ inputs.version-args }}
       run: |
         set -eu
         if [ "$ARCH" = "riscv64" ] && [ "$SUITE" = "bookworm" ]; then
@@ -132,6 +151,14 @@ runs:
             fi
             mode=script; script=$VERSION_SCRIPT ;;
         esac
+        if [ "$mode" != shared ] && { [ -n "$VERSION_ARGS" ] || [ -n "$VERSION_TREE" ]; }; then
+          echo "::error::version-args and version-tree are for the shared scripts/deb-version.py, but this build uses version-script $VERSION_SCRIPT ($mode)."
+          exit 1
+        fi
+        if [ -n "$VERSION_TREE" ] && [ ! -d "$GITHUB_WORKSPACE/$VERSION_TREE" ]; then
+          echo "::error::version-tree $VERSION_TREE does not exist"
+          exit 1
+        fi
         {
           echo "platform=$platform"
           echo "emulated=$emulated"
@@ -181,18 +208,23 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         ACTION_ROOT: ${{ github.action_path }}/..
         DEPENDS_DIR: ${{ steps.depends.outputs.dir }}
+        VERSION_TREE: ${{ inputs.version-tree }}
+        VERSION_ARGS: ${{ inputs.version-args }}
       run: |
         set -eux
         mkdir -p "$GITHUB_WORKSPACE/$OUT_DIR"
         depends=()
         if [ -n "$DEPENDS_DIR" ]; then depends=(-v "$DEPENDS_DIR:/work/apt-sources:ro"); fi
+        # The version tree, read-only: the script only reads its tags and commits.
+        tree=()
+        if [ -n "$VERSION_TREE" ]; then tree=(-v "$GITHUB_WORKSPACE/$VERSION_TREE:/work/version-tree:ro"); fi
         docker run --rm --platform "$PLATFORM" \
           -v "$GITHUB_WORKSPACE/$SOURCE_DIR:/work/src" \
           -v "$GITHUB_WORKSPACE/$OUT_DIR:/work/out" \
           -v "$(cd "$ACTION_ROOT" && pwd):/work/apt-repo-action:ro" \
-          "${depends[@]}" \
+          "${depends[@]}" "${tree[@]}" \
           -w /work/src \
-          -e SUITE -e ARCH -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR \
+          -e SUITE -e ARCH -e BUILD_DEPS -e VERSION_MODE -e VERSION_SCRIPT -e PR -e VERSION_ARGS \
           -e GITHUB_REPOSITORY \
           "debian:$SUITE" bash -ec '
             export DEBIAN_FRONTEND=noninteractive
@@ -206,9 +238,11 @@ runs:
             apt-get build-dep -y ./
             # git refuses to read a tree owned by another user.
             git config --global --add safe.directory "*"
+            read -ra version_args <<< "$VERSION_ARGS"
+            if [ -d /work/version-tree ]; then version_args+=(--version-tree /work/version-tree); fi
             case "$VERSION_MODE" in
               shared) python3 /work/apt-repo-action/scripts/deb-version.py \
-                        --suite "$SUITE" ${PR:+--pr "$PR"} --write-changelog ;;
+                        --suite "$SUITE" ${PR:+--pr "$PR"} "${version_args[@]}" --write-changelog ;;
               script) python3 "$VERSION_SCRIPT" --write-changelog ;;
             esac
             dpkg-parsechangelog -S Version

@@ -382,7 +382,16 @@ A **patch series** puts the fetched project's version first, so upgrading
 upstream is visible in the version:
 `<upstream version>+<owner-tag>.<X.Y.postN>`, for example
 `1.1.1.post173+fpgasonline.0.0.post70`. `<upstream version>` comes from
-upstream's own `git describe` at the pinned commit.
+upstream's own `git describe --tags` at the pinned commit: `1.1.1` at its tag
+`v1.1.1`, `1.1.1.post173` 173 commits later. A `-` in the tag becomes `~`, so
+a release candidate (`v11.0.0-rc2`, `11.0.0~rc2`) sorts below its release.
+A pin that isn't a tag, or a project without usable tags, records the version
+with the pin instead (fpga-tools' `upstreams.toml`, libpio's pin date), and
+the build passes that. `~deb<R>` and `~pr<P>` follow as for any Set B
+version.
+
+An **epoch** (`2:`) is only for a repository recovering from an earlier
+version scheme, and is declared as a `PKG-VERSION` exception (rpi-qemu).
 
 ### Set A
 
@@ -514,17 +523,49 @@ that sorts wrongly. Each one is a recorded exception.
     [`scripts/deb-version.py`](../scripts/deb-version.py), passing it the
     suite and, on a pull request, its number. The script reads the source
     name and maintainer from `debian/control`.
-- **The shared version script implements Set B only**, the patch series and
-  Set A forms are still to come (compliance-plan.md, section 3). Until then
-  a repository that still has its own `packaging/deb-version.py` keeps it,
-  and `build-deb` runs it, with a warning. A Set B repository deletes its own
-  copy, in the commit that moves it to `build-deb` (see
-  [below](#moving-a-repository-to-the-shared-build)).
+  - builds a patch series in the fetched project's tree: `source-dir` is
+    that tree (with its rendered `debian/`), `version-tree` is this
+    repository's checkout (usually `.`), whose tags and commits give
+    `X.Y.postN` and the changelog's commit, and `version-args` carries the
+    rest:
+
+    ```yaml
+          - name: Build
+            uses: mithro/apt-repo-action/build-deb@main
+            with:
+              suite: ${{ matrix.suite }}
+              arch: ${{ matrix.arch }}
+              source-dir: build/src/qemu        # the fetched tree, debian/ added
+              version-tree: .
+              version-args: --owner-tag fpgasonline --upstream-dir . --epoch 2
+    ```
+
+    Paths in `version-args` are relative to `source-dir`.
+- **The shared version script implements Set B, its patch series form and
+  the epoch.** The Set A and backport forms are still to come
+  (compliance-plan.md, section 3). Until then a repository that still has its
+  own `packaging/deb-version.py` keeps it, and `build-deb` runs it, with a
+  warning. A Set B repository deletes its own copy, in the commit that moves
+  it to `build-deb` (see [below](#moving-a-repository-to-the-shared-build)).
+- **A build that doesn't go through `build-deb`** gets the same version from
+  `mithro/apt-repo-action/deb-version@main`, as its `version` output: a patch
+  series whose own job renders the version into its templates, or an `nfpm`
+  build. It takes `suite`, `source-dir` (the checkout, with full history) and
+  `version-args`, and adds `~pr<P>` itself on a pull request.
 - **`publish-apt.yml` refuses** to publish from a pull request, or from any
   ref but the default branch, whatever the caller's `if:` says.
 - A repository that builds with `nfpm` instead of `dpkg-buildpackage` (Go
   static binaries) still follows every naming, version, suite and
-  architecture rule here. Only the `Build` step differs.
+  architecture rule here. Only the `Build` step differs:
+  - the version is the `deb-version` action's output, passed to nfpm as
+    `version: ${VERSION}` with `version_schema: none` (without it nfpm
+    rewrites the version as semver);
+  - the binary is built once per architecture, but packaged once per suite,
+    since `~deb<R>` makes each suite's version different. Packaging is
+    seconds; uploading one `.deb` to every suite would give every suite the
+    same version, and sid's would no longer sort above the others;
+  - CI no longer creates a `vX.Y` tag per release (Set B's tags are made by
+    hand), so versions go on as `.post<N>` after the last tag.
 
 ### Moving a repository to the shared build
 
@@ -544,6 +585,12 @@ scripts first leaves the old `Build` step without the scripts it runs.
 
 `build-deb` doesn't pass `--suite` or `--pr` to a repository's own script on
 purpose: tmux's and scanbd's accept only `--write-changelog`, and would fail.
+
+Nor may the first shared build be of a tagged commit. A repository whose
+last published version is a bare tag version (`0.24`, as the Go
+repositories' CI published) would get `0.24~deb13` from a build of that same
+commit, which sorts *below* `0.24`. The migration commit is a later commit,
+so it gets `0.24.post1~deb13`, which sorts above: just don't tag it.
 
 A Set B repository also deletes its committed `debian/changelog` and adds
 `debian/changelog` to `.gitignore` ([The changelog](#the-changelog)). It

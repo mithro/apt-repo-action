@@ -137,9 +137,11 @@ what a repository gets by default.
    - has a test table, including every ordering in packaging.md;
    - replaces the 11 diverging copies of `packaging/deb-version.py`.
 
-   Started: Set B and both suffixes are done, `build-deb/` runs it, and
-   `tests/test_deb_version.py` checks the ordering table. The patch series,
-   Set A and backport forms are still to come.
+   Started: Set B, the patch series form, the epoch and both suffixes are
+   done. `build-deb/` runs it (`version-tree`, `version-args` for a patch
+   series), `deb-version/` gives the version to nfpm builds and to patch
+   series with their own job, and `tests/test_deb_version.py` checks the
+   ordering table. The Set A and backport forms are still to come.
 2. **`.github/workflows/build-deb.yml`**, a reusable build workflow:
    - takes `suites`/`architectures` (default: the defaults);
    - runs the matrix on the right runners, with QEMU for foreign
@@ -261,8 +263,14 @@ that also deletes its own version and build scripts: see
   one-time epoch (`1:`), recorded as an exception.
 - **paramiko-insecure**: `+insecure1` to `+welland<M>` sorts higher. No
   special step.
-- **rpi-qemu**: `2:0.1+97.g<sha>` to `2:0.1.post<N>` sorts higher. The epoch
-  stays.
+- **rpi-qemu**: `2:0.1+112.g91e6fbe` to the patch series form
+  `2:11.1.0+fpgasonline.0.1.post<N>` sorts higher. The epoch stays. Its old
+  release job's `v0.1.<N>.g<sha>` tags aren't releases: the shared script
+  only counts `vX.Y[.Z]`.
+- **go-claude-teleport, go-tmux-saver**: the published `0.24` and `0.17` are
+  bare tag versions, and `main` is at that tag. `0.24.post1~deb13` sorts
+  higher, but a build of the tagged commit itself (`0.24~deb13`) would not:
+  the first shared build is the migration commit, untagged.
 - **libpio** (fpga-tools): stays date-based under its exception. Moving to
   `0.0+git<N>` needs an epoch.
 

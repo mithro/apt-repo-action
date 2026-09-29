@@ -156,7 +156,8 @@ this pattern the build step falls into three families:
    dependencies. This is worth sharing, and is what `build-deb/` implements.
 2. **Go projects packaged with `nfpm`** — cross-compilation and an `nfpm.yaml`
    replace the whole Debian toolchain. Almost nothing is shared with (1) beyond
-   the artifact naming, so these keep their own build job.
+   the artifact naming and the version, so these keep their own build job and
+   take the version from [`deb-version/`](deb-version/action.yml).
 3. **`Architecture: all`** (shell, pure Python) — one build per suite. These
    are family (1) with `arch: all`: `build-deb` builds them once per suite, on
    the runner's own architecture.
@@ -166,8 +167,9 @@ So: share the publish half everywhere, and the build half for every
 artifacts itself and calls the publish workflow unchanged.
 
 `build-deb` stamps the version with the shared
-[`scripts/deb-version.py`](scripts/deb-version.py) (Set B, with the `~deb<R>`
-and `~pr<P>` suffixes of [docs/packaging.md](docs/packaging.md#versions)). A
+[`scripts/deb-version.py`](scripts/deb-version.py) (Set B and its patch series
+form, with the `~deb<R>` and `~pr<P>` suffixes of
+[docs/packaging.md](docs/packaging.md#versions)). A
 repository that still carries its own `packaging/deb-version.py` keeps using
 it, with a warning, until it is migrated: see
 [Moving a repository to the shared build](docs/packaging.md#moving-a-repository-to-the-shared-build).

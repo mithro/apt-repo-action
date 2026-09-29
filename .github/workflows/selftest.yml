@@ -26,7 +26,7 @@ jobs:
     # Build a throwaway source tree with THIS checkout of build-deb and check
     # the version it stamped. On a pull request every build is a preview, so
     # ~pr<P> is expected there.
-    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }})
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }}${{ matrix.patch-series && ' patch-series' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -42,6 +42,9 @@ jobs:
           # Set B commits no debian/changelog: the build's entry is the only
           # one in the package (docs/packaging.md, "The changelog").
           - {suite: trixie, arch: all, no-changelog: true, want: "0.3.post1~deb13"}
+          # A patch series builds in the fetched project's tree, versioned
+          # from both (docs/packaging.md, "Versions"), with an epoch.
+          - {suite: bookworm, arch: all, patch-series: true, want: "2:1.1.1.post2+selftest.0.3.post1~deb12"}
     steps:
       - uses: actions/checkout@v5
 
@@ -50,6 +53,7 @@ jobs:
           python3 tests/make-source-fixture.py fixture-src
           ${{ matrix.legacy && '--legacy' || '' }}
           ${{ matrix.no-changelog && '--no-changelog' || '' }}
+          ${{ matrix.patch-series && '--patch-series fixture-upstream' || '' }}
 
       - name: Build with this checkout of build-deb
         id: build
@@ -57,7 +61,9 @@ jobs:
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
-          source-dir: fixture-src
+          source-dir: ${{ matrix.patch-series && 'fixture-upstream' || 'fixture-src' }}
+          version-tree: ${{ matrix.patch-series && 'fixture-src' || '' }}
+          version-args: ${{ matrix.patch-series && '--owner-tag selftest --upstream-dir . --epoch 2' || '' }}
 
       - name: No declaration, so no dependency repositories
         env:
@@ -83,6 +89,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           LEGACY: ${{ matrix.legacy }}
           NO_CHANGELOG: ${{ matrix.no-changelog }}
+          PATCH_SERIES: ${{ matrix.patch-series }}
         run: |
           set -eu
           if [ -n "$PR" ] && [ "$LEGACY" != true ]; then WANT="$WANT~pr$PR"; fi
@@ -91,9 +98,13 @@ jobs:
           echo "version: $got (want $WANT)"
           test "$got" = "$WANT"
           if [ "$LEGACY" != true ]; then
+            # A patch series' changelog is in the fetched tree; the commit
+            # it names is still this repository's (the fixture's).
+            log=fixture-src/debian/changelog
+            if [ "$PATCH_SERIES" = true ]; then log=fixture-upstream/debian/changelog; fi
             sha=$(git -C fixture-src rev-parse HEAD)
-            head -n 3 fixture-src/debian/changelog
-            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" fixture-src/debian/changelog
+            head -n 3 "$log"
+            grep -qx "  \* Built from $GITHUB_REPOSITORY@$sha" "$log"
           fi
           if [ "$NO_CHANGELOG" = true ]; then
             # Nothing committed, so the package's changelog is the build's
@@ -108,7 +119,7 @@ jobs:
             entries=$(zcat "$log" | grep -cE '^[a-z0-9][a-z0-9.+-]* \(.+\) .+; urgency=')
             echo "changelog entries: $entries (want 1)"
             test "$entries" = 1
-          elif [ "$LEGACY" != true ]; then
+          elif [ "$LEGACY" != true ] && [ "$PATCH_SERIES" != true ]; then
             # The placeholder stays underneath the build's entry.
             grep -q 'Placeholder changelog' fixture-src/debian/changelog
           fi
@@ -220,6 +231,76 @@ jobs:
           # lintian never ran, so there are no counts.
           test -z "$ERRORS"
           ls built-debs/*.deb
+
+  deb-version-action:
+    # The version for a build outside build-deb (docs/packaging.md, "The
+    # shared actions"): an nfpm package, as the Go repositories build, and a
+    # patch series' own job. nfpm must keep the version exactly as given.
+    name: deb-version (${{ matrix.case }} ${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: nfpm, suite: trixie, args: "", want: "0.3.post1~deb13"}
+          - {case: nfpm, suite: sid, args: "", want: "0.3.post1"}
+          - {case: patch-series, suite: forky,
+             args: "--owner-tag fpgasonline --upstream-version 20260914",
+             want: "20260914+fpgasonline.0.3.post1~deb14"}
+    env:
+      NFPM_VERSION: 2.47.0
+      NFPM_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src
+      - name: The version, with this checkout of deb-version
+        id: version
+        uses: ./deb-version
+        with:
+          suite: ${{ matrix.suite }}
+          source-dir: fixture-src
+          version-args: ${{ matrix.args }}
+      - name: Check it
+        env:
+          GOT: ${{ steps.version.outputs.version }}
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          echo "version: $GOT (want $WANT)"
+          test "$GOT" = "$WANT"
+      - name: Package it with nfpm, as a Go repository does
+        if: matrix.case == 'nfpm'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          curl -fsSL -o nfpm.deb \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+          echo "$NFPM_SHA256  nfpm.deb" | sha256sum -c
+          sudo dpkg -i nfpm.deb
+          mkdir -p dist
+          printf '#!/bin/sh\necho selftest\n' > dist/apt-repo-selftest-nfpm
+          cat > nfpm.yaml <<'NFPM'
+          name: apt-repo-selftest-nfpm
+          arch: amd64
+          platform: linux
+          version: ${VERSION}
+          version_schema: none
+          maintainer: apt-repo-action self-test <selftest@invalid>
+          description: apt-repo-action deb-version self-test fixture
+          contents:
+            - src: ./dist/apt-repo-selftest-nfpm
+              dst: /usr/bin/apt-repo-selftest-nfpm
+              file_info:
+                mode: 0755
+          NFPM
+          nfpm package -p deb -f nfpm.yaml -t dist/
+          ls dist/
+          got=$(dpkg-deb -f dist/*.deb Version)
+          echo "package version: $got (want $VERSION)"
+          test "$got" = "$VERSION"
 
   build-deb-depends:
     # A build dependency only a declared [[depends]] repository has
