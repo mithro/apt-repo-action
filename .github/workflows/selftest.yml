@@ -378,10 +378,13 @@ jobs:
     #     fail the install test. With the two in step there is no such version,
     #     and the case says so and passes.
     #   rebuild: a build dependency whose Raspbian binary is older than
-    #     Raspbian's own source (rust-schemars-derive 1.2.2-2's source, the
-    #     1.2.2-1 binary, which librust-serde-derive-internals-dev 0.30.0-4
-    #     Breaks) is found from apt's message and rebuilt automatically; the
-    #     package still installs from forky alone.
+    #     Raspbian's own source is found from apt's message and rebuilt
+    #     automatically; the package still installs from forky alone. Which
+    #     crates are stale changes as Raspbian catches up, so the job picks
+    #     one from the live archive (tests/pick-stale-raspbian.py) and
+    #     build-depends on its newest source version, which only a rebuild
+    #     has. With none stale anywhere, it says so loudly and proves only
+    #     that the build still works.
     #   rebuild-input: the same, named up front with raspbian-rebuild.
     name: build-deb-raspbian-staging (${{ matrix.case }})
     runs-on: ubuntu-24.04-arm
@@ -408,18 +411,35 @@ jobs:
           echo "staging-newer=$newer" >> "$GITHUB_OUTPUT"
           echo "staging-perl=$staging" >> "$GITHUB_OUTPUT"
 
+      - name: A Rust crate Raspbian hasn't rebuilt yet
+        id: pick
+        if: startsWith(matrix.case, 'rebuild')
+        run: |
+          set -eu
+          python3 tests/pick-stale-raspbian.py forky | tee -a "$GITHUB_OUTPUT"
+          if ! grep -q '^source=' "$GITHUB_OUTPUT"; then
+            echo "::warning title=Raspbian rebuild::no Rust crate in raspbian forky or forky-staging is older than its source today, so there is nothing to rebuild: this job only checks the build still works, not the rebuild"
+          fi
+
       - name: Make the fixture
         env:
           CASE: ${{ matrix.case }}
           STAGING_PERL: ${{ steps.archive.outputs.staging-perl }}
+          STALE_BINARY: ${{ steps.pick.outputs.binary }}
+          STALE_VERSION: ${{ steps.pick.outputs.version }}
         run: |
           set -eu
           case "$CASE" in
             fallback) python3 tests/make-source-fixture.py fixture-src --no-changelog --any --build-depends texinfo ;;
             staging-runtime) python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
                                --runtime-depends "perl-base (>= $STAGING_PERL)" ;;
-            rebuild|rebuild-input) python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
-                       --build-depends "librust-schemars-derive-dev (>= 1.2.2-2), librust-serde-derive-internals-dev" ;;
+            rebuild|rebuild-input)
+              if [ -n "$STALE_BINARY" ]; then
+                python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
+                  --build-depends "$STALE_BINARY (>= $STALE_VERSION)"
+              else
+                python3 tests/make-source-fixture.py fixture-src --no-changelog --any
+              fi ;;
           esac
           grep -E '^(Build-)?Depends' fixture-src/debian/control
 
@@ -432,18 +452,19 @@ jobs:
           suite: raspbian-forky
           arch: armhf
           source-dir: fixture-src
-          raspbian-rebuild: ${{ matrix.case == 'rebuild-input' && 'rust-schemars-derive' || '' }}
+          raspbian-rebuild: ${{ matrix.case == 'rebuild-input' && steps.pick.outputs.source || '' }}
 
       - name: The rebuild was reported
-        if: startsWith(matrix.case, 'rebuild')
+        if: startsWith(matrix.case, 'rebuild') && steps.pick.outputs.source != ''
         env:
           REBUILT: ${{ steps.build.outputs.rebuilt }}
+          STALE: ${{ steps.pick.outputs.source }}
         run: |
           set -eu
-          echo "rebuilt: $REBUILT"
+          echo "rebuilt: $REBUILT (want $STALE among them)"
           case " $REBUILT " in
-            *" rust-schemars-derive "*) ;;
-            *) echo "::error::rust-schemars-derive should be listed as rebuilt"; exit 1 ;;
+            *" $STALE "*) ;;
+            *) echo "::error::$STALE should be listed as rebuilt"; exit 1 ;;
           esac
 
       - name: The fallback took texinfo's dependencies from staging
