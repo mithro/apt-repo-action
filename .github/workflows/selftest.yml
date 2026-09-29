@@ -138,13 +138,16 @@ jobs:
         include:
           - {suite: raspbian-bookworm, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb12", cpu: "6", sequoia: none}
           - {suite: raspbian-trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "6", sequoia: override}
-          - {suite: raspbian-forky, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb14", cpu: "6", sequoia: override}
+          - {suite: raspbian-forky, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb14", cpu: "6", sequoia: override, build-depends: texinfo}
           - {suite: trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "7", sequoia: none}
           - {suite: sid, arch: amd64, runner: ubuntu-24.04, arch-all: "false", want: "0.3.post1", cpu: none, sequoia: none}
     steps:
       - uses: actions/checkout@v5
 
-      - run: python3 tests/make-source-fixture.py fixture-src --no-changelog --any
+      - name: Make the fixture
+        env:
+          BUILD_DEPENDS: ${{ matrix.build-depends }}
+        run: python3 tests/make-source-fixture.py fixture-src --no-changelog --any ${BUILD_DEPENDS:+--build-depends "$BUILD_DEPENDS"}
 
       - name: Build with this checkout of build-deb
         id: build
@@ -154,6 +157,12 @@ jobs:
           arch: ${{ matrix.arch }}
           arch-all: ${{ matrix.arch-all || 'true' }}
           source-dir: fixture-src
+
+      - name: Build dependencies from Raspbian staging, if any
+        env:
+          FROM_STAGING: ${{ steps.build.outputs.from-staging }}
+        run: |
+          echo "from staging: ${FROM_STAGING:-none, the suite sufficed}"
 
       - name: Check the packages and their versions
         env:
@@ -354,6 +363,116 @@ jobs:
           dpkg-deb --fsys-tarfile built-debs/apt-repo-selftest-mirror_*_all.deb \
             | tar -xO ./usr/share/selftest/hello.txt | tee hello.txt
           grep -qx 'patched by us' hello.txt
+
+  build-deb-raspbian-staging:
+    # build-deb/raspbian/build-dep.sh: a Raspbian build whose build
+    # dependencies the suite alone can't satisfy takes them from
+    # <codename>-staging, and the install test, in the image without staging,
+    # still refuses a package that needs anything only staging has. Cases:
+    #   fallback: the fallback forced (APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING),
+    #     so it is proven whatever state the archive is in, with texinfo, whose
+    #     perl dependencies forky alone can't install today; the package must
+    #     still install from forky alone.
+    #   staging-runtime: a package that Depends on a version only staging has
+    #     (the newest perl-base there, when it is newer than the suite's) must
+    #     fail the install test. With the two in step there is no such version,
+    #     and the case says so and passes.
+    name: build-deb-raspbian-staging (${{ matrix.case }})
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [fallback, staging-runtime]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: What raspbian forky and forky-staging each have
+        id: archive
+        run: |
+          set -eu
+          ver() {
+            curl -fsS --retry 5 "http://archive.raspbian.org/raspbian/dists/$1/main/binary-armhf/Packages.xz" \
+              | xz -dc | awk -v p="$2" '$1 == "Package:" {n = $2} $1 == "Version:" && n == p {print $2}' | sort -V | tail -n 1
+          }
+          suite=$(ver forky perl-base)
+          staging=$(ver forky-staging perl-base)
+          echo "perl-base: forky $suite, forky-staging $staging"
+          newer=false
+          if dpkg --compare-versions "$staging" gt "$suite"; then newer=true; fi
+          echo "staging-newer=$newer" >> "$GITHUB_OUTPUT"
+          echo "staging-perl=$staging" >> "$GITHUB_OUTPUT"
+
+      - name: Make the fixture
+        env:
+          CASE: ${{ matrix.case }}
+          STAGING_PERL: ${{ steps.archive.outputs.staging-perl }}
+        run: |
+          set -eu
+          case "$CASE" in
+            fallback) python3 tests/make-source-fixture.py fixture-src --no-changelog --any --build-depends texinfo ;;
+            staging-runtime) python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
+                               --runtime-depends "perl-base (>= $STAGING_PERL)" ;;
+          esac
+          grep -E '^(Build-)?Depends' fixture-src/debian/control
+
+      - name: Build with this checkout of build-deb
+        id: build
+        uses: ./build-deb
+        env:
+          APT_REPO_ACTION_SELFTEST_RASPBIAN_STAGING: ${{ matrix.case == 'fallback' && 'always' || '' }}
+        with:
+          suite: raspbian-forky
+          arch: armhf
+          source-dir: fixture-src
+
+      - name: The fallback took texinfo's dependencies from staging
+        if: matrix.case == 'fallback'
+        env:
+          FROM_STAGING: ${{ steps.build.outputs.from-staging }}
+          STAGING_NEWER: ${{ steps.archive.outputs.staging-newer }}
+        run: |
+          set -eu
+          echo "from staging: $FROM_STAGING"
+          if [ "$STAGING_NEWER" = true ]; then
+            # staging's perl is newer, and texinfo pulls perl in.
+            case " $FROM_STAGING " in
+              *" perl-base "*) ;;
+              *) echo "::error::texinfo's perl should have come from forky-staging"; exit 1 ;;
+            esac
+          fi
+
+      - name: Install test, in the image without staging
+        id: install
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+        run: |
+          set -eu
+          docker run --rm --platform "$PLATFORM" -v "$PWD/built-debs:/debs:ro" "$IMAGE" sh -ec '
+            if ls /etc/apt/sources.list.d/*staging*; then echo "the image has staging"; exit 1; fi
+            apt-get update
+            apt-get install -y /debs/*.deb
+            apt-repo-selftest-hello --version'
+
+      - name: Check the install test's outcome
+        env:
+          CASE: ${{ matrix.case }}
+          OUTCOME: ${{ steps.install.outcome }}
+          STAGING_NEWER: ${{ steps.archive.outputs.staging-newer }}
+        run: |
+          set -eu
+          echo "case $CASE, install test $OUTCOME, staging newer: $STAGING_NEWER"
+          case "$CASE" in
+            fallback) test "$OUTCOME" = success ;;
+            staging-runtime)
+              if [ "$STAGING_NEWER" = true ]; then
+                test "$OUTCOME" = failure
+              else
+                echo "::notice::forky and forky-staging have the same perl-base, so no run-time dependency needs staging today; nothing to refuse"
+                test "$OUTCOME" = success
+              fi ;;
+          esac
 
   build-deb-refuses:
     runs-on: ubuntu-24.04
