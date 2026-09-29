@@ -256,13 +256,14 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
           ARCH: ${{ matrix.arch }}
-          DECLARATION: source/.github/apt-packaging.toml
+          # The declaration build-deb reads: the source tree's, not the checkout's.
+          DECLARATION: source/${{ inputs.source-dir }}/.github/apt-packaging.toml
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           mkdir -p bundled-debs
           python3 .apt-repo-action/scripts/bundle-depends.py fetch --declaration "$DECLARATION" \
-            --suite "$SUITE" --arch "$ARCH" --debs install-debs --dest bundled-debs
+            --suite "$SUITE" --arch "$ARCH" --debs install-debs --dest bundled-debs --index
           python3 .apt-repo-action/scripts/apt-sources.py write --unbundled --declaration "$DECLARATION" \
             --suite "$SUITE" --dest "$RUNNER_TEMP/apt-sources-unbundled" > /dev/null
           echo "apt-sources=$RUNNER_TEMP/apt-sources-unbundled" >> "$GITHUB_OUTPUT"

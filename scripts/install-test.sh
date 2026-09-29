@@ -3,7 +3,8 @@
 # "Builds"). Runs as root inside a clean container of the suite, with:
 #   /debs          the packages to install;
 #   /bundled       the packages bundled from dependency repositories declared
-#                  with `bundle`, which the published repository serves (may
+#                  with `bundle`, which the published repository serves, with
+#                  their Packages index (bundle-depends.py fetch --index; may
 #                  be empty or absent);
 #   /apt-sources   the suite's other dependency repositories, as
 #                  scripts/apt-sources.py writes them (its install.sh does
@@ -16,12 +17,16 @@ set -eu
 export DEBIAN_FRONTEND=noninteractive
 sh /apt-sources/install.sh
 apt-get update
-bundled=
-for deb in /bundled/*.deb; do
-  if [ -f "$deb" ]; then bundled="$bundled $deb"; fi
-done
-# shellcheck disable=SC2086 # a list of paths without spaces
-apt-get install -y /debs/*.deb $bundled
+# The bundled packages as a local source, so apt chooses among them (one of
+# several alternatives, one version of several) as it would from the
+# published repository, instead of installing them all. trusted=yes is only
+# for this throwaway container: bundle-depends.py verified every file
+# against its repository's signed index, and its control file against that.
+if [ -s /bundled/Packages ]; then
+  echo "deb [trusted=yes] file:/bundled ./" > /etc/apt/sources.list.d/bundled.list
+fi
+apt-get update
+apt-get install -y /debs/*.deb
 if [ -f /src/packaging/install-test.sh ]; then
   echo "running packaging/install-test.sh"
   cd /src
