@@ -381,6 +381,11 @@ class Owner(unittest.TestCase):
             r = subprocess.run(args + ["--owner", "mithro"], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 1)
             self.assertIn("someone/dep isn't mithro's", r.stderr)
+            # Listed in `owners`: ours, so it gets past validation (and on
+            # to the site, which doesn't exist here).
+            decl.write_text('owners = ["someone"]\n[[depends]]\nrepo = "someone/dep"\nbundle = true\nreason = "r"\n')
+            r = subprocess.run(args + ["--owner", "mithro"], capture_output=True, text=True, env=env)
+            self.assertNotIn("isn't", r.stderr)
 
 
 class Relations(unittest.TestCase):

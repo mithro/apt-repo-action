@@ -99,9 +99,28 @@ class Validate(unittest.TestCase):
         self.assertTrue(aps.validate([{**OURS, "bundle": True}], owner="SomeOne")[0]["bundle"])
         with self.assertRaisesRegex(aps.Error, "someone/dep-backport isn't mithro's"):
             aps.validate([{**OURS, "bundle": True}], owner="mithro")
+        # Several owners that count as one (the declaration's `owners`).
+        self.assertTrue(aps.validate([{**OURS, "bundle": True}], owner={"mithro", "someone"})[0]["bundle"])
+        with self.assertRaisesRegex(aps.Error, "isn't fpgas-online or mithro's"):
+            aps.validate([{**OURS, "bundle": True}], owner={"mithro", "fpgas-online"})
         self.assertTrue(aps.validate([{**OURS, "bundle": "third-party"}], owner="mithro")[0]["bundle"])
         self.assertTrue(aps.validate([{**FLAT, "bundle": "third-party"}])[0]["bundle"])
         self.bad({**THIRD, "bundle": "third-party"}, "only a flat repository can be bundled")
+
+
+class Owners(unittest.TestCase):
+    def test_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decl = Path(tmp) / "d.toml"
+            self.assertEqual(aps.load_owners(decl), [])      # no file
+            decl.write_text('kind = "B"\n')
+            self.assertEqual(aps.load_owners(decl), [])
+            decl.write_text('owners = ["mithro", "fpgas-online"]\n')
+            self.assertEqual(aps.load_owners(decl), ["mithro", "fpgas-online"])
+            for bad in ('owners = "mithro"\n', 'owners = ["not/an-owner"]\n', 'owners = ["-x"]\n'):
+                decl.write_text(bad)
+                with self.assertRaisesRegex(aps.Error, "`owners` must be a list of GitHub owners"):
+                    aps.load_owners(decl)
 
 
 class Load(unittest.TestCase):

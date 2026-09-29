@@ -549,8 +549,15 @@ def target(f: dict, owner_tag: str | None) -> dict:
     try:
         if not isinstance(raw, list) or not all(isinstance(d, dict) for d in raw):
             raise apt_sources.Error("`depends` must be an array of tables, [[depends]]")
-        # `bundle = true` only for a repository of this one's owner.
-        t["depends"], t["depends_error"] = apt_sources.validate(raw, owner=(f.get("repo") or "").split("/")[0] or None), None
+        # `bundle = true` only for a repository of one of our owners: this
+        # one's and the declaration's `owners` (the rule bundling applies).
+        own = (f.get("repo") or "").split("/")[0]
+        listed = decl.get("owners", [])
+        if not isinstance(listed, list) or not all(isinstance(o, str) and apt_sources.OWNER.fullmatch(o)
+                                                   for o in listed):
+            raise apt_sources.Error(f"`owners` must be a list of GitHub owners, not {listed!r}")
+        t["owners"] = sorted({own, *listed} - {""})
+        t["depends"], t["depends_error"] = apt_sources.validate(raw, owner=t["owners"] if own else None), None
     except apt_sources.Error as e:
         t["depends"], t["depends_error"] = [], str(e)
     return t

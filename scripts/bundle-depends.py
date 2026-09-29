@@ -38,8 +38,8 @@ its own control file exactly the Package, Version, Architecture and
 relations its stanza gives (dpkg-scanpackages indexes the file by its
 control file). For one of ours the Release must also be for this suite
 (Codename), so a suite can't be served another's packages. `bundle = true`
-must name a repository of the same GitHub owner as ours (--owner, or
-$GITHUB_REPOSITORY's). Any failure -- an unreachable repository
+must name a repository of one of our owners: this repository's (--owner, or
+$GITHUB_REPOSITORY's) and any the declaration lists in `owners`. Any failure -- an unreachable repository
 included -- fails the command: publishing without the dependency would leave
 our packages uninstallable for users of our repository alone.
 
@@ -417,9 +417,12 @@ def main() -> int:
     args = ap.parse_args()
     try:
         deps = apt_sources.load(args.declaration)
-        # `bundle = true` is for the same owner's repositories only.
-        owner = owner_of(args.owner) if any(d.get("bundle") is True for d in deps) else None
-        entries = apt_sources.validate(deps, owner=owner)
+        # `bundle = true` is for our owners' repositories only: this one's,
+        # and those the declaration lists in `owners`.
+        owners = None
+        if any(d.get("bundle") is True for d in deps):
+            owners = {owner_of(args.owner), *apt_sources.load_owners(args.declaration)}
+        entries = apt_sources.validate(deps, owner=owners)
         if args.command == "fetch":
             if not args.suite or not args.debs:
                 ap.error("fetch needs --suite and --debs")

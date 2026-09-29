@@ -9,7 +9,7 @@ suite declares where they come from in `.github/apt-packaging.toml`:
     repo = "owner/name"
     suites = ["bookworm"]             # optional: only these suites
     bundle = true                     # optional: publish its packages ours need in our suites
-                                      # (true: the same owner as ours; else "third-party")
+                                      # (true: an owner of ours, see `owners`; else "third-party")
     reason = "why"
 
     [[depends]]                       # anything else
@@ -73,12 +73,15 @@ KNOWN_SUITES = CODENAMES + [f"raspbian-{c}" for c in CODENAMES if c != "sid"]
 OURS = {"repo", "suites", "bundle", "reason"}
 EXPLICIT = {"name", "url", "suite", "components", "key", "suites", "bundle", "reason"}
 # Bundling re-signs the dependency's packages with our key. `bundle = true`
-# is only for a `repo` with the same GitHub owner as the repository declaring
-# it; anything else must say `bundle = "third-party"`, so someone else's
-# packages are never signed as ours by accident.
+# is only for a `repo` of one of our owners: the declaring repository's own,
+# and any the declaration lists as `owners = [...]` (one person or project
+# across several GitHub owners); anything else must say
+# `bundle = "third-party"`, so someone else's packages are never signed as
+# ours by accident.
 THIRD_PARTY = "third-party"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")   # what apt reads in sources.list.d
 REPO = re.compile(r"[A-Za-z0-9-]+/([A-Za-z0-9_.-]+)")
+OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")   # a GitHub user or organisation
 ARMOUR_BEGIN = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
 ARMOUR_END = b"-----END PGP PUBLIC KEY BLOCK-----"
 KEYRINGS = "/etc/apt/keyrings"
@@ -133,12 +136,28 @@ def _dist(template: str, suite: str) -> str:
     return template.format(suite=suite, codename=suite.removeprefix("raspbian-"))
 
 
-def validate(deps: list[dict], owner: str | None = None) -> list[dict]:
+def load_owners(path: Path) -> list[str]:
+    """The declaration's `owners`: GitHub owners whose repositories count as
+    ours for `bundle = true`, besides the declaring repository's own."""
+    if not path.is_file():
+        return []
+    try:
+        owners = tomllib.loads(path.read_text()).get("owners", [])
+    except tomllib.TOMLDecodeError as e:
+        raise Error(f"{path} doesn't parse: {e}") from None
+    if not isinstance(owners, list) or not all(isinstance(o, str) and OWNER.fullmatch(o) for o in owners):
+        raise Error(f"{path}: `owners` must be a list of GitHub owners (users or organisations), not {owners!r}")
+    return owners
+
+
+def validate(deps: list[dict], owner: str | list[str] | set[str] | None = None) -> list[dict]:
     """Check every entry and fill in its defaults. Raises Error.
 
-    `owner` is the GitHub owner of the repository declaring them: given, a
-    `bundle = true` must name a `repo` of that owner (bundling does; the
-    build, which doesn't bundle, needn't know it)."""
+    `owner` is the GitHub owner of the repository declaring them, or every
+    owner that counts as ours (its own and the declaration's `owners`):
+    given, a `bundle = true` must name a `repo` of one of them (bundling
+    does; the build, which doesn't bundle, needn't know it)."""
+    ours = None if owner is None else {o.lower() for o in ([owner] if isinstance(owner, str) else owner)}
     out, names = [], {}
     for n, d in enumerate(deps, 1):
         where = f"[[depends]] #{n}" + (f" ({d.get('repo') or d.get('name')})"
@@ -166,8 +185,9 @@ def validate(deps: list[dict], owner: str | None = None) -> list[dict]:
         if bundle is True:
             repo = d.get("repo")
             dep_owner = repo.split("/")[0] if isinstance(repo, str) else None
-            if dep_owner is None or (owner is not None and dep_owner.lower() != owner.lower()):
-                whose = "it isn't a `repo`" if dep_owner is None else f"{repo} isn't {owner}'s"
+            if dep_owner is None or (ours is not None and dep_owner.lower() not in ours):
+                whose = ("it isn't a `repo`" if dep_owner is None else
+                         f"{repo} isn't {' or '.join(sorted(ours))}'s (list its owner in `owners` if it is ours)")
                 raise Error(f"{where}: bundling re-signs its packages with our key, and {whose}: "
                             f"say so with bundle = \"{THIRD_PARTY}\" (docs/packaging.md, "
                             f"\"Bundling a dependency repository\")")
