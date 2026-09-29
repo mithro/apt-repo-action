@@ -12,14 +12,20 @@ our key, so a user adds one repository instead of several.
 
 `fetch` reads our packages in --debs (what the build made for the suite),
 works out which of the bundled repositories' packages they need, and copies
-the newest version of each into --dest (default: --debs), with a
+them into --dest (default: --debs), with a
 dpkg-scanpackages extra-override file, <dest>/.bundled-override, that marks
 each copied package `Bundled-From: <repository>` in our index. Which
-packages: the Depends and Pre-Depends of our packages, followed through the
-bundled repositories' own packages (a package they don't have is left to
-Debian). Every alternative and every virtual package a bundled repository
-has counts, since it can't be known here whether Debian satisfies it: what a
-dependency repository has is normally why it was declared. Architectures:
+packages: for each Depends and Pre-Depends relation of ours that a bundled
+repository satisfies (the package at a version the relation allows, or a
+Provides), the newest satisfying version, and what that needs in turn;
+several versions of one package if relations need them. A package they
+don't have is left to Debian. Every satisfiable alternative counts, since
+it can't be known here whether Debian satisfies it: what a dependency
+repository has is normally why it was declared. A relation without
+alternatives on a package a bundled repository has, none of whose versions
+satisfies it, is an error. --index also writes <dest>/Packages for the
+bundled files, which an install test offers apt as a local source, so apt
+chooses among alternatives as a user's would. Architectures:
 a package needed by an Architecture: all package of ours is taken for every
 architecture the dependency repository has it for (ours installs anywhere);
 one needed only by architecture-dependent packages, for their architectures.
@@ -27,17 +33,21 @@ one needed only by architecture-dependent packages, for their architectures.
 
 Nothing is copied unverified. The dependency repository's InRelease must
 verify with its key (gpgv), its Packages must match the hash InRelease
-gives, and each .deb the Size and SHA256 its Packages gives. For one of ours
-the Release must also be for this suite (Codename), so a suite can't be
-served another's packages. Any failure -- an unreachable repository
+gives, and each .deb the Size and SHA256 its Packages gives, and carry in
+its own control file exactly the Package, Version, Architecture and
+relations its stanza gives (dpkg-scanpackages indexes the file by its
+control file). For one of ours the Release must also be for this suite
+(Codename), so a suite can't be served another's packages. `bundle = true`
+must name a repository of the same GitHub owner as ours (--owner, or
+$GITHUB_REPOSITORY's). Any failure -- an unreachable repository
 included -- fails the command: publishing without the dependency would leave
 our packages uninstallable for users of our repository alone.
 
-`stale` exits 0 and prints (and writes `stale=` to $GITHUB_OUTPUT) whether a
-bundled repository now has a newer version of a package our live site
-bundles from it, or a bundled repository applies to a suite our site bundles
-nothing from yet: then our next publish would bring something new, and
-.github/workflows/refresh-bundled.yml starts it.
+`stale` exits 0 and prints (and writes `stale=` to $GITHUB_OUTPUT) whether
+our next publish would bundle something the live site doesn't have: it runs
+the same selection over our live packages and the bundled repositories'
+verified indexes, and compares. Then .github/workflows/refresh-bundled.yml
+starts a publish; otherwise nothing runs.
 
 Needs gpgv, dpkg and dpkg-deb (a GitHub runner and any Debian image have
 them). The API is read with $GH_TOKEN or $GITHUB_TOKEN.
@@ -90,16 +100,28 @@ def stanzas(text: str) -> list[dict[str, str]]:
     return out
 
 
+def relations(value: str) -> list[list[tuple[str, str | None, str | None]]]:
+    """A Depends-style field as groups of alternatives, each
+    (name, operator, version); architecture qualifiers, architecture lists
+    and build profiles dropped. `<` and `>` are dpkg's old `<=` and `>=`."""
+    groups = []
+    for group in value.split(","):
+        alts = []
+        for alt in group.split("|"):
+            alt = re.sub(r"\[[^]]*\]|<[^>]*>", " ", alt)
+            m = re.fullmatch(r"\s*([^\s(:]+)(?::\S+)?\s*(?:\(\s*(<<|<=|=|>=|>>|<|>)\s*([^\s)]+)\s*\))?\s*", alt)
+            if m:
+                op = {"<": "<=", ">": ">="}.get(m.group(2), m.group(2))
+                alts.append((m.group(1), op, m.group(3)))
+        if alts:
+            groups.append(alts)
+    return groups
+
+
 def relation_names(value: str) -> list[str]:
     """Every package name a Depends-style field mentions, alternatives
     included, without versions, architecture qualifiers or restrictions."""
-    names = []
-    for group in value.split(","):
-        for alt in group.split("|"):
-            alt = re.sub(r"\([^)]*\)|\[[^]]*\]|<[^>]*>", " ", alt).split()
-            if alt:
-                names.append(alt[0].split(":")[0])
-    return names
+    return [name for group in relations(value) for name, _, _ in group]
 
 
 def compare(a: str, b: str) -> int:
@@ -107,6 +129,13 @@ def compare(a: str, b: str) -> int:
     if a == b:
         return 0
     return -1 if subprocess.run(["dpkg", "--compare-versions", a, "lt", b]).returncode == 0 else 1
+
+
+def satisfies(version: str, op: str | None, want: str | None) -> bool:
+    """Whether `version` satisfies `(op want)`, by dpkg's own comparison."""
+    if op is None:
+        return True
+    return subprocess.run(["dpkg", "--compare-versions", version, op, want]).returncode == 0
 
 
 # --------------------------------------------------------------------------
@@ -176,58 +205,127 @@ def our_packages(debs: Path, arch: str | None = None) -> list[dict[str, str]]:
     return out
 
 
+def provides(st: dict, name: str, op: str | None, want: str | None) -> bool:
+    """Whether a package's Provides satisfies (name op want): an unversioned
+    relation by any Provides of the name, a versioned one only by a
+    versioned `name (= v)` that satisfies it (dpkg's rule)."""
+    for group in relations(st.get("Provides", "")):
+        for pname, pop, pver in group:
+            if pname != name:
+                continue
+            if op is None or (pop == "=" and satisfies(pver, op, want)):
+                return True
+    return False
+
+
 def select(ours: list[dict], available: list[tuple[dict, dict]],
            arch: str | None = None) -> list[tuple[dict, dict]]:
-    """The (stanza, source) pairs to bundle: for each needed (package,
-    architecture), the newest version the bundled repositories have."""
-    by_name: dict[str, list[tuple[dict, dict]]] = {}
+    """The (stanza, source) pairs to bundle.
+
+    Each relation of ours (Depends, Pre-Depends) that a bundled repository
+    can satisfy -- by the package itself at a version the relation allows,
+    or by a Provides -- takes, for each architecture it is needed for, the
+    newest version that satisfies it; and those in turn what they need.
+    Several versions of one package are bundled if different relations need
+    them. A relation with no alternatives naming a package the bundled
+    repositories have, none of whose versions satisfies it, is an error:
+    ours would be uninstallable from our repository alone."""
+    real: dict[str, list[tuple[dict, dict]]] = {}
+    virtual: dict[str, list[tuple[dict, dict]]] = {}
     for st, src in available:
-        by_name.setdefault(st["Package"], []).append((st, src))
+        real.setdefault(st["Package"], []).append((st, src))
         for prov in relation_names(st.get("Provides", "")):
-            by_name.setdefault(prov, []).append((st, src))
-    clash = sorted({o["Package"] for o in ours} & {st["Package"] for st, _ in available})
+            virtual.setdefault(prov, []).append((st, src))
+    clash = sorted({o["Package"] for o in ours} & set(real))
     if clash:
         raise Error(f"{', '.join(clash)}: both ours and a bundled repository's; one of them must be renamed")
 
-    # name -> the architectures it is needed for; "*" is any (an all package needs it).
-    needed: dict[str, set[str]] = {}
-    work: list[tuple[str, set[str]]] = []
+    def fits_arch(st: dict, arches: set[str]) -> bool:
+        a = st.get("Architecture", "")
+        if arch and a not in (arch, "all"):
+            return False
+        return a == "all" or "*" in arches or a in arches
 
-    def need(field_value: str, arches: set[str]) -> None:
-        for name in relation_names(field_value):
-            for st, _ in by_name.get(name, []):
-                have = needed.setdefault(st["Package"], set())
-                if not arches <= have:
-                    have |= arches
-                    work.append((st["Package"], arches))
-
+    chosen: dict[tuple[str, str, str], tuple[dict, dict]] = {}
+    done: set[tuple[str, frozenset]] = set()
+    work: list[tuple[str, str, set[str]]] = []   # (relations, whose, arches)
     for o in ours:
         a = o.get("Architecture", "")
-        need(o.get("Depends", "") + "," + o.get("Pre-Depends", ""), {"*"} if a == "all" else {a})
-    chosen: dict[tuple[str, str], tuple[dict, dict]] = {}
+        work.append((o.get("Depends", "") + "," + o.get("Pre-Depends", ""), o["Package"],
+                     {"*"} if a == "all" else {a}))
     while work:
-        name, arches = work.pop()
-        for st, src in by_name.get(name, []):
-            if st["Package"] != name:
-                continue
-            a = st.get("Architecture", "")
-            if a != "all" and "*" not in arches and a not in arches:
-                continue
-            if arch and a not in (arch, "all"):
-                continue
-            key = (name, a)
-            if key not in chosen or compare(st["Version"], chosen[key][0]["Version"]) > 0:
-                chosen[key] = (st, src)
-            # What it needs, for the architectures it serves.
-            need(st.get("Depends", "") + "," + st.get("Pre-Depends", ""), arches if a == "all" else {a})
+        field, whose, arches = work.pop()
+        if (field, frozenset(arches)) in done:
+            continue
+        done.add((field, frozenset(arches)))
+        for group in relations(field):
+            found = False
+            for name, op, want in group:
+                cands = [(st, src) for st, src in real.get(name, [])
+                         if satisfies(st["Version"], op, want) and fits_arch(st, arches)]
+                cands += [(st, src) for st, src in virtual.get(name, [])
+                          if st["Package"] != name and provides(st, name, op, want) and fits_arch(st, arches)]
+                # The newest satisfying version per (package, architecture).
+                best: dict[tuple[str, str], tuple[dict, dict]] = {}
+                for st, src in cands:
+                    k = (st["Package"], st.get("Architecture", ""))
+                    if k not in best or compare(st["Version"], best[k][0]["Version"]) > 0:
+                        best[k] = (st, src)
+                for (pkg, a), (st, src) in best.items():
+                    found = True
+                    key = (pkg, st["Version"], a)
+                    if key not in chosen:
+                        chosen[key] = (st, src)
+                    work.append((st.get("Depends", "") + "," + st.get("Pre-Depends", ""), pkg,
+                                 arches if a == "all" else {a}))
+            if not found and len(group) == 1 and group[0][0] in real:
+                name, op, want = group[0]
+                have = sorted({st["Version"] for st, _ in real[name]}, key=functools.cmp_to_key(compare))
+                raise Error(f"{whose} needs {name}" + (f" ({op} {want})" if op else "")
+                            + f", and the bundled repository has {name} only at {', '.join(have)}"
+                            + (f" for the architectures needed" if not op else ""))
     return [chosen[k] for k in sorted(chosen)]
 
 
-def fetch(entries: list[dict], suite: str, debs: Path, dest: Path, arch: str | None) -> list[str]:
-    """Copy what ours need into dest; return the summary lines."""
+# The control fields a bundled .deb must carry exactly as its verified
+# stanza says: dpkg-scanpackages indexes a package by its own control file,
+# so a file whose hash matches but whose control names another package (one
+# of ours, say, at a higher version) would otherwise enter our signed index
+# unmarked.
+CONTROL = ["Package", "Version", "Architecture", "Source", "Multi-Arch", "Essential",
+           "Depends", "Pre-Depends", "Provides", "Conflicts", "Breaks", "Replaces"]
+
+
+def control_matches(path: Path, st: dict) -> list[str]:
+    """The CONTROL fields where the .deb's control file and the stanza differ."""
+    r = subprocess.run(["dpkg-deb", "-f", str(path), *CONTROL], capture_output=True, text=True)
+    if r.returncode != 0:
+        return [f"not a Debian package ({r.stderr.strip()})"]
+    text = r.stdout
+    control = stanzas(text)[0] if text.strip() else {}
+    norm = lambda v: " ".join((v or "").split())   # noqa: E731
+    return [f"{k}: {control.get(k)!r} in the file, {st.get(k)!r} in its index"
+            for k in CONTROL if norm(control.get(k)) != norm(st.get(k))]
+
+
+def owner_of(args_owner: str | None) -> str:
+    owner = args_owner or os.environ.get("GITHUB_REPOSITORY", "").partition("/")[0]
+    if not owner:
+        raise Error("whose repository is this? pass --owner, or set $GITHUB_REPOSITORY: "
+                    "`bundle = true` is only for the same owner's repositories")
+    return owner
+
+
+def fetch(entries: list[dict], suite: str, debs: Path, dest: Path, arch: str | None,
+          index: bool = False) -> list[str]:
+    """Copy what ours need into dest; return the summary lines. With
+    `index`, also write dest/Packages for the bundled files alone, so an
+    install test can offer them to apt as a local source."""
     resolved = [r for r in apt_sources.resolve([e for e in entries if e["bundle"]], suite)]
     dest.mkdir(parents=True, exist_ok=True)
     override = dest / OVERRIDE
+    if index:
+        (dest / "Packages").write_text("")
     if not resolved:
         return []
     available = []
@@ -236,14 +334,21 @@ def fetch(entries: list[dict], suite: str, debs: Path, dest: Path, arch: str | N
     ours = our_packages(debs, arch)
     if not ours:
         raise Error(f"no packages of ours in {debs} to bundle dependencies for")
-    lines, marks = [], {}
+    lines, marks, stanza_text = [], {}, []
     for st, r in select(ours, available, arch):
+        where = r["repo"] or r["name"]
         name = Path(st["Filename"]).name
         if "/" in name or not name.endswith(".deb"):
-            raise Error(f"{r['repo'] or r['name']}: odd Filename {st['Filename']!r}")
+            raise Error(f"{where}: odd Filename {st['Filename']!r}")
         data = apt_sources.http_get(r["uri"] + st["Filename"].removeprefix("./"))
         if len(data) != int(st.get("Size", -1)) or sha256(data) != st.get("SHA256"):
-            raise Error(f"{r['repo'] or r['name']}: {name} doesn't match its Packages index")
+            raise Error(f"{where}: {name} doesn't match its Packages index")
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / name
+            probe.write_bytes(data)
+            wrong = control_matches(probe, st)
+        if wrong:
+            raise Error(f"{where}: {name}'s control file isn't what its index says: " + "; ".join(wrong))
         out = dest / name
         if out.exists() and sha256(out.read_bytes()) != st["SHA256"]:
             raise Error(f"{name}: a different file of that name is already in {dest}")
@@ -251,14 +356,20 @@ def fetch(entries: list[dict], suite: str, debs: Path, dest: Path, arch: str | N
         source = r["repo"] or r["uri"]
         marks[st["Package"]] = source
         lines.append(f"{st['Package']} {st['Version']} {st['Architecture']} from {source}")
+        stanza_text.append("".join(f"{k}: {v}\n" for k, v in
+                                   {**st, "Filename": f"./{name}", FIELD: source}.items()))
     with override.open("a") as f:
         for pkg, source in sorted(marks.items()):
             f.write(f"{pkg} {FIELD} {source}\n")
+    if index:
+        (dest / "Packages").write_text("\n".join(stanza_text))
     return lines
 
 
 def stale(entries: list[dict], suites: list[str], site: str) -> list[str]:
-    """Why our next publish would bundle something new; empty if nothing."""
+    """Why our next publish would bundle something the live site doesn't:
+    what select() would choose for our live packages, less what the live
+    site already bundles from that repository. Empty if nothing."""
     why = []
     for suite in suites:
         bundled = [r for r in apt_sources.resolve([e for e in entries if e["bundle"]], suite)]
@@ -268,21 +379,23 @@ def stale(entries: list[dict], suites: list[str], site: str) -> list[str]:
             live = stanzas(apt_sources.http_get(f"{site.rstrip('/')}/{suite}/Packages").decode(errors="replace"))
         except Error as e:
             raise Error(f"can't read our own {suite}/Packages: {e}") from None
-        for r in bundled:
-            source = r["repo"] or r["uri"]
-            ours = {}
-            for st in live:
-                if st.get(FIELD) == source:
-                    k = (st["Package"], st.get("Architecture", ""))
-                    if k not in ours or compare(st["Version"], ours[k]) > 0:
-                        ours[k] = st["Version"]
-            if not ours:
-                why.append(f"{suite}: nothing bundled from {source} yet")
+        live = [st for st in live if "Package" in st]
+        # Ours: the newest of each (package, architecture) we publish.
+        newest: dict[tuple[str, str], dict] = {}
+        for st in live:
+            if st.get(FIELD):
                 continue
-            for st in verified_packages(r, suite):
-                k = (st["Package"], st.get("Architecture", ""))
-                if k in ours and compare(st["Version"], ours[k]) > 0:
-                    why.append(f"{suite}: {source} has {st['Package']} {st['Version']} ({k[1]}), we bundle {ours[k]}")
+            k = (st["Package"], st.get("Architecture", ""))
+            if k not in newest or compare(st["Version"], newest[k]["Version"]) > 0:
+                newest[k] = st
+        have = {(st["Package"], st["Version"], st.get("Architecture", ""), st.get(FIELD))
+                for st in live if st.get(FIELD)}
+        available = [(st, r) for r in bundled for st in verified_packages(r, suite)]
+        for st, r in select(list(newest.values()), available):
+            source = r["repo"] or r["uri"]
+            if (st["Package"], st["Version"], st.get("Architecture", ""), source) not in have:
+                why.append(f"{suite}: would bundle {st['Package']} {st['Version']} "
+                           f"({st.get('Architecture', '')}) from {source}, which the site doesn't have")
     return why
 
 
@@ -295,15 +408,22 @@ def main() -> int:
     ap.add_argument("--debs", type=Path, help="fetch: our packages for the suite")
     ap.add_argument("--dest", type=Path, help="fetch: where to put the bundled packages (default: --debs)")
     ap.add_argument("--arch", help="fetch: only this architecture (and all)")
+    ap.add_argument("--index", action="store_true",
+                    help="fetch: also write <dest>/Packages for the bundled files, for an install test")
+    ap.add_argument("--owner", help="the GitHub owner of the repository declaring them "
+                                    "(default: from $GITHUB_REPOSITORY)")
     ap.add_argument("--suites", help="stale: space-separated suites")
     ap.add_argument("--site", help="stale: our live site")
     args = ap.parse_args()
     try:
-        entries = apt_sources.validate(apt_sources.load(args.declaration))
+        deps = apt_sources.load(args.declaration)
+        # `bundle = true` is for the same owner's repositories only.
+        owner = owner_of(args.owner) if any(d.get("bundle") is True for d in deps) else None
+        entries = apt_sources.validate(deps, owner=owner)
         if args.command == "fetch":
             if not args.suite or not args.debs:
                 ap.error("fetch needs --suite and --debs")
-            lines = fetch(entries, args.suite, args.debs, args.dest or args.debs, args.arch)
+            lines = fetch(entries, args.suite, args.debs, args.dest or args.debs, args.arch, args.index)
             for line in lines:
                 print(f"bundled {args.suite}: {line}")
             if not lines and any(e["bundle"] and apt_sources.applies(e, args.suite) for e in entries):

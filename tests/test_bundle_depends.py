@@ -47,10 +47,16 @@ class Site:
                 gz_only: bool = False) -> None:
         stanzas = []
         for p in packages:
-            data = p.get("data", f"{p['Package']} {p['Version']} {p['Architecture']}".encode())
             name = f"{p['Package']}_{p['Version']}_{p['Architecture']}.deb"
+            fields = {k: v for k, v in p.items() if k not in ("data", "control")}
+            if "data" in p:
+                data = p["data"]
+            else:
+                # A real package whose control file is the stanza's, or,
+                # with "control", deliberately not.
+                built = deb_bytes(self.tmp / "pool", {**fields, **p.get("control", {})})
+                data = built
             self.files[f"{SITE}/{suite}/{name}"] = data
-            fields = {k: v for k, v in p.items() if k != "data"}
             fields.update(Filename=f"./{name}", Size=str(len(data)), SHA256=hashlib.sha256(data).hexdigest())
             stanzas.append("".join(f"{k}: {v}\n" for k, v in fields.items()))
         index = "\n".join(stanzas).encode()
@@ -68,6 +74,18 @@ class Site:
         if url not in self.files:
             raise bd.Error(f"{url}: HTTP 404 Not Found")
         return self.files[url]
+
+
+def deb_bytes(work: Path, fields: dict) -> bytes:
+    """A real .deb whose control file has these fields."""
+    work.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(dir=work))
+    (root / "DEBIAN").mkdir()
+    control = {"Maintainer": "t <t@invalid>", "Description": "t", **fields}
+    (root / "DEBIAN/control").write_text("".join(f"{k}: {v}\n" for k, v in control.items()))
+    out = root.with_suffix(".deb")
+    run("dpkg-deb", "--build", "--root-owner-group", str(root), str(out))
+    return out.read_bytes()
 
 
 def deb(dest: Path, package: str, arch: str = "all", depends: str = "", version: str = "1.0") -> Path:
@@ -212,36 +230,157 @@ class Verify(Base):
 
 
 class Stale(Base):
-    def live(self, text):
-        self.site.files["https://us.example/ours/trixie/Packages"] = textwrap.dedent(text).encode()
+    """What our next publish would bundle that the live site doesn't have."""
+
+    OURS = "Package: ours\nVersion: 1\nArchitecture: all\nDepends: liba\n"
+
+    def live(self, *bundled, ours=OURS):
+        text = ours + "".join(
+            f"\nPackage: liba\nVersion: {v}\nArchitecture: all\nBundled-From: owner/dep-repo\n"
+            for v in bundled)
+        self.site.files["https://us.example/ours/trixie/Packages"] = text.encode()
 
     def stale(self):
         return bd.stale(entries(), ["trixie"], "https://us.example/ours")
 
     def test_newer_upstream(self):
         self.site.publish("trixie", [{"Package": "liba", "Version": "2", "Architecture": "all"}])
-        self.live("""\
-            Package: liba
-            Version: 1
-            Architecture: all
-            Bundled-From: owner/dep-repo
-            """)
-        self.assertEqual(self.stale(), ["trixie: owner/dep-repo has liba 2 (all), we bundle 1"])
+        self.live("1")
+        self.assertEqual(self.stale(), ["trixie: would bundle liba 2 (all) from owner/dep-repo, "
+                                        "which the site doesn't have"])
 
     def test_current(self):
         self.site.publish("trixie", [{"Package": "liba", "Version": "1", "Architecture": "all"}])
-        self.live("""\
-            Package: liba
-            Version: 1
-            Architecture: all
-            Bundled-From: owner/dep-repo
-            """)
+        self.live("1")
         self.assertEqual(self.stale(), [])
 
-    def test_nothing_bundled_yet(self):
+    def test_needed_but_not_bundled_yet(self):
         self.site.publish("trixie", [{"Package": "liba", "Version": "1", "Architecture": "all"}])
-        self.live("Package: ours\nVersion: 1\nArchitecture: all\n")
-        self.assertEqual(self.stale(), ["trixie: nothing bundled from owner/dep-repo yet"])
+        self.live()
+        self.assertEqual(len(self.stale()), 1)
+
+    def test_nothing_needed_is_never_stale(self):
+        # A `bundle` entry for a suite where nothing of ours needs anything
+        # from it: a scheduled check must not rebuild every time (M2).
+        self.site.publish("trixie", [{"Package": "liba", "Version": "1", "Architecture": "all"}])
+        self.live(ours="Package: ours\nVersion: 1\nArchitecture: all\nDepends: debianpkg\n")
+        self.assertEqual(self.stale(), [])
+
+    def test_follows_version_constraints(self):
+        self.site.publish("trixie", [{"Package": "liba", "Version": v, "Architecture": "all"} for v in ("1", "2")])
+        self.live("1", ours="Package: ours\nVersion: 1\nArchitecture: all\nDepends: liba (<< 2)\n")
+        self.assertEqual(self.stale(), [])
+
+
+class Versions(Base):
+    """A relation takes the newest version that satisfies it (L1)."""
+
+    def test_constraint_picks_an_older_version(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": v, "Architecture": "all"}
+                                     for v in ("1.0", "2.0")])
+        deb(self.debs, "ours", depends="libfoo (<< 2)")
+        self.fetch()
+        self.assertEqual(self.names(), ["libfoo_1.0_all.deb", "ours_1.0_all.deb"])
+
+    def test_two_relations_two_versions(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": v, "Architecture": "all"}
+                                     for v in ("1.0", "2.0")])
+        deb(self.debs, "ours", depends="libfoo (<< 2)")
+        deb(self.debs, "ours-too", depends="libfoo (>= 2)")
+        self.fetch()
+        self.assertEqual(self.names(), ["libfoo_1.0_all.deb", "libfoo_2.0_all.deb",
+                                        "ours-too_1.0_all.deb", "ours_1.0_all.deb"])
+
+    def test_old_style_operators_and_epochs(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": v, "Architecture": "all"}
+                                     for v in ("1:0.9", "2.0")])
+        deb(self.debs, "ours", depends="libfoo (> 1:0)")   # dpkg's old >=
+        self.fetch()
+        self.assertEqual(self.names(), ["libfoo_1:0.9_all.deb", "ours_1.0_all.deb"])
+
+    def test_versioned_provides(self):
+        self.site.publish("trixie", [
+            {"Package": "real", "Version": "1", "Architecture": "all", "Provides": "virt (= 3)"},
+            {"Package": "other", "Version": "1", "Architecture": "all", "Provides": "virt"}])
+        deb(self.debs, "ours", depends="virt (>= 2)")
+        self.fetch()
+        # Only a versioned Provides satisfies a versioned relation.
+        self.assertEqual(self.names(), ["ours_1.0_all.deb", "real_1_all.deb"])
+
+    def test_unsatisfiable_fails(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": "1.0", "Architecture": "all"}])
+        deb(self.debs, "ours", depends="libfoo (>= 2)")
+        with self.assertRaisesRegex(bd.Error, r"ours needs libfoo \(>= 2\), and the bundled repository "
+                                              r"has libfoo only at 1.0"):
+            self.fetch()
+
+    def test_unsatisfiable_alternative_is_left_to_debian(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": "1.0", "Architecture": "all"}])
+        deb(self.debs, "ours", depends="libfoo (>= 2) | debianpkg")
+        self.assertEqual(self.fetch(), [])
+
+
+class Control(Base):
+    """The file's own control fields must be what its stanza says (M1)."""
+
+    def test_a_file_claiming_to_be_ours(self):
+        # The stanza says libfoo; the file (whose hash the stanza carries)
+        # says it is `ours`, at a higher version: it would enter our signed
+        # index as a second, unmarked `ours`.
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": "1", "Architecture": "all",
+                                      "control": {"Package": "ours", "Version": "99"}}])
+        deb(self.debs, "ours", depends="libfoo")
+        with self.assertRaisesRegex(bd.Error, r"control file isn't what its index says: Package: 'ours'"):
+            self.fetch()
+        self.assertEqual(self.names(), ["ours_1.0_all.deb"])
+
+    def test_other_relations(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": "1", "Architecture": "all",
+                                      "control": {"Depends": "evil"}}])
+        deb(self.debs, "ours", depends="libfoo")
+        with self.assertRaisesRegex(bd.Error, "Depends: 'evil' in the file, None in its index"):
+            self.fetch()
+
+    def test_not_a_package(self):
+        self.site.publish("trixie", [{"Package": "libfoo", "Version": "1", "Architecture": "all",
+                                      "data": b"not a deb"}])
+        deb(self.debs, "ours", depends="libfoo")
+        with self.assertRaisesRegex(bd.Error, "not a Debian package"):
+            self.fetch()
+
+
+class Index(Base):
+    def test_local_source_index(self):
+        # For an install test: apt chooses among the bundled files (L2).
+        self.site.publish("trixie", [{"Package": "liba", "Version": "1", "Architecture": "all"}])
+        deb(self.debs, "ours", depends="liba")
+        dest = self.tmp / "bundled"
+        bd.fetch(entries(), "trixie", self.debs, dest, None, index=True)
+        [st] = bd.stanzas((dest / "Packages").read_text())
+        self.assertEqual((st["Package"], st["Filename"], st["Bundled-From"]),
+                         ("liba", "./liba_1_all.deb", "owner/dep-repo"))
+
+    def test_empty_when_nothing_bundled(self):
+        deb(self.debs, "ours")
+        dest = self.tmp / "bundled"
+        bd.fetch(entries(bundle=False), "trixie", self.debs, dest, None, index=True)
+        self.assertEqual((dest / "Packages").read_text(), "")
+
+
+class Owner(unittest.TestCase):
+    def test_owner_required_for_bundle_true(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decl = Path(tmp) / "d.toml"
+            decl.write_text('[[depends]]\nrepo = "someone/dep"\nbundle = true\nreason = "r"\n')
+            env = {k: v for k, v in os.environ.items() if k != "GITHUB_REPOSITORY"}
+            args = ["python3", str(SCRIPT), "stale", "--declaration", str(decl),
+                    "--suites", "trixie", "--site", "https://x.invalid"]
+            r = subprocess.run(args, capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("pass --owner", r.stderr)
+            r = subprocess.run(args + ["--owner", "mithro"], capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("someone/dep isn't mithro's", r.stderr)
 
 
 class Relations(unittest.TestCase):
