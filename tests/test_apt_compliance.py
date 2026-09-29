@@ -470,6 +470,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run deb.yml --ref packaging --repo "$GITHUB_REPOSITORY"
 """
+MIRROR_SHARED = """name: Sync upstream
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+jobs:
+  sync:
+    uses: someone/apt-repo-action/.github/workflows/sync-mirror.yml@main
+"""
 MIRROR_DECL = {"kind": "mirror", "upstream": "https://git.m-labs.hk/M-Labs/migen.git",
                "mirror": {"build": "master", "ours": ["github-master", "legacy", "experimental"]}}
 
@@ -481,11 +493,11 @@ class Mirror(unittest.TestCase):
         m = {"build_present": True, "shared_history": False, "ours": "a" * 40, "theirs": "a" * 40,
              "theirs_error": None, "sync_runs": []}
         m.update(mirror)
-        return {"default": "packaging", "mirror": m, "workflows": {"sync-upstream.yml": MIRROR_SYNC}}
+        return {"default": "packaging", "mirror": m, "workflows": {"sync-upstream.yml": MIRROR_SHARED}}
 
     def rules(self, f, decl=MIRROR_DECL):
         t = {"mirror": apc.mirror_declaration(decl)[0]}
-        return {r: (ok, d) for r, ok, d in apc.mirror_rules(f, t, now=self.NOW)}
+        return {r: (ok, d) for r, ok, d in apc.mirror_rules(f, t, ACTION, now=self.NOW)}
 
     def test_declaration(self):
         self.assertEqual(apc.mirror_declaration(MIRROR_DECL),
@@ -505,20 +517,28 @@ class Mirror(unittest.TestCase):
         self.assertIn("[mirror] has unknown keys branch", probs(mirror={"build": "master", "branch": "x"}))
 
     def test_sync(self):
-        self.assertEqual(apc.mirror_sync(MIRROR_SYNC), (True, "sync-upstream.yml: scheduled, starts deb.yml"))
-        self.assertEqual(apc.mirror_sync(None), (False, "no sync-upstream.yml"))
-        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace('  schedule:\n    - cron: "0 6 * * *" # daily 06:00 UTC\n', "")),
+        self.assertEqual(apc.mirror_sync(MIRROR_SHARED, ACTION),
+                         (True, "sync-upstream.yml: scheduled, the shared sync-mirror.yml"))
+        self.assertEqual(apc.mirror_sync(None, ACTION), (False, "no sync-upstream.yml"))
+        self.assertEqual(apc.mirror_sync(MIRROR_SHARED.replace("@main", "@v1"), ACTION),
+                         (False, "sync-mirror.yml@v1 (want @main)"))
+        self.assertEqual(apc.mirror_sync(MIRROR_SHARED.replace('  schedule:\n    - cron: "0 6 * * *"\n', ""), ACTION),
                          (False, "not scheduled"))
+        self.assertFalse(apc.mirror_sync(MIRROR_SHARED.replace("name: Sync upstream", "name: Mirror"), ACTION)[0])
+
+    def test_own_sync(self):
+        # migen's own steps start deb.yml, but aren't the shared sync.
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC, ACTION),
+                         (False, "its own sync steps, not someone/apt-repo-action/.github/workflows/sync-mirror.yml@main"))
         # Only in a comment: it doesn't start anything.
-        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace("run: gh workflow run", "run: true # gh workflow run")),
+        self.assertEqual(apc.mirror_sync(MIRROR_SYNC.replace("run: gh workflow run", "run: true # gh workflow run"), ACTION),
                          (False, "doesn't start deb.yml"))
-        self.assertFalse(apc.mirror_sync(MIRROR_SYNC.replace("name: Sync upstream", "name: Mirror"))[0])
 
     def test_in_step(self):
         r = self.rules(self.facts())
         self.assertEqual(r["PKG-HISTORY"], (True, "packaging shares no history with master"))
         self.assertEqual(r["PKG-UPSTREAM"], (True, "master is upstream's (aaaaaaaaaaaa)"))
-        self.assertEqual(r["PKG-SYNC"], (True, "sync-upstream.yml: scheduled, starts deb.yml"))
+        self.assertEqual(r["PKG-SYNC"], (True, "sync-upstream.yml: scheduled, the shared sync-mirror.yml"))
 
     def test_shared_history(self):
         self.assertEqual(self.rules(self.facts(shared_history=True))["PKG-HISTORY"],
