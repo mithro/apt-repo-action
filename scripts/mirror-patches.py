@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -133,11 +134,31 @@ def apply_series(src: Path, head: str, out: Path, series: list[str]) -> None:
 
 
 def generate(src: Path, patches: list[dict], out: Path, head: str = "HEAD") -> list[str]:
-    """Writes each pin's patches under `out`/<topic>/ and `out`/series, and
-    checks they apply, in order, to `head` as dpkg-source will apply them;
-    returns the series (paths relative to `out`)."""
+    """Writes each pin's patches under `out`/<topic>/ and `out`/series,
+    once they all apply, in order, to `head` as dpkg-source will apply them;
+    returns the series (paths relative to `out`). They are written into a
+    directory beside `out` and moved into place only then, so a failure
+    leaves nothing at `out`: no half-written series for a build to take."""
     # git -C <src> reads a relative -o from <src>: make both absolute.
     src, out = src.resolve(), out.resolve()
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise Error(f"{out} already exists")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent))
+    try:
+        series = stage_patches(src, patches, stage, head)
+        apply_series(src, head, stage, series)
+    except BaseException:
+        shutil.rmtree(stage)  # our own scratch directory, just made
+        raise
+    if out.exists():
+        out.rmdir()  # empty, checked above
+    stage.rename(out)
+    return series
+
+
+def stage_patches(src: Path, patches: list[dict], out: Path, head: str) -> list[str]:
+    """generate's first half: the patches and the series, into `out`."""
     series = []
     for i, p in enumerate(patches):
         if git(src, "cat-file", "-e", f"{p['commit']}^{{commit}}", check=False).returncode:
@@ -165,7 +186,6 @@ def generate(src: Path, patches: list[dict], out: Path, head: str = "HEAD") -> l
                             "create it in debian/rules.")
         series += [str(Path(f).relative_to(out)) for f in files]
     (out / "series").write_text("".join(f"{x}\n" for x in series))
-    apply_series(src, head, out, series)
     return series
 
 
