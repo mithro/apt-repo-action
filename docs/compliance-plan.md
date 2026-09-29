@@ -39,7 +39,7 @@ are in the compliance report.
 
 Nothing about a repository is kept outside it. Its
 [`.github/apt-packaging.toml`](packaging.md#the-declaration) gives its kind
-(Set A, Set B, aggregate), variant, upstream, and any non-default suites or
+(Set A, mirror, Set B, aggregate), variant, upstream, and any non-default suites or
 architectures, with a reason for each exception, keyed by rule ID. An
 exception is reviewed in the repository's own pull request, like any other
 change to its packaging.
@@ -51,7 +51,9 @@ Until a repository has its declaration, the checker infers its kind:
   repository existed, or publishes `~bpo` or `+<owner-tag><M>` versions;
 - **Set B** otherwise.
 
-Inferred kinds fail `PKG-DECLARED`.
+A mirror is never inferred: a GitHub fork with a `packaging` default branch
+(migen) looks like Set A until its declaration says otherwise. Inferred
+kinds fail `PKG-DECLARED`.
 
 **Discovery** needs no list either. A repository is a packaging repository
 when a workflow, on its default branch or on the branch its Pages site last
@@ -90,14 +92,14 @@ repository's issue in section 4), and everything as JSON.
 
 | ID | rule | how it's checked |
 |---|---|---|
-| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, and `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures` |
-| PKG-BRANCH | default branch `packaging` (A) or `main` (B), and it publishes | GitHub API, last Pages deployment |
-| PKG-HISTORY | Set A carries upstream's history | fork, or commits by others before the repository existed |
-| PKG-UPSTREAM | Set A has an `upstream` branch | GitHub API |
-| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule) | files on the publishing branch |
-| PKG-README | Set A has `packaging/README.md` | file |
+| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures`, and a mirror's `upstream` and `[mirror]` are well-formed |
+| PKG-BRANCH | default branch `packaging` (A, mirror) or `main` (B), and it publishes | GitHub API, last Pages deployment |
+| PKG-HISTORY | Set A carries upstream's history; a mirror's `packaging` shares none with the built branch | fork, or commits by others before the repository existed; a mirror: the compare API finds no common ancestor |
+| PKG-UPSTREAM | Set A has an `upstream` branch; a mirror's built branch is upstream's | GitHub API; a mirror: `git ls-remote` of the declared `upstream`, or else the last sync succeeded in the last two days |
+| PKG-SYNC | Set A has `sync-upstream.yml` (backport: a schedule); a mirror's is `Sync upstream`, scheduled, and starts `deb.yml` | files on the publishing branch; a mirror: its steps' scripts |
+| PKG-README | Set A has `packaging/README.md`; a mirror has `README.md` naming its upstream | file |
 | PKG-DEBIAN | `debian/` at the root (patch series: `packaging/debian/<name>/`) | tree |
-| PKG-CHANGELOG | Set B commits no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |
+| PKG-CHANGELOG | Set B and mirrors commit no `debian/changelog` (nor a patch series' templates), and `.gitignore` lists it | tree, `.gitignore` |
 | PKG-DEPENDS | each `[[depends]]` is well-formed, with a reason and known suites | the declaration, with `scripts/apt-sources.py`'s own validation; notes whether a `repo` is a packaging repository in the scan |
 | PKG-WORKFLOW | `.github/workflows/deb.yml`, `name: Debian packages` | parse YAML |
 | PKG-JOBS | jobs `test`, `build-deb`, `publish-apt`, `release` only | parse YAML |
