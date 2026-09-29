@@ -377,16 +377,18 @@ jobs:
     #     (the newest perl-base there, when it is newer than the suite's) must
     #     fail the install test. With the two in step there is no such version,
     #     and the case says so and passes.
-    #   rebuild: raspbian-rebuild builds a source package whose armhf binary
-    #     Raspbian hasn't rebuilt yet (rust-schemars-derive 1.2.2-2, whose old
-    #     1.2.2-1 binary librust-serde-derive-internals-dev 0.30.0-4 Breaks),
-    #     and the build that needs it succeeds; still installs from forky alone.
+    #   rebuild: a build dependency whose Raspbian binary is older than
+    #     Raspbian's own source (rust-schemars-derive 1.2.2-2's source, the
+    #     1.2.2-1 binary, which librust-serde-derive-internals-dev 0.30.0-4
+    #     Breaks) is found from apt's message and rebuilt automatically; the
+    #     package still installs from forky alone.
+    #   rebuild-input: the same, named up front with raspbian-rebuild.
     name: build-deb-raspbian-staging (${{ matrix.case }})
     runs-on: ubuntu-24.04-arm
     strategy:
       fail-fast: false
       matrix:
-        case: [fallback, staging-runtime, rebuild]
+        case: [fallback, staging-runtime, rebuild, rebuild-input]
     steps:
       - uses: actions/checkout@v5
 
@@ -416,7 +418,7 @@ jobs:
             fallback) python3 tests/make-source-fixture.py fixture-src --no-changelog --any --build-depends texinfo ;;
             staging-runtime) python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
                                --runtime-depends "perl-base (>= $STAGING_PERL)" ;;
-            rebuild) python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
+            rebuild|rebuild-input) python3 tests/make-source-fixture.py fixture-src --no-changelog --any \
                        --build-depends "librust-schemars-derive-dev (>= 1.2.2-2), librust-serde-derive-internals-dev" ;;
           esac
           grep -E '^(Build-)?Depends' fixture-src/debian/control
@@ -430,17 +432,17 @@ jobs:
           suite: raspbian-forky
           arch: armhf
           source-dir: fixture-src
-          raspbian-rebuild: ${{ matrix.case == 'rebuild' && 'rust-schemars-derive' || '' }}
+          raspbian-rebuild: ${{ matrix.case == 'rebuild-input' && 'rust-schemars-derive' || '' }}
 
       - name: The rebuild was reported
-        if: matrix.case == 'rebuild'
+        if: startsWith(matrix.case, 'rebuild')
         env:
           REBUILT: ${{ steps.build.outputs.rebuilt }}
         run: |
           set -eu
           echo "rebuilt: $REBUILT"
-          case "$REBUILT" in
-            "rust-schemars-derive "*) ;;
+          case " $REBUILT " in
+            *" rust-schemars-derive "*) ;;
             *) echo "::error::rust-schemars-derive should be listed as rebuilt"; exit 1 ;;
           esac
 
@@ -483,7 +485,7 @@ jobs:
           set -eu
           echo "case $CASE, install test $OUTCOME, staging newer: $STAGING_NEWER"
           case "$CASE" in
-            fallback|rebuild) test "$OUTCOME" = success ;;
+            fallback|rebuild|rebuild-input) test "$OUTCOME" = success ;;
             staging-runtime)
               if [ "$STAGING_NEWER" = true ]; then
                 test "$OUTCOME" = failure

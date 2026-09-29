@@ -538,10 +538,18 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
   then, never dropped:
   - `build-deb` installs the build dependencies from `<codename>` first,
     and only if that fails adds `<codename>-staging` (signed with the same
-    archive key) and tries once more
+    archive key) and tries again
     ([`build-deb/raspbian/build-dep.sh`](../build-deb/raspbian/build-dep.sh));
-  - what came from staging is listed in the step summary, a warning and
-    `build-deb`'s `from-staging` output;
+  - Raspbian's builders also lag behind source uploads: on 2026-09-29,
+    forky-staging had 920 source packages newer than their armhf binary
+    (91 of them Rust crates), and an old binary can be what another package
+    Breaks. While the build dependencies still don't install, `build-deb`
+    rebuilds, from Raspbian's own signed sources, the packages apt's message
+    names whose source is newer than their binary (with the `nocheck`
+    profile), and tries again. `raspbian-rebuild` names sources to rebuild
+    up front;
+  - what came from staging or was rebuilt is listed in the step summary, a
+    warning and `build-deb`'s `from-staging` and `rebuilt` outputs;
   - staging is only ever in the build's own container. The install test
     runs in a clean container of the image, which has `<codename>` alone,
     so a package needing anything only staging has (a library version

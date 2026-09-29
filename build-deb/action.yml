@@ -468,7 +468,7 @@ runs:
             # Build dependencies come from debian/control (docs/packaging.md,
             # "Builds"); a Raspbian suite falls back to <codename>-staging
             # when it alone cannot satisfy them (build-deb/raspbian/build-dep.sh).
-            sh /work/apt-repo-action/build-deb/raspbian/build-dep.sh "$RASPBIAN" /work/notes
+            bash /work/apt-repo-action/build-deb/raspbian/build-dep.sh "$RASPBIAN" /work/notes
             # git refuses to read a tree owned by another user.
             git config --global --add safe.directory "*"
             read -ra version_args <<< "$VERSION_ARGS"
