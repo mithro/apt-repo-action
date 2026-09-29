@@ -5,7 +5,9 @@ name: Sync a mirror
 # (scripts/sync-mirror.py), and when `[mirror] build` moved, starts the
 # repository's deb.yml on its default branch, which builds and publishes it.
 # A push made with the workflow's own token starts no workflow by itself, so
-# this has to.
+# this has to. With [[mirror.patches]], it first checks our patches still
+# apply to the new upstream tip; if one doesn't, it starts no build and
+# opens (or comments on) an issue instead.
 #
 # A mirror repository's .github/workflows/sync-upstream.yml is then:
 #
@@ -17,16 +19,19 @@ name: Sync a mirror
 #   permissions:
 #     contents: write         # push the copies
 #     actions: write          # start deb.yml
+#     issues: write           # with [[mirror.patches]]: say when one doesn't apply
 #   concurrency:
 #     group: sync-upstream
 #     cancel-in-progress: false
 #   jobs:
 #     sync:
 #       uses: mithro/apt-repo-action/.github/workflows/sync-mirror.yml@main
+#       # secrets:
+#       #   token: ${{ secrets.MIRROR_TOKEN }}   # see `token` below
 #
-# The caller must grant both permissions: a reusable workflow can only narrow
-# the token it is given, and a caller that grants less ends in
-# startup_failure.
+# The workflow runs with the permissions the caller grants (it asks for
+# none of its own, so a caller's issues: write reaches it); a caller that
+# grants less fails where it needs them.
 
 on:
   workflow_call:
@@ -36,14 +41,19 @@ on:
         type: string
         required: false
         default: .github/apt-packaging.toml
+    secrets:
+      token:
+        description: >-
+          Optional. A token that pushes the copies instead of the workflow's
+          own, which GitHub won't let create or change .github/workflows/
+          files: an upstream that has any (most on GitHub) needs a GitHub App
+          token or a fine-grained token with Contents and Workflows write. A
+          repository secret, set by the repository's owner.
+        required: false
     outputs:
       build:
-        description: '"true" when the built branch moved, and deb.yml was started.'
+        description: '"true" when the built branch moved (and our patches apply), and deb.yml was started.'
         value: ${{ jobs.sync.outputs.build }}
-
-permissions:
-  contents: write
-  actions: write
 
 jobs:
   sync:
@@ -51,11 +61,28 @@ jobs:
     outputs:
       build: ${{ steps.mirror.outputs.build }}
     steps:
+      # A scheduled run's event has no repository, so
+      # github.event.repository.default_branch is empty there: ask the API.
+      - name: The default branch
+        id: default
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          if [ -z "$branch" ]; then
+            echo "::error::couldn't read $GITHUB_REPOSITORY's default branch"
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
       # The default branch, whatever ref started the run: the declaration,
-      # and what "ours" means, are the default branch's.
+      # and what "ours" means, are the default branch's. With its history,
+      # to tell our tags from upstream's and check our patches.
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ steps.default.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.token || github.token }}
       - name: Check out apt-repo-action, at this workflow's commit
         uses: actions/checkout@v5
         with:
@@ -67,11 +94,39 @@ jobs:
         id: mirror
         env:
           DECLARATION: ${{ inputs.declaration }}
-          DEFAULT: ${{ github.event.repository.default_branch }}
-        run: python3 .apt-repo-action/scripts/sync-mirror.py --declaration "$DECLARATION" --default "$DEFAULT"
+          DEFAULT: ${{ steps.default.outputs.branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 .apt-repo-action/scripts/sync-mirror.py --declaration "$DECLARATION" --default "$DEFAULT"
       - name: Build and publish
         if: steps.mirror.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          DEFAULT: ${{ github.event.repository.default_branch }}
-        run: gh workflow run deb.yml --ref "$DEFAULT" --repo "$GITHUB_REPOSITORY"
+          DEFAULT: ${{ steps.default.outputs.branch }}
+        run: |
+          if ! gh workflow run deb.yml --ref "$DEFAULT" --repo "$GITHUB_REPOSITORY"; then
+            # The copies are already pushed, so the next sync sees nothing
+            # new: start the build by hand.
+            echo "::error::couldn't start deb.yml. The copies are pushed, so the next sync won't start it either: run \"Debian packages\" on $DEFAULT by hand."
+            exit 1
+          fi
+      - name: Say our patches don't apply
+        if: steps.mirror.outputs.patch-conflict != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFLICT: ${{ steps.mirror.outputs.patch-conflict }}
+        run: |
+          set -eu
+          title="Mirror: our patches don't apply to upstream"
+          body="$CONFLICT
+
+          The sync copied upstream, but didn't start the build, so the last good package stays published. Rebase the patch branch onto the built branch (tag its old tip archive/patches/<topic>/<date> first) and move its pin in .github/apt-packaging.toml (docs/packaging.md in mithro/apt-repo-action, \"Our own patches on a mirror\").
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
