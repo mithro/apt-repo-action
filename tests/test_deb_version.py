@@ -415,6 +415,33 @@ class Tree(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("43.0.0-3+deb13u2, not --upstream-debian-version 43.0.0-3+deb13u1", r.stderr)
 
+    def test_debian_source_with_an_epoch(self):
+        # A Debian source with an epoch: its changelog says 1:2.3-1, the flag
+        # takes 2.3-1 and the epoch goes in --epoch. They match only when our
+        # epoch is Debian's.
+        fetched = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fetched)
+        (fetched / "debian").mkdir()
+        (fetched / "debian/control").write_text(CONTROL)
+        debian = PLACEHOLDER.replace("selftest-src (0.0)", "selftest-src (1:2.3-1)")
+
+        def run(*epoch):
+            (fetched / "debian/changelog").write_text(debian)
+            return subprocess.run(["python3", str(SCRIPT), "--source-dir", str(fetched),
+                                   "--version-tree", str(self.src), "--suite", "trixie",
+                                   "--upstream-debian-version", "2.3-1", *epoch,
+                                   "--owner-tag", "welland", "--write-changelog"],
+                                  env=self.env, capture_output=True, text=True)
+
+        r = run("--epoch", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "1:2.3-1+welland.0.0.post1~deb13")
+        for epoch in [[], ["--epoch", "2"]]:
+            with self.subTest(epoch=epoch):
+                r = run(*epoch)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("is for 1:2.3-1, not --upstream-debian-version", r.stderr)
+
     def test_nfpm_tree_has_no_debian(self):
         # A Go repository packaged with nfpm has no debian/: printing the
         # version needs none, writing a changelog does.

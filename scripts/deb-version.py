@@ -339,9 +339,14 @@ def main() -> None:
     version = with_suffixes(package_version(base_version(tree), upstream, args.owner_tag,
                                             args.epoch, debian_source), args.suite, args.pr)
     if args.write_changelog:
+        # The fetched changelog carries Debian's epoch, which the flag can't
+        # (check_debian_version refuses it; it goes in --epoch): compare with
+        # both, so our epoch must also be Debian's.
+        pinned = args.upstream_debian_version
+        if pinned is not None and args.epoch is not None:
+            pinned = f"{args.epoch}:{pinned}"
         write_changelog(args.source_dir, tree, version, args.suite,
-                        args.repo or github_repository(tree),
-                        fetched=args.upstream_debian_version)
+                        args.repo or github_repository(tree), fetched=pinned)
     print(version)
 
 
