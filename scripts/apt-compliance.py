@@ -550,7 +550,7 @@ def target(f: dict, owner_tag: str | None) -> dict:
         if not isinstance(raw, list) or not all(isinstance(d, dict) for d in raw):
             raise apt_sources.Error("`depends` must be an array of tables, [[depends]]")
         # `bundle = true` only for a repository of this one's owner.
-        t["depends"], t["depends_error"] = apt_sources.validate(raw, owner=f["repo"].split("/")[0]), None
+        t["depends"], t["depends_error"] = apt_sources.validate(raw, owner=(f.get("repo") or "").split("/")[0] or None), None
     except apt_sources.Error as e:
         t["depends"], t["depends_error"] = [], str(e)
     return t
