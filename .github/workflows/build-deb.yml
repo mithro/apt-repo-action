@@ -227,7 +227,11 @@ jobs:
           path: .apt-repo-action
       - uses: actions/download-artifact@v8
         with:
-          pattern: debs-${{ matrix.suite }}-*
+          # Exactly this workflow's debs-<suite>-<arch> artifacts: a name
+          # with anything after the architecture (publish-apt also collects
+          # debs-<suite>-<arch>-<more>) is someone else's. download-artifact
+          # matches with minimatch, whose +(...) is "one or more of".
+          pattern: debs-${{ matrix.suite }}-+([a-z0-9])
           path: downloaded
           merge-multiple: true
       - name: The packages this architecture installs
