@@ -104,6 +104,10 @@ def main() -> None:
     ap.add_argument("--declare-only", action="store_true", help="declare it, but don't build-depend on it")
     ap.add_argument("--bundle", action="store_true", help="depend on it at run time too, and bundle it")
     ap.add_argument("--any", action="store_true", help="add an architecture-dependent package")
+    ap.add_argument("--build-depends", metavar="RELATIONS",
+                    help="more Build-Depends, e.g. texinfo (a Raspbian staging fallback case)")
+    ap.add_argument("--runtime-depends", metavar="RELATIONS",
+                    help="a Depends for the Architecture: all package, e.g. perl (>= 5.42.3)")
     args = ap.parse_args()
     if bool(args.depends) != bool(args.depends_key):
         ap.error("--depends and --depends-key go together")
@@ -122,6 +126,16 @@ def main() -> None:
                 "Package: apt-repo-selftest-src\nArchitecture: all\nDepends: apt-repo-selftest-dep\n")
     if args.any:
         files.update({name: (HELLO / name).read_text() for name in HELLO_FILES})
+    # After --any, whose debian/control replaces the default one.
+    if args.build_depends:
+        files["debian/control"] = files["debian/control"].replace(
+            "Build-Depends: debhelper-compat (= 13)",
+            f"Build-Depends: debhelper-compat (= 13), {args.build_depends}", 1)
+    if args.runtime_depends:
+        control = files["debian/control"]
+        head = "Package: apt-repo-selftest-src\nArchitecture: all\n"
+        assert head in control, "the fixture's control has no apt-repo-selftest-src stanza"
+        files["debian/control"] = control.replace(head, f"{head}Depends: {args.runtime_depends}\n", 1)
     if args.legacy:
         files["packaging/deb-version.py"] = LEGACY
     if args.no_changelog:
