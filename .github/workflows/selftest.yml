@@ -493,6 +493,58 @@ jobs:
               fi ;;
           esac
 
+  build-deb-raspbian-rust:
+    # Raspbian's ARMv6 rustc (trixie's 1.85, forky's) hangs under the arm64
+    # kernel's CP15 barrier emulation, so build-deb runs the barriers in
+    # hardware (abi.cp15_barrier = 2) on an arm64 runner. Here cargo builds
+    # a small crate in each Raspbian suite, natively on the arm runner, in
+    # the image build-deb prepared, with a timeout well under a hang.
+    name: build-deb-raspbian-rust (${{ matrix.suite }})
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [raspbian-trixie, raspbian-forky]
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src --no-changelog
+      - name: The suite's image, as build-deb prepares it
+        id: prep
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: armhf
+          source-dir: fixture-src
+          build: "false"
+      - name: CP15 barriers run in hardware
+        run: |
+          set -eu
+          v=$(cat /proc/sys/abi/cp15_barrier)
+          echo "abi.cp15_barrier: $v"
+          test "$v" = 2
+      - name: cargo builds and runs a crate
+        env:
+          IMAGE: ${{ steps.prep.outputs.image }}
+          PLATFORM: ${{ steps.prep.outputs.platform }}
+        run: |
+          docker run --rm --platform "$PLATFORM" "$IMAGE" bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends rustc cargo > /dev/null
+            rustc -vV | head -2
+            cd /tmp
+            cargo new --quiet hello
+            cd hello
+            # Threads and channels, as rustc itself uses them.
+            printf "%s\n" "use std::sync::mpsc;" "fn main() {" \
+              "  let (tx, rx) = mpsc::channel();" \
+              "  let h: Vec<_> = (0..4).map(|i| { let tx = tx.clone(); std::thread::spawn(move || tx.send(i).unwrap()) }).collect();" \
+              "  drop(tx); for t in h { t.join().unwrap(); }" \
+              "  println!(\"hello from rust, {} messages\", rx.iter().count());" \
+              "}" > src/main.rs
+            timeout -s KILL 300 cargo build --offline --release
+            ./target/release/hello'
+
   build-deb-refuses:
     runs-on: ubuntu-24.04
     steps:

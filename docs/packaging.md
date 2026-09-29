@@ -806,6 +806,10 @@ that sorts wrongly. Each one is a recorded exception.
     [dependency repositories](#dependency-repositories); a Raspbian suite
     whose build dependencies it alone can't satisfy falls back to
     `<codename>-staging`, which [Suites](#suites) describes;
+  - on an arm64 runner, runs Raspbian's ARMv6 memory barriers in hardware
+    (`abi.cp15_barrier = 2`): under the kernel's default emulation,
+    Raspbian trixie's and forky's rustc never finish (see
+    [ARMv6 memory barriers](../build-deb/raspbian/README.md#armv6-memory-barriers-on-an-arm64-runner));
   - in a Raspbian root (trixie on), apt accepts signing keys bound with
     SHA-1 self-signatures, as Raspbian's own key is; apt can't limit that
     to one source, so it applies to a dependency repository declared for a

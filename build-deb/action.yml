@@ -377,6 +377,38 @@ runs:
         IMAGE: ${{ steps.plan.outputs.image }}
       run: docker import --platform linux/arm/v6 "$TAR" "$IMAGE"
 
+    # Raspbian is built for ARMv6, which has no dmb instruction: its code
+    # (rustc and cargo among it) issues memory barriers as the CP15
+    # operation mcr p15, 0, rX, c7, c10, 5. An arm64 kernel running AArch32
+    # code traps and emulates those by default (abi.cp15_barrier = 1), and
+    # under that emulation Raspbian trixie's and forky's rustc spin forever
+    # in their codegen coordinator: a hello world never finishes, where the
+    # same binaries take 2 s under QEMU and under 1 s with the barriers run
+    # by the CPU itself (abi.cp15_barrier = 2, which every ARMv8 CPU with
+    # AArch32 supports). So that is what a Raspbian build gets. It is a
+    # setting of the runner's kernel, not of the container, and GitHub's
+    # runners are thrown away after the job; on a self-hosted runner it
+    # stays set. Failing to set it fails the build: it would otherwise hang
+    # until the job's timeout.
+    - name: Let ARMv6 code run its CP15 barriers in hardware
+      if: steps.plan.outputs.raspbian != '' && runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        set -eu
+        f=/proc/sys/abi/cp15_barrier
+        if [ ! -e "$f" ]; then
+          echo "this kernel has no $f: nothing to set"
+          exit 0
+        fi
+        was=$(cat "$f")
+        if [ "$was" != 2 ]; then
+          if ! sudo sysctl -w abi.cp15_barrier=2; then
+            echo "::error::couldn't set abi.cp15_barrier to 2 (it is $was): Raspbian's ARMv6 rustc hangs under the kernel's CP15 barrier emulation (build-deb/action.yml, this step)"
+            exit 1
+          fi
+        fi
+        echo "abi.cp15_barrier: $was -> $(cat "$f")"
+
     - name: Build
       id: build
       if: inputs.build == 'true'
