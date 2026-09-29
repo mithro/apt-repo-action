@@ -1,11 +1,15 @@
 name: Self-test (bundling into Raspbian)
 
 # An Architecture: all repository that bundles an architecture-dependent
-# dependency into its Raspbian suites (docs/packaging.md, "Suites"), through
-# the reusable build-deb.yml. A workflow of its own: a run's artifacts are
-# shared by all its jobs, and build-deb.yml's install test takes every
-# debs-<suite>-<arch> artifact of its suite, so this fixture's trixie build
-# would otherwise land in the Self-test workflow's hello install test.
+# dependency into its Raspbian suite (docs/packaging.md, "Suites"), end to
+# end: an ARMv6 host that adds only our repository gets the dependency's
+# Raspbian build. Everything is made here: the dependency repository is a
+# throwaway, signed with a throwaway key and served from this runner on the
+# docker bridge, so no live site can turn this red. That needs one job (a
+# dependency served from one job can't be reached from another's runner), so
+# the steps are build-deb.yml's for this case, done by hand: build the
+# Debian suite once (build-matrix.py's `also`), serve the same files for
+# raspbian-<codename>, bundle, sign, install-test in the Raspbian root.
 
 on:
   push:
@@ -16,33 +20,206 @@ permissions:
   contents: read
 
 jobs:
-  reusable-build-bundle:
-    # An Architecture: all repository bundling an architecture-dependent
-    # dependency (tests/fixtures/hello-bundle, which bundles go-tmux-saver,
-    # one of ours with an ARMv6 raspbian-trixie suite): trixie is built once,
-    # the same files serve raspbian-trixie, and each suite's install test
-    # installs the bundled dependency and runs it -- raspbian-trixie in the
-    # Raspbian root, with go-tmux-saver's Raspbian build.
-    uses: ./.github/workflows/build-deb.yml
-    with:
-      source-dir: tests/fixtures/hello-bundle
-
-  reusable-build-bundle-check:
-    needs: reusable-build-bundle
-    runs-on: ubuntu-24.04
+  bundle-into-raspbian:
+    # armhf, the Raspbian root included, runs natively on the arm runners.
+    runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v5
         with:
-          pattern: debs-*trixie-all
-          path: artifacts
-      - name: raspbian-trixie has exactly trixie's packages
-        env:
-          SUITES: ${{ needs.reusable-build-bundle.outputs.suites }}
+          fetch-depth: 0  # versions come from this repository's git describe
+
+      - name: Throwaway keys, the dependency repository's and ours
+        id: keys
         run: |
           set -eu
-          echo "suites: $SUITES"
-          test "$SUITES" = "trixie raspbian-trixie"
-          ls -l artifacts/*
-          (cd artifacts/debs-trixie-all && sha256sum -- *.deb) > trixie.sums
-          (cd artifacts/debs-raspbian-trixie-all && sha256sum -c ../../trixie.sums)
-          test "$(ls artifacts/debs-raspbian-trixie-all | wc -l)" = "$(ls artifacts/debs-trixie-all | wc -l)"
+          tests/make-fixture.sh "$RUNNER_TEMP/unused-dep" trixie "$RUNNER_TEMP/dep.asc"
+          tests/make-fixture.sh "$RUNNER_TEMP/unused-ours" trixie "$RUNNER_TEMP/ours.asc"
+          {
+            echo "dep-key<<END_OF_KEY"; cat "$RUNNER_TEMP/dep.asc"; echo "END_OF_KEY"
+            echo "our-key<<END_OF_KEY"; cat "$RUNNER_TEMP/ours.asc"; echo "END_OF_KEY"
+          } >> "$GITHUB_OUTPUT"
+
+      # The dependency: tests/fixtures/hello's apt-repo-selftest-hello, an
+      # architecture-dependent command whose --cpu-arch prints the ARM
+      # architecture it was compiled for. Built twice: Raspbian's ARMv6 for
+      # raspbian-trixie, Debian's ARMv7 for trixie. arch-all: false leaves
+      # out its Architecture: all package, whose name is our fixture's too.
+      # Each build gets its own copy of the tree (inside this checkout, so
+      # the version still comes from git).
+      - name: Two copies of the dependency's source
+        run: |
+          set -eu
+          cp -r tests/fixtures/hello dep-src-raspbian
+          cp -r tests/fixtures/hello dep-src-debian
+      - name: Build the dependency for raspbian-trixie (ARMv6)
+        uses: ./build-deb
+        with:
+          suite: raspbian-trixie
+          arch: armhf
+          arch-all: "false"
+          source-dir: dep-src-raspbian
+          out-dir: dep-repo/raspbian-trixie
+          lintian: "off"
+      - name: Build the dependency for trixie (ARMv7)
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: armhf
+          arch-all: "false"
+          source-dir: dep-src-debian
+          out-dir: dep-repo/trixie
+          lintian: "off"
+      - name: Only the command in the dependency repository
+        run: |
+          set -eu
+          find dep-repo -name '*-dbgsym_*.deb' -print -delete
+          ls -l dep-repo/*
+
+      - name: Index and sign the dependency repository
+        uses: ./
+        with:
+          apt-root: dep-repo
+          suites: trixie raspbian-trixie
+          gpg-private-key: ${{ steps.keys.outputs.dep-key }}
+
+      - name: Serve it on the docker bridge
+        id: serve
+        run: |
+          set -eu
+          head -8 dep-repo/raspbian-trixie/Release
+          grep -qx 'Codename: raspbian-trixie' dep-repo/raspbian-trixie/Release
+          host=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          nohup python3 -m http.server -d dep-repo -b "$host" 8768 > dep-server.log 2>&1 &
+          for _ in $(seq 30); do
+            if curl -fsS -o /dev/null "http://$host:8768/raspbian-trixie/InRelease"; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null "http://$host:8768/raspbian-trixie/InRelease"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
+      # Ours: tests/fixtures/hello-bundle, Architecture: all, depending on
+      # apt-repo-selftest-hello. Its declaration names the served repository.
+      - name: Our source tree, bundling the dependency repository
+        env:
+          HOST: ${{ steps.serve.outputs.host }}
+        run: |
+          set -eu
+          cp -r tests/fixtures/hello-bundle our-src
+          mkdir -p our-src/.github
+          cat > our-src/.github/apt-packaging.toml <<EOF
+          kind = "B"
+          architectures = "all"
+          suites = ["trixie", "raspbian-trixie"]
+
+          [[depends]]
+          name = "apt-repo-selftest-dep"
+          url = "http://$HOST:8768/{suite}/"
+          suite = "./"
+          key = "http://$HOST:8768/apt-repo-action.gpg"
+          bundle = "third-party"
+          reason = "self-test: a bundled architecture-dependent dependency"
+          EOF
+          cat our-src/.github/apt-packaging.toml
+
+      - name: The plan builds trixie once, and serves raspbian-trixie from it
+        run: |
+          set -eu
+          python3 scripts/build-matrix.py --source-dir our-src --github-output plan.txt
+          cat plan.txt
+          python3 - <<'EOF'
+          import json
+          plan = dict(l.split("=", 1) for l in open("plan.txt").read().splitlines())
+          build = json.loads(plan["build"])
+          assert build == [{"suite": "trixie", "arch": "all", "runner": "ubuntu-24.04",
+                            "arch-all": "true", "also": "raspbian-trixie"}], build
+          assert plan["suites"] == "trixie raspbian-trixie", plan["suites"]
+          install = json.loads(plan["install"])
+          assert {"suite": "raspbian-trixie", "arch": "armhf", "runner": "ubuntu-24.04-arm"} in install
+          EOF
+
+      - name: Build ours
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: our-src
+          out-dir: built-debs
+
+      # What publish-apt does with the build's artifacts: the job's debs go
+      # to trixie and, being its `also`, to raspbian-trixie; then each suite
+      # bundles from the dependency repository's suite of the same name.
+      - name: Collect and bundle, as publish-apt does
+        run: |
+          set -eu
+          for suite in trixie raspbian-trixie; do
+            mkdir -p "apt-repo/$suite"
+            cp built-debs/*.deb "apt-repo/$suite/"
+            python3 scripts/bundle-depends.py fetch --declaration our-src/.github/apt-packaging.toml \
+              --suite "$suite" --debs "apt-repo/$suite"
+          done
+          ls -l apt-repo/*
+
+      - name: Index and sign ours
+        uses: ./
+        with:
+          apt-root: apt-repo
+          suites: trixie raspbian-trixie
+          gpg-private-key: ${{ steps.keys.outputs.our-key }}
+
+      - name: Each suite advertises its own architectures, and marks the bundle
+        env:
+          HOST: ${{ steps.serve.outputs.host }}
+        run: |
+          set -eu
+          for suite in trixie raspbian-trixie; do
+            echo "== $suite"; grep '^Architectures:' "apt-repo/$suite/Release"
+            grep -qx 'Architectures: all armhf' "apt-repo/$suite/Release"
+            mark=$(awk -v RS= '/(^|\n)Package: apt-repo-selftest-hello\n/' "apt-repo/$suite/Packages" \
+              | sed -n 's/^Bundled-From: //p')
+            echo "Bundled-From: $mark"
+            test "$mark" = "http://$HOST:8768/$suite/"
+          done
+          # The Raspbian suite has the dependency's Raspbian build, not Debian's.
+          cmp "apt-repo/raspbian-trixie/$(basename dep-repo/raspbian-trixie/apt-repo-selftest-hello_*_armhf.deb)" \
+            dep-repo/raspbian-trixie/apt-repo-selftest-hello_*_armhf.deb
+
+      - name: Serve ours
+        env:
+          HOST: ${{ steps.serve.outputs.host }}
+        run: |
+          set -eu
+          nohup python3 -m http.server -d apt-repo -b "$HOST" 8769 > our-server.log 2>&1 &
+          for _ in $(seq 30); do
+            if curl -fsS -o /dev/null "http://$HOST:8769/raspbian-trixie/InRelease"; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null "http://$HOST:8769/raspbian-trixie/InRelease"
+
+      # The Raspbian (ARMv6) root build-deb uses; nothing is built here.
+      - name: Prepare the Raspbian root
+        id: root
+        uses: ./build-deb
+        with:
+          suite: raspbian-trixie
+          arch: armhf
+          source-dir: our-src
+          build: "false"
+
+      - name: Install test, in the Raspbian root, from our repository alone
+        env:
+          HOST: ${{ steps.serve.outputs.host }}
+          IMAGE: ${{ steps.root.outputs.image }}
+          PLATFORM: ${{ steps.root.outputs.platform }}
+        run: |
+          set -eu
+          docker run --rm --platform "$PLATFORM" -e HOST \
+            -v "$PWD/apt-repo/apt-repo-action.gpg:/usr/share/keyrings/ours.gpg:ro" \
+            -v "$PWD/our-src:/src:ro" "$IMAGE" sh -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              echo "deb [signed-by=/usr/share/keyrings/ours.gpg] http://$HOST:8769/raspbian-trixie/ ./" \
+                > /etc/apt/sources.list.d/ours.list
+              apt-get update
+              apt-get install -y apt-repo-selftest-bundle
+              sh /src/packaging/install-test.sh | tee /tmp/out
+              # ARMv6: the dependency repository'"'"'s Raspbian build, bundled.
+              test "$(tail -n 1 /tmp/out)" = 6'

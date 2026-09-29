@@ -543,6 +543,10 @@ testing and unstable, plus the Raspbian releases of the same codenames. On
     dependency's `raspbian-<codename>` packages; there is no separate
     Raspbian build, and it is install-tested as armhf in the Raspbian root.
     paramiko-insecure does this for python3-cryptography-insecure.
+  - The dependency repository must publish `raspbian-<codename>` itself:
+    each suite bundles from the dependency's suite of the same name. If it
+    doesn't, the publish fails (its `raspbian-<codename>/InRelease` can't
+    be fetched), rather than serving Raspbian hosts Debian's ARMv7 build.
 - **When Debian makes a release**, this table changes in a pull request:
   1. The new testing is added.
   2. The new oldstable stops being a default. Repositories opted in to

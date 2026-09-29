@@ -1,0 +1,5 @@
+The self-test's Architecture: all source tree that bundles an
+architecture-dependent dependency, apt-repo-selftest-hello (from
+tests/fixtures/hello), into its Raspbian suite. selftest-bundle.yml writes
+its .github/apt-packaging.toml, since the dependency repository's URL is the
+runner's own address.
