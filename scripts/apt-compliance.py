@@ -104,7 +104,7 @@ RULES = [
      "Move the packaging to debian/ at the root of the default branch."),
     ("PKG-CHANGELOG", "Repository", "Set B and mirrors commit no `debian/changelog`, and `.gitignore` lists it",
      "Delete the committed debian/changelog and add `debian/changelog` to .gitignore (the build writes it)."),
-    ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites",
+    ("PKG-DEPENDS", "Repository", f"each `[[depends]]` in {DECLARATION} is well-formed, with a reason and known suites; a bundled one's packages are on the live site",
      f"Fix the [[depends]] entries in {DECLARATION} (docs/packaging.md, \"The declaration\")."),
     ("PKG-WORKFLOW", "Workflow", f"`.github/workflows/{WORKFLOW_FILE}` named `{WORKFLOW_NAME}`",
      f"Rename the build workflow to .github/workflows/{WORKFLOW_FILE} with `name: {WORKFLOW_NAME}`."),
@@ -134,7 +134,7 @@ RULES = [
     ("PKG-DBGSYM", "Packages", "no `-dbgsym` over 10 MB in the apt repository",
      "Keep debug symbols over 10 MB out of apt (artifact and GitHub Release only)."),
     ("PKG-MAINTAINER", "Metadata", "`Maintainer:` is the expected maintainer", "Set Maintainer: in debian/control."),
-    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block for one suite, every published suite named, the key's fingerprint, and each dependency repository's setup",
+    ("PKG-DOCS", "Metadata", "README has `## Install` with the setup block for one suite, every published suite named, the key's fingerprint, and each dependency repository's setup (not a bundled one's)",
      "Give README.md (packaging/README.md for Set A) an `## Install` section with docs/conventions.md's setup block for one suite, a sentence naming every published suite to put in its place, the key's fingerprint, and each dependency repository's setup."),
     ("REPO-PAGES", "Published repository", "Pages built by GitHub Actions, HTTPS enforced",
      "Build Pages from GitHub Actions with HTTPS enforced."),
@@ -428,8 +428,13 @@ def site_facts(site: str, name: str) -> dict:
         code, rel = http(f"{site}/{suite}/Release")
         S["release"] = parse_stanzas(rel.decode(errors="replace"))[0] if code == 200 and rel.strip() else {}
         code, pk = http(f"{site}/{suite}/Packages")
-        S["packages"] = [{k: p.get(k, "") for k in ("Package", "Version", "Architecture", "Size")}
-                         for p in parse_stanzas(pk.decode(errors="replace"))] if code == 200 else []
+        pk = [{k: p.get(k, "") for k in ("Package", "Version", "Architecture", "Size", "Bundled-From")}
+              for p in parse_stanzas(pk.decode(errors="replace"))] if code == 200 else []
+        # Packages bundled from a dependency repository (docs/packaging.md,
+        # "Bundling a dependency repository") are someone else's: every rule
+        # about our packages leaves them out.
+        S["packages"] = [p for p in pk if not p["Bundled-From"]]
+        S["bundled"] = [p for p in pk if p["Bundled-From"]]
         s["suites"][suite] = S
     return s
 
@@ -474,6 +479,21 @@ def repo_facts(d: dict, action_repo: str) -> dict:
 
 # --------------------------------------------------------------------------
 # The declared (or inferred) target for a repository.
+
+def bundle_gaps(depends: list[dict], site: dict | None) -> list[str]:
+    """Each published suite a `bundle` dependency applies to must hold
+    packages bundled from it (docs/packaging.md, "Bundling a dependency
+    repository"): otherwise users of this repository alone can't install."""
+    gaps = []
+    for suite, S in ((site or {}).get("suites") or {}).items():
+        for e in depends:
+            if not e["bundle"] or (e["suites"] is not None and suite not in e["suites"]):
+                continue
+            source = e["repo"] if "repo" in e else apt_sources._dist(e["url"], suite) + "/"
+            if not any(p["Bundled-From"] == source for p in S.get("bundled", [])):
+                gaps.append(f"{suite} bundles nothing from {source}")
+    return gaps
+
 
 def published_versions(f: dict) -> dict[str, dict[str, str]]:
     """suite -> package -> newest published version."""
@@ -1021,6 +1041,8 @@ def docs(doc: str | None, name: str, site: str | None, key: bytes, depends: list
     if unnamed:
         probs.append(f"doesn't name the published suite{'s' if len(unnamed) > 1 else ''} {' '.join(unnamed)}")
     for e in depends:
+        if e.get("bundle"):
+            continue  # served from ours: nothing more to set up
         if "repo" in e:
             dep_site = pages_site(e["repo"])
             probs += [f"dependency {e['name']}: {p}" for p in
@@ -1262,10 +1284,12 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     else:
         # A `repo` dependency is one of ours; say whether it was found as a
         # packaging repository in this scan (it may be another owner's).
-        put("PKG-DEPENDS", True, "; ".join(
+        missing = bundle_gaps(t["depends"], f["site"])
+        put("PKG-DEPENDS", not missing, "; ".join(
             (f"{e['repo']} ({'packaging repository' if e['repo'].lower() in packaging else 'not found in this scan'})"
              if "repo" in e else e["url"]) + (f" for {' '.join(e['suites'])}" if e["suites"] else "")
-            for e in t["depends"]))
+            + (", bundled" if e["bundle"] else "")
+            for e in t["depends"]) + ("" if not missing else " — " + "; ".join(missing)))
 
     # --- Workflow
     publish_uses = f"{args.action_repo}/.github/workflows/publish-apt.yml@"
@@ -1348,9 +1372,11 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         if miss or more:
             arch_bad.append(f"{suite}: " + (f"add {' '.join(miss)}" if miss else "") + (f" drop {' '.join(more)}" if more else ""))
         adv = set(site["suites"][suite]["release"].get("Architectures", "").split())
-        if adv and adv != built:
-            arch_bad.append(f"{suite} advertises {' '.join(sorted(adv - built))} with no packages" if adv - built else
-                            f"{suite} doesn't advertise {' '.join(sorted(built - adv))}")
+        # What the suite holds, bundled packages included.
+        held = built | {p["Architecture"] for p in site["suites"][suite].get("bundled", [])}
+        if adv and adv != held:
+            arch_bad.append(f"{suite} advertises {' '.join(sorted(adv - held))} with no packages" if adv - held else
+                            f"{suite} doesn't advertise {' '.join(sorted(held - adv))}")
     union = sorted({p["Architecture"] for S in site["suites"].values() for p in S["packages"]})
     excepted("PKG-ARCH", not arch_bad, " ".join(union) + (" — " + "; ".join(arch_bad) if arch_bad else ""), t["arch_default"])
     newest = published_versions(f)
