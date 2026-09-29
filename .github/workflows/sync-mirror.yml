@@ -99,8 +99,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           python3 .apt-repo-action/scripts/sync-mirror.py --declaration "$DECLARATION" --default "$DEFAULT"
+      # Even when the sync step failed later (a tag push that failed other
+      # than by a ruleset): it writes `build` as soon as the branches are
+      # pushed, so a build it decided on is never lost.
       - name: Build and publish
-        if: steps.mirror.outputs.build == 'true'
+        if: ${{ !cancelled() && steps.mirror.outputs.build == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT: ${{ steps.default.outputs.branch }}
@@ -112,7 +115,7 @@ jobs:
             exit 1
           fi
       - name: Say our patches don't apply
-        if: steps.mirror.outputs.patch-conflict != ''
+        if: ${{ !cancelled() && steps.mirror.outputs.patch-conflict != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           CONFLICT: ${{ steps.mirror.outputs.patch-conflict }}
