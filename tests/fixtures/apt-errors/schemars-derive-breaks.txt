@@ -1,0 +1,16 @@
+E: Unable to satisfy dependencies. Reached two conflicting assignments:
+   1. librust-schemars-derive-dev:armhf=1.2.2-1 is selected for install because:
+       1. builddeps:./:armhf=1 is selected for install
+       2. builddeps:./:armhf=1 Depends librust-pyo3-dev (>= 0.28)
+       3. librust-pyo3-dev:armhf Depends librust-num-complex-0.4+default-dev (>= 0.4.6)
+       4. librust-num-complex-dev:armhf Depends librust-rkyv-0.8-dev
+       5. librust-rkyv-dev:armhf Depends librust-tinyvec-1+alloc-dev
+       6. librust-tinyvec-dev:armhf Depends librust-schemars-1-dev
+       7. librust-schemars-dev:armhf=1.2.2-2 Depends librust-schemars-derive-1.2+default-dev (>= 1.2.1)
+   2. librust-schemars-derive-dev:armhf=1.2.2-1 is not selected for install because:
+      1-2. librust-pyo3-dev:armhf is selected for install as above
+       3. librust-pyo3-dev:armhf Depends librust-ordered-float-5-dev
+       4. librust-ordered-float-dev:armhf Depends librust-schemars-0.8+default-dev (>= 0.8.8)
+       5. librust-schemars-0.8-dev:armhf=0.8.22-3+b27 Depends librust-schemars-derive-0.8+default-dev (>= 0.8.22)
+       6. librust-schemars-derive-0.8-dev:armhf Depends librust-serde-derive-internals-0.30+default-dev (>= 0.30.0-2)
+       7. librust-serde-derive-internals-dev:armhf Breaks librust-schemars-derive-dev (< 1.2.2-2)
