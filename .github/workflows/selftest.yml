@@ -124,6 +124,160 @@ jobs:
             grep -q 'Placeholder changelog' fixture-src/debian/changelog
           fi
 
+  build-deb-arch:
+    # Architecture-dependent builds: the Raspbian suites (an ARMv6 root
+    # bootstrapped from archive.raspbian.org), Debian armhf, and arch-all:
+    # false. On the arm64 runner armhf runs natively, with no QEMU at all.
+    # Each is installed and run in a clean container of the image it was
+    # built in; --cpu-arch tells an ARMv6 (Raspbian) build from an ARMv7 one.
+    name: build-deb-arch (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.arch-all == 'false' && ' -B' || '' }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: raspbian-bookworm, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb12", cpu: "6", sequoia: none}
+          - {suite: raspbian-trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "6", sequoia: override}
+          - {suite: raspbian-forky, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb14", cpu: "6", sequoia: override}
+          - {suite: trixie, arch: armhf, runner: ubuntu-24.04-arm, want: "0.3.post1~deb13", cpu: "7", sequoia: none}
+          - {suite: sid, arch: amd64, runner: ubuntu-24.04, arch-all: "false", want: "0.3.post1", cpu: none, sequoia: none}
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: python3 tests/make-source-fixture.py fixture-src --no-changelog --any
+
+      - name: Build with this checkout of build-deb
+        id: build
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          arch-all: ${{ matrix.arch-all || 'true' }}
+          source-dir: fixture-src
+
+      - name: Check the packages and their versions
+        env:
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+          ARCH: ${{ matrix.arch }}
+          ARCH_ALL: ${{ matrix.arch-all || 'true' }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          ls built-debs/
+          want="apt-repo-selftest-hello_${WANT}_$ARCH.deb apt-repo-selftest-hello-dbgsym_${WANT}_$ARCH.deb"
+          if [ "$ARCH_ALL" = true ]; then want="$want apt-repo-selftest-src_${WANT}_all.deb"; fi
+          got=$(find built-debs -name '*.deb' -printf '%f\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          want=$(echo "$want" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          echo "built: $got"
+          echo "want:  $want"
+          test "$got" = "$want"
+
+      - name: No QEMU on the arm64 runner
+        if: runner.arch == 'ARM64'
+        run: |
+          ls /proc/sys/fs/binfmt_misc/
+          if compgen -G '/proc/sys/fs/binfmt_misc/qemu-arm*'; then
+            echo "::error::armhf was emulated, although this runner runs it natively"
+            exit 1
+          fi
+
+      # build-deb/raspbian/README.md, "What the override covers": the Sequoia
+      # policy override is in the Raspbian trixie and forky roots, differs
+      # from apt's default in the SHA-1 second-preimage date only, and is in
+      # nothing built and in no Debian image.
+      - name: The Sequoia policy override is only where it should be
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+          SEQUOIA: ${{ matrix.sequoia }}
+        run: |
+          set -eu
+          for f in built-debs/*.deb; do
+            # Listed first, so a dpkg-deb failure fails the step (set -e)
+            # instead of reading as "no policy in it".
+            contents=$(dpkg-deb -c "$f")
+            if printf '%s\n' "$contents" | grep -E 'etc/crypto-policies|apt-sequoia'; then
+              echo "::error::$f carries a crypto policy"
+              exit 1
+            fi
+          done
+          docker run --rm --platform "$PLATFORM" -e SEQUOIA "$IMAGE" sh -ec '
+            o=/etc/crypto-policies/back-ends/apt-sequoia.config
+            d=/usr/share/apt/default-sequoia.config
+            ls /etc/crypto-policies/back-ends/ || true
+            if [ "$SEQUOIA" = none ]; then
+              test ! -e "$o"
+              echo "no override, as expected"
+              exit 0
+            fi
+            # Every line but the sha1 one is the same.
+            rest_d=$(grep -v "^sha1.second_preimage_resistance" "$d")
+            rest_o=$(grep -v "^sha1.second_preimage_resistance" "$o")
+            test "$rest_d" = "$rest_o"
+            grep "^sha1.second_preimage_resistance" "$d" "$o"
+            grep -q "^sha1.second_preimage_resistance = 2030-02-01 " "$o"
+            echo "override: the SHA-1 second-preimage date only"'
+
+      - name: Install test, in a clean container of the build's image
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+          APT_SOURCES: ${{ steps.build.outputs.apt-sources }}
+          WANT: ${{ matrix.want }}
+          PR: ${{ github.event.pull_request.number }}
+          CPU: ${{ matrix.cpu }}
+        run: |
+          set -eu
+          if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
+          echo "image $IMAGE, platform $PLATFORM"
+          docker run --rm --platform "$PLATFORM" -e WANT -e CPU \
+            -v "$APT_SOURCES:/apt-sources:ro" -v "$PWD/built-debs:/debs:ro" "$IMAGE" sh -ec '
+              sh /apt-sources/install.sh
+              apt-get update
+              apt-get install -y /debs/*.deb
+              got=$(apt-repo-selftest-hello --version)
+              echo "$got"
+              test "$got" = "apt-repo-selftest-hello $WANT"
+              cpu=$(apt-repo-selftest-hello --cpu-arch)
+              echo "__ARM_ARCH: $cpu (want $CPU)"
+              test "$cpu" = "$CPU"'
+
+  build-deb-refuses-suite:
+    # Refused before anything is built: Raspbian is armhf only and has no sid.
+    name: build-deb-refuses-suite (${{ matrix.suite }} ${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: raspbian-trixie, arch: all}
+          - {suite: raspbian-trixie, arch: arm64}
+          - {suite: raspbian-sid, arch: armhf}
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tests/make-source-fixture.py fixture-src --no-changelog --any
+      - name: Build it
+        id: build
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          source-dir: fixture-src
+      - name: Check it was refused
+        env:
+          OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::${{ matrix.suite }} ${{ matrix.arch }} was accepted (outcome: $OUTCOME)"
+            exit 1
+          fi
+          if ls built-debs/*.deb; then
+            echo "::error::a package was built"
+            exit 1
+          fi
+
   build-deb-refuses:
     runs-on: ubuntu-24.04
     steps:

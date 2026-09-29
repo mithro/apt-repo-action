@@ -513,9 +513,17 @@ that sorts wrongly. Each one is a recorded exception.
   `deb-version.py`.
 - **`build-deb`** (`uses: mithro/apt-repo-action/build-deb@main`, as the
   `Build` step):
-  - builds in `debian:<suite>`, installing the build dependencies from
+  - builds in `debian:<suite>`, or for `raspbian-<codename>` in a Raspbian
+    root bootstrapped from archive.raspbian.org (see
+    [`build-deb/raspbian/`](../build-deb/raspbian/README.md)), installing the build dependencies from
     `debian/control`, after adding the suite's
     [dependency repositories](#dependency-repositories);
+  - in a Raspbian root (trixie on), apt accepts signing keys bound with
+    SHA-1 self-signatures, as Raspbian's own key is; apt can't limit that
+    to one source, so it applies to a dependency repository declared for a
+    `raspbian-<codename>` suite too. Signatures over repository data still
+    need SHA-2, and nothing built carries the setting (see
+    [What the override covers](../build-deb/raspbian/README.md#what-the-override-covers));
   - takes `arch: all` for a repository whose packages are all
     `Architecture: all`: one build per suite, on the runner's own
     architecture;
