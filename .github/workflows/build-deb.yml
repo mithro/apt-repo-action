@@ -17,7 +17,6 @@ name: Build Debian packages
 #       uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
 #       with:
 #         suites: ${{ needs.build-deb.outputs.suites }}
-#         architectures: ${{ needs.build-deb.outputs.architectures }}
 #       secrets:
 #         gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 #
@@ -107,7 +106,8 @@ on:
       architectures:
         description: >-
           The architectures built, plus "all" when a package is
-          Architecture: all: publish-apt's architectures.
+          Architecture: all. For information: publish-apt advertises each
+          suite's own architectures, read from its packages.
         value: ${{ jobs.plan.outputs.architectures }}
 
 permissions:

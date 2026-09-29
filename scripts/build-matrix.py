@@ -13,7 +13,9 @@ out which suites and architectures to build (docs/packaging.md, "Suites" and
 - ``install``: one install test per suite, on a native architecture;
 - ``suites``: the suites, for publish-apt;
 - ``architectures``: the architectures built, plus ``all`` when a package is
-  architecture-independent: what publish-apt advertises.
+  architecture-independent, across all suites. For information only:
+  publish-apt advertises each suite's own architectures, read from its
+  packages.
 
 The declaration's semantics are packaging.md's: ``architectures`` is "any"
 (the default set), "all" or a list; ``suites`` is "default" or the exact

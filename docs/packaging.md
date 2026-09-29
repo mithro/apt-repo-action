@@ -182,7 +182,9 @@ jobs:
 
   It reads the suites and architectures from
   [the declaration](#the-declaration), so the workflow lists neither, and
-  gives them to `publish-apt` as its outputs `suites` and `architectures`.
+  gives `publish-apt` the suites as its output `suites`. (Its
+  `architectures` output is for information: `publish-apt` advertises each
+  suite's own architectures, read from its packages.)
   Its jobs read `build-deb / build (trixie amd64)` and
   `build-deb / install-test (trixie amd64)`, and it does everything below
   itself: the step names, the artifacts, the install test (on a native
