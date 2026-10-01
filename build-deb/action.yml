@@ -485,13 +485,17 @@ runs:
             if [ "$ARCH" = all ]; then what=-A
             elif [ "$ARCH_ALL" = false ]; then what=-B
             else what=-b; fi
-            # Patches scripts/mirror-patches.py generated (it leaves
-            # debian/patches/.mirror-patches): apply them now, and check every
-            # one was. dpkg-source --before-build skips the whole series, and
-            # exits 0, when the first patch does not apply.
-            if [ -e debian/patches/.mirror-patches ]; then
+            # A series generated from patches kept outside the tree, so none
+            # is applied yet (debian/patches/.generated, which
+            # scripts/mirror-patches.py and a patch series write; an older
+            # mirror-patches.py named it .mirror-patches): apply them now, and
+            # check every one was. dpkg-source --before-build skips the whole
+            # series, and exits 0, when the first patch does not apply, as it
+            # would for a tree with the patches already applied: only what
+            # wrote the series knows which this is.
+            if [ -e debian/patches/.generated ] || [ -e debian/patches/.mirror-patches ]; then
               dpkg-source --before-build .
-              want=$(grep -v -e "^#" -e "^[[:space:]]*$" debian/patches/series || true)
+              want=$(awk '"'"'!/^#/ && NF {print $1}'"'"' debian/patches/series)
               got=
               if [ -f .pc/applied-patches ]; then got=$(cat .pc/applied-patches); fi
               if [ "$got" != "$want" ]; then

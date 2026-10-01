@@ -60,7 +60,7 @@ PATCH = ["patch", "-t", "-F", "0", "-N", "-p1", "-u", "-V", "never", "-b", "-z",
 # In debian/patches beside the series: tells build-deb they were generated,
 # so it checks every one was applied (dpkg-source --before-build returns 0
 # without applying anything when the first patch doesn't apply).
-MARKER = ".mirror-patches"
+MARKER = ".generated"
 
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:

@@ -230,7 +230,7 @@ maintains patch files by hand:
     `export-subst` and `export-ignore`) with dpkg-source's own `patch`
     options before it writes it, and fails on the first that doesn't apply
     (and on a binary change, or an empty file created or deleted);
-  - `build-deb`, given generated patches (`debian/patches/.mirror-patches`),
+  - `build-deb`, given generated patches (`debian/patches/.generated`),
     applies them itself and fails unless `.pc/applied-patches` is the whole
     series.
 - **When upstream moves**, the patches are applied to the new tip as they
@@ -282,6 +282,16 @@ overwritten. Until then, a mirror has one upstream.
     and so a new version.
   - The `debian/` templates may live under `packaging/debian/<name>/`, since
     there is one per fetched project.
+  - A patch series that applies its patches as a `3.0 (quilt)` series,
+    writing `debian/patches/series` into the fetched tree, MUST also write
+    `debian/patches/.generated` beside it. `build-deb` then applies the
+    series itself and fails unless every patch applied: `dpkg-source
+    --before-build` alone skips the whole series, exits 0, and builds the
+    fetched project unpatched when the first patch no longer applies (a pin
+    bump that changed the code it touches). It can't tell that from a tree
+    whose patches are already applied, so only what wrote the series can
+    say. One that applies its patches itself, failing on any that doesn't
+    apply (`git apply`, `patch` with its exit status checked), needs none.
 
 ## Workflows
 

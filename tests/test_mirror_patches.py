@@ -104,7 +104,7 @@ class MirrorPatches(unittest.TestCase):
     def test_a_failed_generate_leaves_nothing(self):
         # Nothing at --out unless every patch applies: a caller that carries
         # on past the failure (continue-on-error) mustn't find a half-written
-        # series without the .mirror-patches marker, which build-deb would
+        # series without the .generated marker, which build-deb would
         # then build without checking.
         self.write("axfr.c", "upstream's own\n", "upstream adds axfr.c")
         out = Path(self.tmp.name) / "patches"
