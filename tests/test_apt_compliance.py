@@ -255,6 +255,33 @@ class Shared(unittest.TestCase):
     def test_reusable_workflow(self):
         self.assertEqual(self.shared(jobs(REUSABLE)), (True, "the reusable build-deb.yml"))
 
+    def test_local_reusable_workflow(self):
+        # fpgas.online-fpga-tools: deb.yml's build-deb job calls build-debs.yml,
+        # whose jobs use the shared actions.
+        caller = jobs("""
+jobs:
+  build-deb:
+    uses: ./.github/workflows/build-debs.yml
+  publish-apt:
+    uses: someone/apt-repo-action/.github/workflows/publish-apt.yml@main
+""")
+        inner = {"jobs": jobs("""
+jobs:
+  build:
+    steps:
+      - uses: someone/apt-repo-action/deb-version@main
+      - run: dpkg-buildpackage -b -us -uc
+""")}
+        self.assertEqual(apc.shared_build(caller, ACTION, False, False, "patch-series", {"build-debs.yml": inner}),
+                         (True, "the deb-version action in its own job"))
+        # Off main inside the called workflow still counts against it.
+        inner["jobs"]["build"]["steps"][0]["uses"] = "someone/apt-repo-action/deb-version@v1"
+        self.assertEqual(apc.shared_build(caller, ACTION, False, False, "patch-series", {"build-debs.yml": inner}),
+                         (False, "deb-version@v1 (want @main)"))
+        # Without the called workflow's text, nothing shared is seen.
+        self.assertEqual(apc.shared_build(caller, ACTION, False, False, "patch-series"),
+                         (False, "own build steps"))
+
     def test_reusable_workflow_off_main(self):
         ok, detail = self.shared(jobs(REUSABLE.replace("build-deb.yml@main", "build-deb.yml@v1")))
         self.assertFalse(ok)
