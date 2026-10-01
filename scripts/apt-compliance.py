@@ -376,6 +376,30 @@ def classify(repos: list[dict], action_repo: str) -> tuple[list[dict], list[dict
     return sorted(packaging, key=lambda d: d["meta"]["full_name"].lower()), sites
 
 
+PULLS = 50  # the most open pull requests a report lists for one repository
+CI_STATE = {"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail", "PENDING": "pending", "EXPECTED": "pending"}
+
+
+def open_pulls(full: str) -> dict:
+    """The repository's open pull requests, oldest first, with the CI state
+    of each one's head: pass, fail, pending, or none (no checks ran)."""
+    owner, name = full.split("/")
+    data = graphql(
+        f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{"
+        f" pullRequests(states: OPEN, first: {PULLS}, orderBy: {{field: CREATED_AT, direction: ASC}}) {{ totalCount"
+        " nodes { number title url isDraft baseRefName reviewDecision"
+        " commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }")
+    prs = (data.get("repository") or {}).get("pullRequests") or {}
+    return {"total": prs.get("totalCount", 0), "pulls": [pull(n) for n in prs.get("nodes") or []]}
+
+
+def pull(n: dict) -> dict:
+    head = ((n.get("commits") or {}).get("nodes") or [{}])[-1].get("commit") or {}
+    state = (head.get("statusCheckRollup") or {}).get("state")
+    return {"number": n["number"], "title": n["title"], "url": n["url"], "draft": n["isDraft"],
+            "base": n["baseRefName"], "review": n.get("reviewDecision"), "ci": CI_STATE.get(state, "none")}
+
+
 def local_files(path: Path) -> list[str]:
     """The files of a checkout that a commit of everything would hold:
     tracked ones and untracked ones git doesn't ignore."""
@@ -474,6 +498,7 @@ def repo_facts(d: dict, action_repo: str) -> dict:
     f["pages"] = pages or {}
     site = ((pages or {}).get("html_url") or "").rstrip("/")
     f["site"] = site_facts(site, f["name"]) if site else None
+    f["pulls"] = open_pulls(full)
     return f
 
 
@@ -1524,6 +1549,12 @@ def to_markdown(report: dict) -> str:
                 f"{len(fails)} failing.", ""]
         out += [f"- [ ] **{k}** {todo(k, r['checks'][k], report['action_repo'])}" for k in fails] or ["All rules pass."]
         out.append("")
+        if r["open_pulls"]:
+            out += ["Open pull requests:", ""]
+            out += [f"- [#{p['number']}]({p['url']}) {p['title']} ({pull_state(p)})" for p in r["open_pulls"]]
+            more = r["open_pulls_total"] - len(r["open_pulls"])
+            out += [f"- and {more} more"] if more > 0 else []
+            out.append("")
     if report["sites_without_packaging"]:
         out += ["## Sites without packaging", ""]
         out += [f"- {s['repo']}: {s['site']} serves an apt key ({' '.join(s['suites']) or 'no suites'})"
@@ -1578,9 +1609,35 @@ tr.kind-aggregate td.kind{color:var(--kind-aggregate)}tr.kind-mirror td.kind{col
 .k{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:4px}
 .k-A{background:var(--kind-A)}.k-B{background:var(--kind-B)}.k-aggregate{background:var(--kind-aggregate)}.k-mirror{background:var(--kind-mirror)}
 .rules{font-size:14px}.rules td{text-align:left;white-space:normal}.rules td:first-child{white-space:nowrap}
+thead th.prs{writing-mode:horizontal-tb;transform:none}td.prs{text-align:left}
+.pr{display:inline-block;padding:0 5px;margin-right:4px;border-radius:4px;border:1px solid transparent;
+font:600 12px "IBM Plex Mono",ui-monospace,monospace;text-decoration:none}
+.pr.ci-pass{color:var(--pass);background:var(--pass-bg)}.pr.ci-fail{color:var(--fail);background:var(--fail-bg)}
+.pr.ci-pending{color:var(--exc);background:var(--exc-bg)}.pr.ci-none{color:var(--muted);border-color:var(--line)}
+.pr.draft{border-style:dashed;border-color:currentColor}.pr:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.todo .pulls{display:grid;gap:4px;font-size:14px}.todo .pulls span{color:var(--muted);font-size:13px}
 """
 KIND_ORDER = {"A": 0, "mirror": 1, "B": 2, "aggregate": 3}
 SYMBOL = {"pass": "✓", "fail": "✗", "exception": "E", "na": "·"}
+CI_WORDS = {"pass": "CI passing", "fail": "CI failing", "pending": "CI running", "none": "no CI"}
+REVIEW_WORDS = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes requested"}
+
+
+def pull_state(p: dict) -> str:
+    """`CI passing, draft, approved`: how far a pull request is from merging."""
+    return ", ".join([CI_WORDS[p["ci"]]] + (["draft"] if p["draft"] else [])
+                     + ([REVIEW_WORDS[p["review"]]] if p.get("review") in REVIEW_WORDS else []))
+
+
+def pull_chip(p: dict) -> str:
+    e = html.escape
+    return (f'<a class="pr ci-{e(p["ci"])}{" draft" if p["draft"] else ""}" href="{e(p["url"])}" '
+            f'title="#{p["number"]} {e(p["title"])} ({e(pull_state(p))})">#{p["number"]}</a>')
+
+
+def pulls_cell(r: dict) -> str:
+    more = r["open_pulls_total"] - len(r["open_pulls"])
+    return "".join(pull_chip(p) for p in r["open_pulls"]) + (f" +{more}" if more > 0 else "")
 
 
 def to_html(report: dict) -> str:
@@ -1588,6 +1645,7 @@ def to_html(report: dict) -> str:
     repos = report["repos"]
     fails = sum(c["status"] == "fail" for r in repos for c in r["checks"].values())
     clean = sum(all(c["status"] != "fail" for c in r["checks"].values()) for r in repos)
+    pulls = sum(r["open_pulls_total"] for r in repos)
     groups = list(dict.fromkeys(r[1] for r in RULES))
     out = ['<title>Apt Repository Compliance</title>',
            '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700'
@@ -1600,6 +1658,7 @@ def to_html(report: dict) -> str:
            f'<div><b>{len(repos)}</b><span>packaging repositories</span></div>'
            f'<div><b>{clean}</b><span>passing every rule</span></div>'
            f'<div><b>{fails}</b><span>failing checks</span></div>'
+           f'<div><b>{pulls}</b><span>open pull requests</span></div>'
            f'<div><b>{len(report["sites_without_packaging"])}</b><span>sites without packaging</span></div></div>',
            '<div class="legend"><span><span class="s pass">✓</span> passes</span><span><span class="s fail">✗</span> fails</span>'
            '<span><span class="s exception">E</span> declared exception</span><span><span class="s na">·</span> does not apply</span></div>'
@@ -1607,11 +1666,15 @@ def to_html(report: dict) -> str:
            '<span><span class="k k-mirror"></span>mirror, someone else\'s code copied exactly</span>'
            '<span><span class="k k-B"></span>Set B, our code</span>'
            '<span><span class="k k-aggregate"></span>aggregate, collects other repositories\' packages</span></div>'
+           '<div class="legend">Open pull requests, by their CI: <span><span class="pr ci-pass">#1</span> passing</span>'
+           '<span><span class="pr ci-fail">#1</span> failing</span><span><span class="pr ci-pending">#1</span> running</span>'
+           '<span><span class="pr ci-none">#1</span> no CI</span><span><span class="pr ci-none draft">#1</span> draft</span>'
+           '<span>The checks are of what publishes, so a pull request counts once it merges.</span></div>'
            "</section>"]
     for g in groups:
         ids = [r[0] for r in RULES if r[1] == g]
         out.append(f"<section><h2>{e(g)}</h2><div class=\"scroll\"><table><thead><tr><th class=\"repo\">repository</th>"
-                   "<th class=\"repo\">kind</th><th class=\"repo\">fails</th>"
+                   "<th class=\"repo\">kind</th><th class=\"repo\">fails</th><th class=\"prs\">open PRs</th>"
                    + "".join(f'<th title="{e(RULE[i][2])}">{e(i)}</th>' for i in ids) + "</tr></thead><tbody>")
         for r in sorted(repos, key=lambda r: (KIND_ORDER.get(r["kind"], len(KIND_ORDER)), r["repo"])):
             n = sum(r["checks"][i]["status"] == "fail" for i in ids)
@@ -1619,18 +1682,23 @@ def to_html(report: dict) -> str:
                             f'{SYMBOL[r["checks"][i]["status"]]}</span></td>' for i in ids)
             kind = r["kind"] + (f" · {r['variant']}" if r["variant"] else "")
             out.append(f'<tr class="kind-{e(r["kind"])}"><td class="repo"><a href="#todo-{e(r["repo"])}">{e(r["repo"])}</a></td>'
-                       f'<td class="kind">{e(kind)}</td><td class="num">{n or ""}</td>{cells}</tr>')
+                       f'<td class="kind">{e(kind)}</td><td class="num">{n or ""}</td>'
+                       f'<td class="prs">{pulls_cell(r)}</td>{cells}</tr>')
         out.append("</tbody></table></div></section>")
     out.append('<section><h2>What to do, per repository</h2><div class="todos">')
     for r in sorted(repos, key=lambda r: -sum(c["status"] == "fail" for c in r["checks"].values())):
         items = [f'<li><b>{e(k)}</b> {e(todo(k, c, report["action_repo"]))}</li>'
                  for k, c in r["checks"].items() if c["status"] == "fail"]
         site = f' · <a href="{e(r["site"])}">{e(r["site"])}</a>' if r["site"] else ""
+        more = r["open_pulls_total"] - len(r["open_pulls"])
+        pulls_list = ('<div class="pulls">' + "".join(
+            f'<div>{pull_chip(p)} {e(p["title"])} <span>{e(pull_state(p))}</span></div>' for p in r["open_pulls"])
+            + (f"<div><span>and {more} more</span></div>" if more > 0 else "") + "</div>") if r["open_pulls"] else ""
         out.append(f'<div class="todo" id="todo-{e(r["repo"])}"><h3><a href="https://github.com/{e(r["repo"])}">'
                    f'{e(r["repo"])}</a></h3><div class="meta">kind {e(r["kind"])}'
                    f'{" · " + e(r["variant"]) if r["variant"] else ""} · publishes from '
                    f'<code>{e(r["build_ref"])}</code>{site}</div>'
-                   + (f"<ul>{''.join(items)}</ul>" if items else "<p>Passes every rule.</p>") + "</div>")
+                   + (f"<ul>{''.join(items)}</ul>" if items else "<p>Passes every rule.</p>") + pulls_list + "</div>")
     out.append("</div></section>")
     out.append("<section><h2>Sites without packaging</h2>")
     if report["sites_without_packaging"]:
@@ -1716,6 +1784,7 @@ def main() -> int:
                       "build_ref": f["build_ref"], "build_workflow": f["build_workflow"],
                       "site": (f["site"] or {}).get("site"), "target_suites": t["suites"],
                       "target_architectures": t["archs"] or ["all"], "checks": checks,
+                      "open_pulls": f["pulls"]["pulls"], "open_pulls_total": f["pulls"]["total"],
                       **({"local": str(f["local"])} if f.get("local") else {})})
     import datetime
     report = {"date": datetime.date.today().isoformat(), "owners": list(owners), "action_repo": args.action_repo,
@@ -1728,7 +1797,7 @@ def main() -> int:
         args.html.write_text(to_html(report))
     for r in repos:
         n = sum(c["status"] == "fail" for c in r["checks"].values())
-        print(f"{r['repo']:45} {r['kind']:9} {r['variant']:13} {n:2} failing")
+        print(f"{r['repo']:45} {r['kind']:9} {r['variant']:13} {n:2} failing, {r['open_pulls_total']} open PRs")
     for s in orphans:
         print(f"{s['repo']:45} site without packaging: {s['site']}")
     return 0

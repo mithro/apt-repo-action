@@ -869,3 +869,50 @@ class Bundle(unittest.TestCase):
     def test_not_bundled_is_not_checked(self):
         dep = apc.apt_sources.validate([{"repo": "o/dep", "reason": "r"}])
         self.assertEqual(apc.bundle_gaps(dep, self.site(trixie=[])), [])
+
+
+class Pulls(unittest.TestCase):
+    """Open pull requests: what GitHub says, and how the reports show it."""
+
+    def node(self, number, state=None, draft=False, review=None):
+        commits = {"nodes": [{"commit": {"statusCheckRollup": {"state": state} if state else None}}]}
+        return {"number": number, "title": f"Change <{number}>", "url": f"https://github.com/o/r/pull/{number}",
+                "isDraft": draft, "baseRefName": "main", "reviewDecision": review, "commits": commits}
+
+    def test_ci_state(self):
+        self.assertEqual([apc.pull(self.node(1, s))["ci"] for s in
+                          ("SUCCESS", "FAILURE", "ERROR", "PENDING", "EXPECTED", None)],
+                         ["pass", "fail", "fail", "pending", "pending", "none"])
+
+    def test_no_commits(self):
+        n = self.node(1)
+        n["commits"] = {"nodes": []}
+        self.assertEqual(apc.pull(n)["ci"], "none")
+
+    def test_state_words(self):
+        p = apc.pull(self.node(7, "SUCCESS", draft=True, review="APPROVED"))
+        self.assertEqual(apc.pull_state(p), "CI passing, draft, approved")
+        self.assertEqual(apc.pull_state(apc.pull(self.node(8, "FAILURE"))), "CI failing")
+
+    def report(self, pulls, total=None):
+        checks = {r[0]: {"status": "pass", "detail": ""} for r in apc.RULES}
+        repo = {"repo": "o/r", "kind": "B", "variant": "", "build_ref": "main", "site": None, "checks": checks,
+                "open_pulls": pulls, "open_pulls_total": len(pulls) if total is None else total}
+        return {"date": "2026-10-01", "owners": ["o"], "action_repo": ACTION, "repos": [repo],
+                "sites_without_packaging": []}
+
+    def test_html(self):
+        html = apc.to_html(self.report([apc.pull(self.node(13, "SUCCESS")), apc.pull(self.node(14, draft=True))],
+                                       total=53))
+        self.assertIn('<a class="pr ci-pass" href="https://github.com/o/r/pull/13" '
+                      'title="#13 Change &lt;13&gt; (CI passing)">#13</a>', html)
+        self.assertIn('class="pr ci-none draft"', html)
+        self.assertIn(" +51</td>", html)
+        self.assertIn("<b>53</b><span>open pull requests</span>", html)
+        self.assertIn("Change &lt;13&gt; <span>CI passing</span>", html)
+        self.assertNotIn("Change <13>", html)
+
+    def test_markdown(self):
+        md = apc.to_markdown(self.report([apc.pull(self.node(13, "PENDING"))]))
+        self.assertIn("- [#13](https://github.com/o/r/pull/13) Change <13> (CI running)", md)
+        self.assertNotIn("Open pull requests", apc.to_markdown(self.report([])))
