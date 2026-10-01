@@ -914,16 +914,23 @@ class Pulls(unittest.TestCase):
 
     def test_markdown(self):
         md = apc.to_markdown(self.report([apc.pull(self.node(13, "PENDING"))]))
-        self.assertIn("- [#13](https://github.com/o/r/pull/13) Change \\<13\\> (CI running)", md)
+        self.assertIn("- [#13](https://github.com/o/r/pull/13) `Change <13>` (CI running)", md)
         self.assertNotIn("Open pull requests", apc.to_markdown(self.report([])))
 
     def test_markdown_title_is_text(self):
         # Anyone can title a pull request: no link, image or HTML of theirs
-        # reaches the public Actions summary.
+        # reaches the public Actions summary. A code span stops even GFM's
+        # bare-URL autolinks.
         n = self.node(9, "SUCCESS")
-        n["title"] = "fix ![x](https://evil.example/p.png) [see](https://evil.example) <img src=x> `c` *b*\nnext"
+        n["title"] = "See https://evil.example ![x](https://evil.example/p.png) <img src=x> *b*\nnext"
         md = apc.to_markdown(self.report([apc.pull(n)]))
         line = next(l for l in md.splitlines() if l.startswith("- [#9]"))
-        self.assertEqual(line, "- [#9](https://github.com/o/r/pull/9) fix \\!\\[x\\](https://evil.example/p.png) "
-                               "\\[see\\](https://evil.example) \\<img src=x\\> \\`c\\` \\*b\\* next (CI passing)")
-        self.assertEqual(apc.md_text("a_b & c|d ~e# f"), "a\\_b \\& c\\|d \\~e\\# f")
+        self.assertEqual(line, "- [#9](https://github.com/o/r/pull/9) "
+                               "`See https://evil.example ![x](https://evil.example/p.png) <img src=x> *b* next` "
+                               "(CI passing)")
+
+    def test_code_span_fence(self):
+        self.assertEqual(apc.md_code("plain"), "`plain`")
+        self.assertEqual(apc.md_code("use `x` here"), "``use `x` here``")
+        self.assertEqual(apc.md_code("``a`` b"), "``` ``a`` b ```")
+        self.assertEqual(apc.md_code("ends`"), "`` ends` ``")

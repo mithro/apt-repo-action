@@ -1540,11 +1540,17 @@ def todo(rule: str, c: dict, action_repo: str) -> str:
     return RULE[rule][3].replace("<action-repo>", action_repo) + (f" Now: {c['detail']}." if c["detail"] else "")
 
 
-def md_text(s: str) -> str:
-    """Text anyone can write (a pull request's title) as plain Markdown text:
+def md_code(s: str) -> str:
+    """Text anyone can write (a pull request's title) as a Markdown code span:
     the nightly report goes into a public Actions summary, where it must not
-    add links, images or HTML."""
-    return re.sub(r"([\\`*_\[\]<>|~&!#])", r"\\\1", " ".join(s.split()))
+    add links, images or HTML. Nothing inside a code span is Markdown, not
+    even GFM's bare-URL autolinks, which no escaping prevents. The fence is
+    one backtick longer than any run in the text, and padded when the text
+    starts or ends with one."""
+    s = " ".join(s.split())
+    fence = "`" * (max((len(m) for m in re.findall(r"`+", s)), default=0) + 1)
+    pad = " " if s.startswith("`") or s.endswith("`") else ""
+    return f"{fence}{pad}{s}{pad}{fence}"
 
 
 def to_markdown(report: dict) -> str:
@@ -1558,7 +1564,7 @@ def to_markdown(report: dict) -> str:
         out.append("")
         if r["open_pulls"]:
             out += ["Open pull requests:", ""]
-            out += [f"- [#{p['number']}]({p['url']}) {md_text(p['title'])} ({pull_state(p)})" for p in r["open_pulls"]]
+            out += [f"- [#{p['number']}]({p['url']}) {md_code(p['title'])} ({pull_state(p)})" for p in r["open_pulls"]]
             more = r["open_pulls_total"] - len(r["open_pulls"])
             out += [f"- and {more} more"] if more > 0 else []
             out.append("")
