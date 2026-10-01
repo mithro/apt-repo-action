@@ -914,6 +914,24 @@ def unguarded_workflow_runs(parsed: dict[str, dict]) -> list[str]:
     return out
 
 
+LOCAL_WORKFLOW = re.compile(r"\./\.github/workflows/([^/@]+\.ya?ml)")
+
+
+def read_through(jobs: dict, workflows: dict | None, prefix: str = "", depth: int = 0):
+    """(path, name, job) for every job, a job calling a local reusable
+    workflow replaced by that workflow's jobs, read from `workflows` (file
+    name -> parsed), as `caller/inner`; at most three levels deep."""
+    for name, j in jobs.items():
+        if not isinstance(j, dict):
+            continue
+        local = LOCAL_WORKFLOW.fullmatch(str(j.get("uses", "")))
+        inner = (workflows or {}).get(local.group(1)) if local else None
+        if isinstance(inner, dict) and depth < 3:
+            yield from read_through(inner.get("jobs") or {}, workflows, f"{prefix}{name}/", depth + 1)
+        else:
+            yield f"{prefix}{name}", name, j
+
+
 def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) -> tuple[bool, str]:
     """PKG-INSTALL-TEST: a job that builds the packages has a step named
     `Install test` that runs something. A mention elsewhere (a comment, a
@@ -927,20 +945,7 @@ def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) ->
     build job."""
     shared_step = f"{action_repo}/build-deb".lower()
     shared_workflow = f"{action_repo}/.github/workflows/build-deb.yml".lower()
-    workflows = workflows or {}
-
-    def flatten(jobs, prefix="", depth=0):
-        for name, j in jobs.items():
-            if not isinstance(j, dict):
-                continue
-            local = re.fullmatch(r"\./\.github/workflows/([^/@]+\.ya?ml)", str(j.get("uses", "")))
-            inner = workflows.get(local.group(1)) if local else None
-            if isinstance(inner, dict) and depth < 3:
-                yield from flatten(inner.get("jobs") or {}, f"{prefix}{name}/", depth + 1)
-            else:
-                yield f"{prefix}{name}", name, j
-
-    all_jobs = list(flatten(jobs))
+    all_jobs = list(read_through(jobs, workflows))
     for path, _, j in all_jobs:
         if str(j.get("uses", "")).partition("@")[0].lower() == shared_workflow:
             return True, f"{path}: the shared build-deb.yml install-tests"
@@ -961,23 +966,23 @@ def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) ->
     return False, f"no `Install test` step in {', '.join(builders)}"
 
 
-def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, variant: str) -> tuple[bool, str]:
+def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, variant: str,
+                 workflows: dict | None = None) -> tuple[bool, str]:
     """PKG-SHARED (docs/packaging.md, "The shared actions"): the build is the
     shared one, at `@main`, and the repository carries no deb-version.py.
 
     Shared is the reusable build-deb.yml workflow (a job's `uses:`), the
     build-deb action (a step's `uses:`), or, for a build that can't go
     through build-deb, the deb-version action giving the shared version: an
-    nfpm build or a patch series' own job. Every use of any of them must be
-    at `@main`, the release job's included, since each repository runs
-    exactly what's on apt-repo-action's main."""
+    nfpm build or a patch series' own job. A job calling a local reusable
+    workflow is read through, as PKG-INSTALL-TEST does. Every use of any of
+    them must be at `@main`, the release job's included, since each
+    repository runs exactly what's on apt-repo-action's main."""
     repo = action_repo.lower()
     workflow, action, version = (f"{repo}/.github/workflows/build-deb.yml", f"{repo}/build-deb",
                                  f"{repo}/deb-version")
     uses = []
-    for j in jobs.values():
-        if not isinstance(j, dict):
-            continue
+    for _, _, j in read_through(jobs, workflows):
         uses.append(str(j.get("uses", "")))
         uses += [str(s.get("uses", "")) for s in (j.get("steps") or []) if isinstance(s, dict)]
     found = {}
@@ -1403,7 +1408,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         put("PKG-SHARED", None, "nothing to build")
     else:
         put("PKG-SHARED", *shared_build(jobs, args.action_repo, "packaging/deb-version.py" in f["files"],
-                                        t["nfpm"], "patch-series" if kind == "mirror" else variant))
+                                        t["nfpm"], "patch-series" if kind == "mirror" else variant, parsed))
     if kind == "aggregate":
         put("PKG-INSTALL-TEST", None, "nothing to build")
     else:
