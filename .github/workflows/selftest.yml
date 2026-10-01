@@ -348,6 +348,35 @@ jobs:
             echo "::error::a package was built without our patches"
             exit 1
           fi
+      - name: The same tree, marked with the old name
+        # An older mirror-patches.py wrote .mirror-patches: build-deb still
+        # checks such a series.
+        run: |
+          cp -a src-broken src-old-marker
+          mv src-old-marker/debian/patches/.generated src-old-marker/debian/patches/.mirror-patches
+      - name: Build it, which must fail too
+        id: old-marker
+        continue-on-error: true
+        uses: ./build-deb
+        with:
+          suite: trixie
+          arch: all
+          source-dir: src-old-marker
+          out-dir: built-old-marker
+          version-args: --owner-tag selftest --upstream-dir . --upstream-tag-match [0-9]*
+          lintian: "off"
+      - name: Check it failed, and built nothing
+        env:
+          OUTCOME: ${{ steps.old-marker.outcome }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::a tree marked .mirror-patches whose patches don't apply was built (outcome: $OUTCOME)"
+            exit 1
+          fi
+          if ls built-old-marker/*.deb; then
+            echo "::error::a package was built without our patches"
+            exit 1
+          fi
       - name: Build
         uses: ./build-deb
         with:
