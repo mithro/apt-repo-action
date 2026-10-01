@@ -914,5 +914,16 @@ class Pulls(unittest.TestCase):
 
     def test_markdown(self):
         md = apc.to_markdown(self.report([apc.pull(self.node(13, "PENDING"))]))
-        self.assertIn("- [#13](https://github.com/o/r/pull/13) Change <13> (CI running)", md)
+        self.assertIn("- [#13](https://github.com/o/r/pull/13) Change \\<13\\> (CI running)", md)
         self.assertNotIn("Open pull requests", apc.to_markdown(self.report([])))
+
+    def test_markdown_title_is_text(self):
+        # Anyone can title a pull request: no link, image or HTML of theirs
+        # reaches the public Actions summary.
+        n = self.node(9, "SUCCESS")
+        n["title"] = "fix ![x](https://evil.example/p.png) [see](https://evil.example) <img src=x> `c` *b*\nnext"
+        md = apc.to_markdown(self.report([apc.pull(n)]))
+        line = next(l for l in md.splitlines() if l.startswith("- [#9]"))
+        self.assertEqual(line, "- [#9](https://github.com/o/r/pull/9) fix \\!\\[x\\](https://evil.example/p.png) "
+                               "\\[see\\](https://evil.example) \\<img src=x\\> \\`c\\` \\*b\\* next (CI passing)")
+        self.assertEqual(apc.md_text("a_b & c|d ~e# f"), "a\\_b \\& c\\|d \\~e\\# f")

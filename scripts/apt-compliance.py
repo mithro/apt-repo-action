@@ -1540,6 +1540,13 @@ def todo(rule: str, c: dict, action_repo: str) -> str:
     return RULE[rule][3].replace("<action-repo>", action_repo) + (f" Now: {c['detail']}." if c["detail"] else "")
 
 
+def md_text(s: str) -> str:
+    """Text anyone can write (a pull request's title) as plain Markdown text:
+    the nightly report goes into a public Actions summary, where it must not
+    add links, images or HTML."""
+    return re.sub(r"([\\`*_\[\]<>|~&!#])", r"\\\1", " ".join(s.split()))
+
+
 def to_markdown(report: dict) -> str:
     out = [f"# apt compliance, {report['date']}", "",
            f"{len(report['repos'])} packaging repositories in {', '.join(report['owners'])}.", ""]
@@ -1551,7 +1558,7 @@ def to_markdown(report: dict) -> str:
         out.append("")
         if r["open_pulls"]:
             out += ["Open pull requests:", ""]
-            out += [f"- [#{p['number']}]({p['url']}) {p['title']} ({pull_state(p)})" for p in r["open_pulls"]]
+            out += [f"- [#{p['number']}]({p['url']}) {md_text(p['title'])} ({pull_state(p)})" for p in r["open_pulls"]]
             more = r["open_pulls_total"] - len(r["open_pulls"])
             out += [f"- and {more} more"] if more > 0 else []
             out.append("")
