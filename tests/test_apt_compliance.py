@@ -467,6 +467,19 @@ class Dependencies(unittest.TestCase):
         S["packages"] += S["bundled"]
         self.assertIn("python3-spiflash 0.2.post7~deb13 isn't", self.rule(f)[1])
 
+    def target(self, f):
+        return apc.target({"declaration": None, "workflows": {"deb.yml": "run: dpkg-buildpackage"}, "fork": False,
+                           "branches": ["main"], "upstream_authors": [], "files": ["debian/control"], **f}, "welland")
+
+    def test_a_dependency_does_not_make_an_undeclared_repository_set_a(self):
+        pkgs = self.ntrip("~deb13", ("python3-pyrtcm", "1.2.0-0+welland4~deb13", "pyrtcm"))
+        self.assertEqual(self.target(self.facts(trixie=pkgs))["kind"], "B")
+        # Its own packages' versions still say so, as does any package's
+        # when its own sources aren't known.
+        own = [("ntrip-rtcm3-to-rtcm2p3", "0.1.0-0+welland4~deb13", "")]
+        self.assertEqual(self.target(self.facts(trixie=own))["kind"], "A")
+        self.assertEqual(self.target(self.facts(control=None, trixie=pkgs))["kind"], "A")
+
 
 class Shared(unittest.TestCase):
     def shared(self, j, local_ver=False, nfpm_build=False, variant=""):

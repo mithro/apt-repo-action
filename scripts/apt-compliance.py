@@ -577,7 +577,10 @@ def target(f: dict, owner_tag: str | None) -> dict:
             t["declared"] = True
         except tomllib.TOMLDecodeError as e:
             t["declaration_error"] = str(e)
-    versions = [v for s in published_versions(f).values() for v in s.values()]
+    # A dependency a Set B repository builds from someone else's release has
+    # a Set A version: it says nothing about the repository's kind.
+    own = own_sources(f)
+    versions = [p["Version"] for s in published(f).values() for p in s.values() if not is_dependency(p, own)]
     all_arch = {p["Architecture"] for S in ((f["site"] or {}).get("suites") or {}).values() for p in S["packages"]}
     wf = " ".join(code_lines(x) for x in f["workflows"].values())
     has_build = bool(re.search(r"dpkg-buildpackage|build-deb|dpkg-deb|nfpm|debuild", wf))
