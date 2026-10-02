@@ -741,13 +741,67 @@ version scheme, and is declared as a `PKG-VERSION` exception (rpi-qemu).
 
 | part | from |
 |---|---|
-| `<base>` | 1. Debian's version, when `debian/` came from Debian: `1.1.2-7`<br>2. otherwise the upstream release tag, when `upstream` is exactly at one: `2.93-0`<br>3. otherwise `<tag>+git<N>.g<sha7>-0`, with `N` = upstream commits since that tag and `sha7` the upstream commit<br>4. upstream has no tags at all: `0.0+git<N>.g<sha7>-0`, with `N` = all upstream commits |
+| `<base>` | 1. Debian's version, when `debian/` came from Debian and is for the release `upstream` is exactly at: `1.1.2-7`<br>2. otherwise the upstream release tag, when `upstream` is exactly at one: `2.93-0`<br>3. otherwise `<tag>+git<N>.g<sha7>-0`, with `N` = upstream commits since that tag and `sha7` the upstream commit<br>4. upstream has no tags at all: `0.0+git<N>.g<sha7>-0`, with `N` = all upstream commits |
 | `<owner-tag>` | `welland` for `mithro/*`, `fpgasonline` for `fpgas-online/*` |
 | `<M>` | commits on `packaging` that aren't on `upstream`: `git rev-list --count upstream..packaging` |
 
 Upstream tags are normalised to a Debian upstream version: drop a leading
-`v` or project-name prefix, and turn `-` into `.` (`v2.93` → `2.93`,
-`netplan-1.1.2` → `1.1.2`).
+`v` or project-name prefix, and turn `-` and `_` into `.` (`v2.93` → `2.93`,
+`netplan-1.1.2` → `1.1.2`, `RELEASE_7_5` → `7.5`).
+
+The shared script makes it, given the owner's tag and the branch that holds
+upstream's history: `scripts/deb-version.py --owner-tag <owner-tag>
+--upstream-branch upstream`, which a repository passes as the build's
+`version-args` (see [The shared actions](#the-shared-actions)):
+
+```yaml
+  build-deb:
+    uses: mithro/apt-repo-action/.github/workflows/build-deb.yml@main
+    with:
+      version-args: --owner-tag welland --upstream-branch upstream
+```
+
+- **The upstream commit** is the one the build is made on: the merge base of
+  the build commit and `upstream` (`origin/upstream` in a CI checkout, which
+  has no local branches). So `upstream` moving on changes nothing until it is
+  merged, and a pull request that merges it is versioned as the merge will
+  be. `sha7` is the first seven digits of its id.
+- **`N`** is `git describe --tags --long`'s count for that commit: the
+  upstream commits since its nearest tag. `--upstream-tag-match <glob>`
+  (in `version-args`) limits the tags to upstream's releases, when it has
+  others (`debian/2.90-1`). A tag that doesn't normalise to a Debian
+  upstream version fails the build.
+- **`M`** counts from the build commit (`upstream..HEAD`), so a pull
+  request's count is the one its merge commit will have.
+- **Debian's version** (1) is the top of the committed `debian/changelog`,
+  and is the base only while it says what is built: `upstream` is exactly at
+  a release (`N` = 0), and that changelog's version is `<release>-<revision>`
+  for the same release (or Debian's repack of it, `2.93+dfsg-1`). Ours then
+  extends Debian's revision, and sorts above Debian's build of that release.
+  Once upstream is merged past the release, the base is (3), which sorts
+  above every Debian revision of the release and below Debian's next
+  upstream version. smartmontools' `debian/` is Debian's 7.5-2, and it
+  builds upstream's `main`: `7.5+git583.g06489e0-0+welland10~deb13`. A Debian
+  version with an epoch needs the same `--epoch`, or the build fails.
+- **An upstream whose release tags aren't on the branch we build** has its
+  releases named by commit subject instead. smartmontools' history came from
+  svn: its `RELEASE_7_5` tag is on a commit off `main`, where `git describe`
+  can't find it from `main`, and `main` has its own `Release 7.5
+  RELEASE_7_5` commit. [The declaration](#the-declaration) gives the pattern:
+
+  ```toml
+  [version]
+  release-subject = '^Release (\d+(?:\.\d+)+) RELEASE_\d+(?:_\d+)+$'
+  ```
+
+  The release is then the newest commit in the upstream commit's history
+  whose subject matches (a Python regular expression, searched for anywhere
+  in the subject unless anchored), `N` the commits since it, and the
+  pattern's one group (everything it matched, without a group) is the
+  release, normalised as a tag is: `7.5`, or `RELEASE_7_5`. With a pattern,
+  tags aren't read, and a pattern that matches no commit fails the build:
+  it never falls back to `0.0`. `--upstream-release-subject` gives the
+  pattern on the command line instead.
 
 The `+<owner-tag>` sorts after Debian's own suffixes (`+deb13u1`, `+b1`),
 because `w` and `f` both come after `d` and `b`. So our build stays newer
@@ -926,12 +980,19 @@ that sorts wrongly. Each one is a recorded exception.
     ```
 
     Paths in `version-args` are relative to `source-dir`.
-- **The shared version script implements Set B, its patch series form and
-  the epoch.** The Set A and backport forms are still to come
-  (compliance-plan.md, section 3). Until then a repository that still has its
-  own `packaging/deb-version.py` keeps it, and `build-deb` runs it, with a
-  warning. A Set B repository deletes its own copy, in the commit that moves
-  it to `build-deb` (see [below](#moving-a-repository-to-the-shared-build)).
+  - gives a Set A repository its version with `version-args: --owner-tag
+    <owner-tag> --upstream-branch upstream` ([Set A](#set-a)); the reusable
+    `build-deb.yml` passes its own `version-args` input on. The checkout
+    needs the `upstream` branch: `fetch-depth: 0` fetches every branch.
+- **The shared version script implements Set B, its patch series form,
+  Set A and the epoch.** Set A is asked for with `version-args`
+  (`--owner-tag <owner-tag> --upstream-branch upstream`, see
+  [Set A](#set-a)); without them the version is Set B's. The backport form
+  is still to come (compliance-plan.md, section 3). A repository that still
+  has its own `packaging/deb-version.py` keeps it until it is moved, and
+  `build-deb` runs it, with a warning. A Set A or Set B repository deletes
+  its own copy in the commit that moves it to the shared version (see
+  [below](#moving-a-repository-to-the-shared-build)).
 - **A build that doesn't go through `build-deb`** gets the same version from
   `mithro/apt-repo-action/deb-version@main`, as its `version` output: a patch
   series whose own job renders the version into its templates, or an `nfpm`
@@ -970,6 +1031,16 @@ scripts first leaves the old `Build` step without the scripts it runs.
 
 `build-deb` doesn't pass `--suite` or `--pr` to a repository's own script on
 purpose: tmux's and scanbd's accept only `--write-changelog`, and would fail.
+
+**A Set A repository** adds `version-args: --owner-tag <owner-tag>
+--upstream-branch upstream` in that same commit (and `[version]
+release-subject` to its declaration, if upstream's release tags aren't on the
+built branch). Without them the shared script gives the Set B version, from
+our own `vX.Y` tags. Before merging, compare the pull request's preview
+version with what the suite publishes (`dpkg --compare-versions`): a
+repository whose own script made versions another way (a date, a hand-set
+`+welland<M>`) may need the new version to be raised, by an epoch under a
+`PKG-VERSION` exception, as scanbd's is.
 
 Nor may the first shared build be of a tagged commit. A repository whose
 last published version is a bare tag version (`0.24`, as the Go
@@ -1124,6 +1195,20 @@ reason = "python3-paho-mqtt (>= 2) is not in bookworm"
   built. A listed `suites` is taken exactly.
 - The rule IDs are the ones in
   [compliance-plan.md](compliance-plan.md#2-the-checker-scriptsapt-compliancepy).
+
+A **Set A** repository whose upstream's release tags aren't in the history of
+the branch it builds also has a `[version]` table, which the shared version
+script and the checker read (see [Set A](#set-a) under Versions):
+
+```toml
+kind = "A"
+upstream = "https://github.com/smartmontools/smartmontools"
+
+[version]
+# upstream's releases are main's "Release 7.5 RELEASE_7_5" commits: its
+# RELEASE_7_5 tags (from svn) are on commits off main
+release-subject = '^Release (\d+(?:\.\d+)+) RELEASE_\d+(?:_\d+)+$'
+```
 
 A **mirror** also has a `[mirror]` table, which the sync and the checker read:
 

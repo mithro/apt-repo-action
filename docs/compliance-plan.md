@@ -92,7 +92,7 @@ repository's issue in section 4), and everything as JSON.
 
 | ID | rule | how it's checked |
 |---|---|---|
-| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures`, and a mirror's `upstream` and `[mirror]` (`build`, `ours`, `tags`) are well-formed |
+| PKG-DECLARED | the kind is declared, and the build accepts the declaration | `.github/apt-packaging.toml` parses, `build-deb.yml`'s `scripts/build-matrix.py` wouldn't refuse its `suites` and `architectures`, a mirror's `upstream` and `[mirror]` (`build`, `ours`, `tags`) are well-formed, and so is Set A's `[version]` (`release-subject`, a regular expression) |
 | PKG-BRANCH | default branch `packaging` (A, mirror) or `main` (B), and it publishes | GitHub API, last Pages deployment |
 | PKG-HISTORY | Set A carries upstream's history; a mirror's `packaging` shares none with the built branch | fork, or commits by others before the repository existed; a mirror: the compare API finds no common ancestor |
 | PKG-UPSTREAM | Set A has an `upstream` branch; a mirror's built branch is upstream's | GitHub API; a mirror: `git ls-remote` of the declared `upstream` (unreachable fails), or upstream moved since the last sync, which succeeded in the last two days |
@@ -140,11 +140,20 @@ what a repository gets by default.
    - has a test table, including every ordering in packaging.md;
    - replaces the 11 diverging copies of `packaging/deb-version.py`.
 
-   Started: Set B, the patch series form, the epoch and both suffixes are
-   done. `build-deb/` runs it (`version-tree`, `version-args` for a patch
+   Started: Set B, the patch series form, Set A, the epoch and both suffixes
+   are done. `build-deb/` runs it (`version-tree`, `version-args` for a patch
    series), `deb-version/` gives the version to nfpm builds and to patch
    series with their own job, and `tests/test_deb_version.py` checks the
-   ordering table. The Set A and backport forms are still to come.
+   ordering tables.
+   - Set A is `version-args: --owner-tag <owner-tag> --upstream-branch
+     upstream`: `<base>+<owner-tag><M>`, with all four bases in packaging.md
+     (Debian's version, a release, commits after a release, an upstream
+     without tags). An upstream whose release tags aren't on the built
+     branch (smartmontools, imported from svn) declares the subject its
+     release commits have, `[version] release-subject`. No Set A repository
+     uses it yet: smartmontools is the first to move (issue #48), and the
+     others still carry their own script.
+   - The backport form is still to come.
 2. **`.github/workflows/build-deb.yml`**, a reusable build workflow:
    - takes `suites`/`architectures` (default: the defaults);
    - runs the matrix on the right runners, with QEMU for foreign
