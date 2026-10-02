@@ -549,6 +549,27 @@ class Mirror(unittest.TestCase):
                          "v[0-9]*")
         self.assertEqual(apc.mirror_declaration({**MIRROR_DECL, "upstream": "git@example.org:x/y.git"})[1], [])
 
+    def test_version_declaration(self):
+        # Set A's [version] release-subject, which scripts/deb-version.py reads.
+        subject = r"^Release (\d+(?:\.\d+)+) RELEASE_\d+(?:_\d+)+$"
+        ok = {"kind": "A", "version": {"release-subject": subject}}
+        self.assertEqual(apc.version_declaration(ok, "A", ""), [])
+        self.assertEqual(apc.version_declaration({"kind": "A"}, "A", ""), [])
+        self.assertEqual(apc.version_declaration({"kind": "A", "version": {}}, "A", ""), [])
+        for decl, kind, variant, want in [
+            ({"version": "7.5"}, "A", "", "[version] must be a table"),
+            ({"version": {"release-subject": "Release ("}}, "A", "", "[version] release-subject 'Release ('"),
+            ({"version": {"release-subject": 7}}, "A", "", "[version] release-subject 7"),
+            ({"version": {"release-subject": ""}}, "A", "", "[version] release-subject ''"),
+            ({"version": {"release-subject": "(a) (b)"}}, "A", "", "at most one group"),
+            ({"version": {"tags": "v*"}}, "A", "", "[version] has unknown keys tags"),
+            (ok, "B", "", "[version] is for Set A"),
+            (ok, "mirror", "", "[version] is for Set A"),
+            (ok, "A", "backport", "[version] is for Set A"),
+        ]:
+            with self.subTest(decl=decl, kind=kind, variant=variant):
+                self.assertIn(want, "; ".join(apc.version_declaration(decl, kind, variant)))
+
     def test_declaration_problems(self):
         def probs(**kw):
             return apc.mirror_declaration({**MIRROR_DECL, **kw})[1]
