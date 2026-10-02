@@ -706,6 +706,7 @@ class SetATree(unittest.TestCase):
                "GIT_COMMITTER_DATE": "2026-09-24T12:00:00+0000"}
         self.env = {**os.environ, **env}
         self.env.pop("GITHUB_REPOSITORY", None)
+        self.env.pop("GITHUB_ACTIONS", None)    # CI sets it: warnings are plain unless a test asks
         self.git("init", "-q", "-b", "upstream")
         self.git("remote", "add", "origin", "https://github.com/example/selftest-src.git")
         self.commit("upstream: one")
