@@ -113,7 +113,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-SUITES | default suites, or declared with a reason | live site, against the declaration read as `build-deb.yml` plans its builds |
 | PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site, against the declaration read as `build-deb.yml` plans its builds |
 | PKG-NODATES | no date in a version | live `Packages` |
-| PKG-VERSION | version matches its kind's form; no epoch | live `Packages` |
+| PKG-VERSION | the newest version of each package matches its kind's form; in a plain Set B repository, a package built from another source than its root `debian/control`'s (a dependency built from someone else's release) matches `<upstream>-0+<owner-tag><M>[~deb<R>]`; no epoch | live `Packages` (`Version:`, `Source:`), `debian/control` |
 | PKG-SUITE-SUFFIX | `~deb<R>` on every suite but sid | live `Packages` |
 | PKG-DBGSYM | no `-dbgsym` over 10 MB in apt | live `Packages` |
 | PKG-MAINTAINER | the expected `Maintainer:` | `debian/control` |
