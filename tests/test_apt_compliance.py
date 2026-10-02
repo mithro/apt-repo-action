@@ -286,6 +286,188 @@ class VersionForms(unittest.TestCase):
         self.assertIsNone(apc.version_forms("aggregate", "", "welland"))
 
 
+    def test_a_set_b_dependency(self):
+        # Set A's form at a release, with revision 0, and nothing else of Set A's.
+        forms = apc.version_forms("B", "", "welland", dependency=True)
+        for v in ["1.1.7-0+welland4~deb13", "1.2.0-0+welland4~deb14", "1.2.0-0+welland4", "2.94~rc1-0+welland12",
+                  "3.5a-0+welland1~deb12"]:
+            with self.subTest(version=v):
+                self.assertTrue(forms.fullmatch(v))
+        for v in ["1.1.7", "1.2.0~deb13", "0.1.0.post39~deb13",                        # Set B's
+                  "1.1.7-1+welland4~deb13", "1.1.7-1", "2.93-4+deb13u1+welland2",      # sorts above Debian's
+                  "1.1.7+git5.g06489e0-0+welland4", "0.0+git12.g06489e0-0+welland4",   # not a release
+                  "1:1.1.7-0+welland4", "1.1.7-0+fpgasonline4", "1.1.7-0+welland", "1.1.7-0+welland4~pr7",
+                  "1.1.7-0+welland4~deb13~pr7", "1.1.7+welland.0.1.0.post39~deb13"]:
+            with self.subTest(version=v):
+                self.assertFalse(forms.fullmatch(v))
+        self.assertTrue(apc.version_forms("B", "", None, dependency=True).fullmatch("1.1.7-0+fpgasonline4"))
+
+    def test_only_plain_set_b_has_a_dependency_form(self):
+        for kind, variant in [("A", ""), ("A", "backport"), ("B", "patch-series"), ("mirror", "")]:
+            with self.subTest(kind=kind, variant=variant):
+                self.assertEqual(apc.version_forms(kind, variant, "welland", dependency=True).pattern,
+                                 apc.version_forms(kind, variant, "welland").pattern)
+        self.assertIsNone(apc.version_forms("aggregate", "", "welland", dependency=True))
+
+
+NTRIP_CONTROL = """\
+Source: ntrip-rtcm3-to-rtcm2p3
+Maintainer: Tim 'mithro' Ansell <me@mith.ro>
+
+Package: python3-ntrip-rtcm3-to-rtcm2p3
+Architecture: all
+
+Package: ntrip-rtcm3-to-rtcm2p3
+Architecture: all
+"""
+WANTED = "<upstream>-0+welland<M>[~deb<R>]"
+
+
+class Dependencies(unittest.TestCase):
+    """PKG-VERSION: a dependency a Set B repository builds from someone
+    else's release (docs/packaging.md, "Versions", Set B) has its own form."""
+
+    def facts(self, control=NTRIP_CONTROL, **suites):
+        """suite -> [(package, version, Source: field)]."""
+        return {"debian/control": control,
+                "site": {"suites": {suite: {"packages": [{"Package": p, "Version": v, "Source": src,
+                                                          "Architecture": "all"} for p, v, src in pkgs]}
+                                    for suite, pkgs in suites.items()}}}
+
+    def ntrip(self, suffix, *dependencies):
+        own = "0.1.0.post39" + suffix
+        return [("ntrip-rtcm3-to-rtcm2p3", own, ""), ("python3-ntrip-rtcm3-to-rtcm2p3", own, "ntrip-rtcm3-to-rtcm2p3"),
+                *dependencies]
+
+    def rule(self, f, kind="B", variant="", tag="welland"):
+        return apc.version_rule(f, {"kind": kind, "variant": variant}, tag)
+
+    def test_ntrip(self):
+        # ntrip-rtcm3-to-rtcm2p3 once its pull request 7 publishes: pyrtcm
+        # everywhere, pynmeagps only where Debian lacks it (trixie). What
+        # was published before stays, as an earlier version.
+        f = self.facts(
+            trixie=self.ntrip("~deb13", ("python3-pynmeagps", "1.1.7", "pynmeagps"),
+                              ("python3-pynmeagps", "1.1.7-0+welland4~deb13", "pynmeagps"),
+                              ("python3-pyrtcm", "1.2.0", "pyrtcm"),
+                              ("python3-pyrtcm", "1.2.0-0+welland4~deb13", "pyrtcm")),
+            forky=self.ntrip("~deb14", ("python3-pyrtcm", "1.2.0", "pyrtcm"),
+                             ("python3-pyrtcm", "1.2.0-0+welland4~deb14", "pyrtcm")),
+            sid=self.ntrip("", ("python3-pyrtcm", "1.2.0-0+welland4", "pyrtcm")))
+        self.assertEqual(self.rule(f), (True, "e.g. 1.2.0-0+welland4~deb14"))
+
+    def test_bare_upstream_version(self):
+        # What ntrip-rtcm3-to-rtcm2p3 published before: Set B's form by accident.
+        f = self.facts(trixie=self.ntrip("~deb13", ("python3-pynmeagps", "1.1.7", "pynmeagps"),
+                                         ("python3-pyrtcm", "1.2.0", "pyrtcm")),
+                       sid=self.ntrip("", ("python3-pyrtcm", "1.2.0", "pyrtcm")))
+        self.assertEqual(self.rule(f), (
+            False, f"python3-pynmeagps 1.1.7 isn't {WANTED} (its source, pynmeagps, isn't this repository's); "
+                   f"python3-pyrtcm 1.2.0 isn't {WANTED} (its source, pyrtcm, isn't this repository's)"))
+
+    def test_set_b_form_on_a_dependency(self):
+        f = self.facts(trixie=self.ntrip("~deb13", ("python3-pyrtcm", "1.2.0.post3~deb13", "pyrtcm")))
+        ok, detail = self.rule(f)
+        self.assertFalse(ok)
+        self.assertEqual(detail, f"python3-pyrtcm 1.2.0.post3~deb13 isn't {WANTED} "
+                                 "(its source, pyrtcm, isn't this repository's)")
+        # Without the owner's tag the form is named without it.
+        self.assertIn("isn't <upstream>-0+<owner-tag><M>[~deb<R>] (", self.rule(f, tag=None)[1])
+
+    def test_own_packages_keep_the_set_b_form(self):
+        f = self.facts(trixie=[("ntrip-rtcm3-to-rtcm2p3", "0.1.0-0+welland4~deb13", ""),
+                               ("python3-ntrip-rtcm3-to-rtcm2p3", "0.1.0-0+welland4~deb13", "ntrip-rtcm3-to-rtcm2p3"),
+                               ("python3-pyrtcm", "1.2.0-0+welland4~deb13", "pyrtcm")])
+        self.assertEqual(self.rule(f), (False, "0.1.0-0+welland4~deb13"))
+        # Both kinds of failure: the repository's own first.
+        f["site"]["suites"]["sid"] = self.facts(sid=[("python3-pyrtcm", "1.2.0", "pyrtcm")])["site"]["suites"]["sid"]
+        self.assertEqual(self.rule(f), (False, "0.1.0-0+welland4~deb13; python3-pyrtcm 1.2.0 isn't "
+                                               f"{WANTED} (its source, pyrtcm, isn't this repository's)"))
+
+    def test_source_with_a_version(self):
+        # A binary package versioned apart from its source: `Source: name (version)`.
+        f = self.facts(sid=[("ntrip-rtcm3-to-rtcm2p3", "0.1.0.post39", "ntrip-rtcm3-to-rtcm2p3 (0.1.0.post38)"),
+                            ("python3-pyrtcm", "1.2.0-0+welland4", "pyrtcm (1.2.0-0+welland3)")])
+        self.assertEqual(self.rule(f), (True, "e.g. 1.2.0-0+welland4"))
+        f = self.facts(sid=[("ntrip-rtcm3-to-rtcm2p3", "1.2.0-0+welland4", "ntrip-rtcm3-to-rtcm2p3 (0.1.0.post38)")])
+        self.assertEqual(self.rule(f), (False, "1.2.0-0+welland4"))
+
+    def test_the_newest_stanza_says_the_source(self):
+        # python3-pyrtcm was this repository's own once; the newest one isn't.
+        f = self.facts(sid=self.ntrip("", ("python3-pyrtcm", "1.2.0", "ntrip-rtcm3-to-rtcm2p3"),
+                                      ("python3-pyrtcm", "1.2.0-0+welland4", "pyrtcm")))
+        self.assertTrue(self.rule(f)[0])
+        self.assertEqual(apc.published_versions(f)["sid"]["python3-pyrtcm"], "1.2.0-0+welland4")
+
+    def test_own_sources_unknown(self):
+        # No debian/control at the root (go-claude-teleport's nfpm build, a
+        # patch series' packaging/debian/): every package is judged as before.
+        pkgs = self.ntrip("~deb13", ("python3-pyrtcm", "1.2.0", "pyrtcm"))
+        self.assertEqual(self.rule(self.facts(control=None, trixie=pkgs)), (True, "e.g. 1.2.0"))
+        dep = self.ntrip("~deb13", ("python3-pyrtcm", "1.2.0-0+welland4~deb13", "pyrtcm"))
+        self.assertEqual(self.rule(self.facts(control=None, trixie=dep)), (False, "1.2.0-0+welland4~deb13"))
+        # Nor does a debian/control none of the published packages came from
+        # (the source was renamed) say which are the repository's own.
+        renamed = "Source: renamed\n\nPackage: ntrip-rtcm3-to-rtcm2p3\nArchitecture: all\n"
+        self.assertEqual(self.rule(self.facts(control=renamed, trixie=pkgs)), (True, "e.g. 1.2.0"))
+        self.assertEqual(apc.own_sources(self.facts(control=renamed, trixie=pkgs)), frozenset())
+        self.assertEqual(apc.own_sources(self.facts(trixie=pkgs)), {"ntrip-rtcm3-to-rtcm2p3"})
+        self.assertEqual(apc.own_sources(self.facts(control=None, trixie=pkgs)), frozenset())
+
+    def test_other_kinds_are_judged_as_before(self):
+        # A package of another source in any other kind has the kind's form.
+        control = "Source: tool\n\nPackage: tool\nArchitecture: any\n"
+        for kind, variant, own, other, bad in [
+            ("A", "", "2.93-0+welland1~deb13", "1.0-2+welland1~deb13", "1.2.0"),
+            ("B", "patch-series", "1.1.1.post173+welland.0.0.post70~deb13",
+             "0.9.post2+welland.0.0.post70~deb13", "1.2.0-0+welland4~deb13"),
+            ("mirror", "", "0.9.2.post126+welland.0.0.post7~deb13", "1.0+welland.0.0.post7~deb13",
+             "1.2.0-0+welland4~deb13"),
+            ("A", "backport", "2.1.0-1~bpo13+1", "1.0-1~bpo13+2", "1.2.0-0+welland4~deb13"),
+        ]:
+            with self.subTest(kind=kind, variant=variant):
+                f = self.facts(control=control, trixie=[("tool", own, ""), ("libother", other, "other")])
+                self.assertEqual(self.rule(f, kind, variant), (True, "e.g. " + max(own, other)))
+                f = self.facts(control=control, trixie=[("tool", own, ""), ("libother", bad, "other")])
+                self.assertEqual(self.rule(f, kind, variant), (False, bad))
+        f = self.facts(control=control, trixie=[("tool", "1.0", ""), ("libother", "1.2.0", "other")])
+        self.assertEqual(self.rule(f, "aggregate"), (None, "versions come from each package's own repository"))
+
+    def test_epoch_and_nothing_published(self):
+        f = self.facts(sid=self.ntrip("", ("python3-pyrtcm", "1:1.2.0-0+welland4", "pyrtcm")))
+        self.assertFalse(self.rule(f)[0])
+        self.assertEqual(self.rule(self.facts(sid=[("ntrip-rtcm3-to-rtcm2p3", "1:0.1.0", "")])),
+                         (False, "epoch: 1:0.1.0"))
+        self.assertEqual(self.rule(self.facts()), (True, "no packages"))
+        self.assertEqual(self.rule({"debian/control": NTRIP_CONTROL, "site": None}), (True, "no packages"))
+
+    def test_bundled_packages_are_set_aside(self):
+        # site_facts keeps each stanza's Source, and what was bundled from a
+        # dependency repository (python3-spiflash in rpi-hwid) is not judged.
+        index = ("Package: rpi-hwid\nVersion: 0.3.post134~deb13\nArchitecture: all\nSize: 10\n\n"
+                 "Package: python3-pyrtcm\nSource: pyrtcm (1.2.0-0+welland3)\nVersion: 1.2.0-0+welland4~deb13\n"
+                 "Architecture: all\nSize: 10\n\n"
+                 "Package: python3-spiflash\nSource: spiflash\nVersion: 0.2.post7~deb13\nArchitecture: all\n"
+                 "Size: 10\nBundled-From: mithro/spiflash\n")
+
+        def http(url, method="GET"):
+            if url.startswith("https://x.example/trixie/"):
+                return 200, index.encode() if url.endswith("/Packages") else b""
+            return 404, b""
+        with unittest.mock.patch.object(apc, "http", http):
+            site = apc.site_facts("https://x.example", "rpi-hwid")
+        self.assertEqual(list(site["suites"]), ["trixie"])
+        S = site["suites"]["trixie"]
+        self.assertEqual([(p["Package"], p["Source"]) for p in S["packages"]],
+                         [("rpi-hwid", ""), ("python3-pyrtcm", "pyrtcm (1.2.0-0+welland3)")])
+        self.assertEqual([p["Package"] for p in S["bundled"]], ["python3-spiflash"])
+        f = {"debian/control": "Source: rpi-hwid\n\nPackage: rpi-hwid\nArchitecture: all\n", "site": site}
+        self.assertEqual(self.rule(f), (True, "e.g. 1.2.0-0+welland4~deb13"))
+        # Were it not set aside, it would be a dependency in the wrong form.
+        S["packages"] += S["bundled"]
+        self.assertIn("python3-spiflash 0.2.post7~deb13 isn't", self.rule(f)[1])
+
+
 class Shared(unittest.TestCase):
     def shared(self, j, local_ver=False, nfpm_build=False, variant=""):
         return apc.shared_build(j, ACTION, local_ver, nfpm_build, variant)

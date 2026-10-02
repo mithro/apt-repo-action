@@ -130,7 +130,10 @@ RULES = [
     ("PKG-ARCH", "Packages", "the default architectures, `all`, or the declared ones with a reason",
      "Build the default architectures (or `all`), or declare the difference with a reason."),
     ("PKG-NODATES", "Packages", "no date in any version", "Version from git describe counts, not dates."),
-    ("PKG-VERSION", "Packages", "versions have their kind's form", "Switch to the shared version script."),
+    ("PKG-VERSION", "Packages", "versions have their kind's form; a dependency a Set B repository builds from "
+     "someone else's release has `<upstream>-0+<owner-tag><M>`",
+     "Switch to the shared version script; version a dependency built from someone else's release "
+     "`<upstream>-0+<owner-tag><M>[~deb<R>]`."),
     ("PKG-SUITE-SUFFIX", "Packages", "`~deb<R>` on every suite but sid", "Add the ~deb<R> suite suffix."),
     ("PKG-DBGSYM", "Packages", "no `-dbgsym` over 10 MB in the apt repository",
      "Keep debug symbols over 10 MB out of apt (artifact and GitHub Release only)."),
@@ -453,7 +456,7 @@ def site_facts(site: str, name: str) -> dict:
         code, rel = http(f"{site}/{suite}/Release")
         S["release"] = parse_stanzas(rel.decode(errors="replace"))[0] if code == 200 and rel.strip() else {}
         code, pk = http(f"{site}/{suite}/Packages")
-        pk = [{k: p.get(k, "") for k in ("Package", "Version", "Architecture", "Size", "Bundled-From")}
+        pk = [{k: p.get(k, "") for k in ("Package", "Source", "Version", "Architecture", "Size", "Bundled-From")}
               for p in parse_stanzas(pk.decode(errors="replace"))] if code == 200 else []
         # Packages bundled from a dependency repository (docs/packaging.md,
         # "Bundling a dependency repository") are someone else's: every rule
@@ -521,18 +524,48 @@ def bundle_gaps(depends: list[dict], site: dict | None) -> list[str]:
     return gaps
 
 
-def published_versions(f: dict) -> dict[str, dict[str, str]]:
-    """suite -> package -> newest published version."""
+def published(f: dict) -> dict[str, dict[str, dict]]:
+    """suite -> package -> the stanza of its newest published version."""
     out = {}
     for suite, S in ((f["site"] or {}).get("suites") or {}).items():
         newest = {}
         for p in S["packages"]:
             if p["Package"] and p["Version"]:
                 cur = newest.get(p["Package"])
-                if cur is None or version_key(p["Version"]) > version_key(cur):
-                    newest[p["Package"]] = p["Version"]
+                if cur is None or version_key(p["Version"]) > version_key(cur["Version"]):
+                    newest[p["Package"]] = p
         out[suite] = newest
     return out
+
+
+def published_versions(f: dict) -> dict[str, dict[str, str]]:
+    """suite -> package -> newest published version."""
+    return {suite: {name: p["Version"] for name, p in pkgs.items()} for suite, pkgs in published(f).items()}
+
+
+def source_of(p: dict) -> str:
+    """A Packages stanza's source package: its `Source:` (`name`, or
+    `name (version)`), and without one the package's own name."""
+    return (p.get("Source") or p["Package"]).split()[0]
+
+
+def own_sources(f: dict) -> frozenset[str]:
+    """The source packages a repository's own root debian/control builds.
+    Empty when it has none there (a patch series' are under
+    packaging/debian/, an nfpm build has none), or when nothing published
+    was built from them (the source was renamed since): then nothing says
+    which published packages are its own."""
+    own = frozenset(re.findall(r"^Source:[ \t]*(\S+)", f.get("debian/control") or "", re.M))
+    built = {source_of(p) for pkgs in published(f).values() for p in pkgs.values()}
+    return own if own & built else frozenset()
+
+
+def is_dependency(p: dict, own: frozenset[str]) -> bool:
+    """A published package built from another source package than the
+    repository's own (docs/packaging.md, "Versions", Set B: a dependency
+    built from someone else's release). Never, when the repository's own
+    sources aren't known."""
+    return bool(own) and source_of(p) not in own
 
 
 def target(f: dict, owner_tag: str | None) -> dict:
@@ -751,16 +784,23 @@ def mirror_declaration(decl: dict) -> tuple[dict, list[str]]:
     return {"build": build, "ours": ours, "tags": tags, "patches": patches}, problems
 
 
-def version_forms(kind: str, variant: str, owner_tag: str | None) -> re.Pattern | None:
+def version_forms(kind: str, variant: str, owner_tag: str | None, dependency: bool = False) -> re.Pattern | None:
     """PKG-VERSION: the form a published version has, for its kind
     (docs/packaging.md, "Versions"). None for an aggregate, whose versions
-    are each package's own repository's."""
+    are each package's own repository's. `dependency`: the package is one a
+    plain Set B repository builds from someone else's release, not its own
+    source; no other kind has a form of its own for those."""
     tag = re.escape(owner_tag) if owner_tag else "[a-z]+"
     suffix = r"(~deb\d+)?"
     if kind == "aggregate":
         return None
     if variant == "backport":
         return re.compile(r".+~bpo\d+\+\d+")
+    if kind == "B" and not variant and dependency:
+        # Set A's form at a release, and only that: revision 0 sorts below
+        # Debian's first (-1), so Debian's package replaces ours. A Debian
+        # revision or a `+git<N>` base would sort above Debian's.
+        return re.compile(rf"\d[^:+-]*-0\+{tag}\d+{suffix}")
     if kind == "A":
         # <base>+<owner-tag><M>: the base ends in a revision, which is
         # Debian's own when debian/ came from Debian, with whatever Debian
@@ -769,6 +809,31 @@ def version_forms(kind: str, variant: str, owner_tag: str | None) -> re.Pattern 
     if variant == "patch-series" or kind == "mirror":
         return re.compile(rf"(\d+:)?.+\+{tag}\.\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
     return re.compile(rf"(\d+:)?\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
+
+
+def version_rule(f: dict, t: dict, owner_tag: str | None) -> tuple[bool | None, str]:
+    """PKG-VERSION: the newest published version of each package, in each
+    suite, has its kind's form, and no epoch. In a plain Set B repository
+    the packages built from another source than its own debian/control's
+    are dependencies built from someone else's release, with their own
+    form."""
+    kind, variant = t["kind"], t["variant"]
+    form = version_forms(kind, variant, owner_tag)
+    if form is None:
+        return None, "versions come from each package's own repository"
+    theirs = version_forms(kind, variant, owner_tag, dependency=True)
+    # Only a kind with a form of its own for dependencies has any.
+    own = own_sources(f) if theirs.pattern != form.pattern else frozenset()
+    newest = [p for pkgs in published(f).values() for p in pkgs.values()]
+    bad = sorted({p["Version"] for p in newest if not is_dependency(p, own) and not form.fullmatch(p["Version"])})
+    bad += sorted({f"{p['Package']} {p['Version']} isn't <upstream>-0+{owner_tag or '<owner-tag>'}<M>[~deb<R>] "
+                   f"(its source, {source_of(p)}, isn't this repository's)"
+                   for p in newest if is_dependency(p, own) and not theirs.fullmatch(p["Version"])})
+    flat = sorted({p["Version"] for p in newest})
+    epoch = [v for v in flat if re.match(r"\d+:", v)]
+    return (not bad and not epoch,
+            ("; ".join(bad[:2]) + (" …" if len(bad) > 2 else "")) if bad else
+            (f"epoch: {epoch[0]}" if epoch else ("e.g. " + flat[-1] if flat else "no packages")))
 
 
 def version_declaration(decl: dict, kind: str, variant: str) -> list[str]:
@@ -1508,15 +1573,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     dated = [v for v in flat if DATE.search(v)]
     put("PKG-NODATES", None if kind == "aggregate" and not dated else not dated,
         ("date-based: " + ", ".join(dated[:2])) if dated else "count-based")
-    forms = version_forms(kind, variant, owner_tag)
-    if forms is None:
-        put("PKG-VERSION", None, "versions come from each package's own repository")
-    else:
-        bad_v = [v for v in flat if not forms.fullmatch(v)]
-        epoch = [v for v in flat if re.match(r"\d+:", v)]
-        put("PKG-VERSION", not bad_v and not epoch,
-            ("; ".join(bad_v[:2]) + (" …" if len(bad_v) > 2 else "")) if bad_v else
-            (f"epoch: {epoch[0]}" if epoch else ("e.g. " + flat[-1] if flat else "no packages")))
+    put("PKG-VERSION", *version_rule(f, t, owner_tag))
     if kind == "aggregate" or variant == "backport":
         put("PKG-SUITE-SUFFIX", None, "no build of its own" if kind == "aggregate" else "~bpo<R> orders it")
     else:
