@@ -410,7 +410,9 @@ jobs:
   wouldn't see both. ntrip-rtcm3-to-rtcm2p3's `Build pyrtcm and pynmeagps`
   step works this way: it builds, from their PyPI sdists, the two Python
   libraries it needs that Debian lacks (pyrtcm in every suite, pynmeagps
-  in trixie).
+  in trixie). Such a dependency has a version of its own (see
+  [Versions](#set-b)) and Debian's name (see
+  [Package contents](#package-contents)).
 
 - **An `Architecture: all` repository** has `arch: [all]` in its matrix, so
   its jobs read `build-deb (trixie all)` and its artifacts `debs-trixie-all`.
@@ -690,7 +692,9 @@ Debian has:
 Versions come from git, never from dates, run numbers or hand edits. Every
 push to the default branch MUST produce a version greater than everything
 already published for that package in that suite. A later build of the same
-commit produces the same version.
+commit produces the same version. The one exception is a
+[dependency built from someone else's release](#set-b), whose version
+changes only when what it is built from does.
 
 ### Set B
 
@@ -729,6 +733,44 @@ build's entry; the build fails if that changelog is for another version
 than the pin (the code and the version would disagree). A Debian binNMU of
 the same source (`49.0.0-2+b1`) sorts below ours (`b` before `w`), so it
 doesn't replace our build and needs no new pin.
+
+A **dependency built from someone else's release** (a step of the build, see
+[Workflows](#workflows): ntrip-rtcm3-to-rtcm2p3's pyrtcm and pynmeagps) is a
+source package of its own, and someone else's code. It takes
+[Set A](#set-a)'s form at a release, not the repository's own version:
+
+```
+<upstream>-0+<owner-tag><M>[~deb<R>][~pr<P>]
+```
+
+for example `1.1.7-0+welland4~deb13`.
+
+- **`<upstream>`** is the release that is built, normalised as Set A's tags
+  are. It MUST be a release, with revision `0`: that sorts below Debian's
+  first revision (`-1`), so Debian's package of the same release replaces
+  ours. A `+git<N>` base or a Debian revision would sort above Debian's.
+  Anything more (an unreleased commit, patches, Debian's own `debian/`) is a
+  Set A repository of its own.
+- **`<M>`** counts the commits that changed the script that builds it
+  (`git rev-list --count HEAD -- <script>`), so a change to the packaging is
+  a new version. Everything of ours that shapes the package MUST live in
+  that script: which release will do, the build dependencies, the `debian/`
+  it writes. The step MUST fail in a shallow clone, where the count would be
+  1, and a renamed script MUST carry the old count on.
+- **It is built only for the suites whose Debian archive lacks the package**
+  at the version needed. Where Debian has it, the build MUST NOT make one:
+  ours would shadow Debian's. The build asks the suite's own apt, so this
+  follows Debian's archive by itself.
+- **It is republished at the same version** until the script or the upstream
+  release changes. A push that changes neither builds the same package
+  again, as a later build of the same commit does (the changelog's date is
+  the script's last commit's). A push that changes either MUST produce a
+  version greater than everything already published for it in that suite: a
+  new release raises `<upstream>`, a new commit to the script raises `<M>`.
+- `PKG-VERSION` tells such a package from the repository's own by the
+  `Source:` of its stanza in the published index: a source that isn't the
+  one in the repository's root `debian/control`. So it MUST be built as its
+  own source package.
 
 An **epoch** (`2:`) is only for a repository recovering from an earlier
 version scheme, and is declared as a `PKG-VERSION` exception (rpi-qemu).
@@ -1125,6 +1167,11 @@ To check it worked, look at any `build-deb` job of that commit:
   - Set A keeps upstream's and Debian's names, so our build replaces the
     distribution's.
   - Set B names MUST NOT clash with a package in Debian.
+  - A dependency a Set B repository builds from someone else's release (see
+    [Versions](#set-b)) is the exception: it MUST have the name Debian gives
+    the package, or would give it (`python3-pynmeagps`). The two never meet
+    in one suite, since it isn't built where Debian has the package, and on
+    the upgrade to a suite that has it, Debian's package replaces ours.
   - A variant of someone else's software that should install *alongside*
     theirs takes a suffix (`openocd-fpgasonline`, `python3-paramiko-insecure`).
 - **Debug symbols**: `-dbgsym` packages go into the apt repository only up
