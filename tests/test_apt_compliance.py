@@ -248,9 +248,91 @@ def nfpm(ref="main", release_ref="main"):
     return jobs(NFPM.replace("RELEASE_REF", release_ref).replace("@REF", "@" + ref))
 
 
+class VersionForms(unittest.TestCase):
+    """PKG-VERSION: what each kind's published versions look like."""
+
+    def test_set_a(self):
+        forms = apc.version_forms("A", "", "welland")
+        for v in ["7.5+git583.g06489e0-0+welland10~deb13", "7.5+git583.g06489e0-0+welland10",
+                  "1.1.2-7+welland13", "2.93-0+welland1", "0.0+git6233.g06489e0-0+welland10~deb14",
+                  "3.8~rc3+git5.gabcdef0-0+welland3~deb13", "2.94~test1-0+welland2",
+                  "3.8~git20260720.5ed5e36-0+welland1", "0.9.10b~git20260909.691f9b5-0+welland3",
+                  "1:1.5.1-0+welland5~deb13", "2.93+dfsg-1+welland2~deb13",
+                  # Debian's own revision, whatever Debian put in it
+                  "2.93-4+deb13u1+welland2~deb13", "2.93-4+b1+welland3", "2.0-1~bpo12+1+welland1"]:
+            with self.subTest(version=v):
+                self.assertTrue(forms.fullmatch(v))
+        for v in ["0.3.post134~deb13", "0.0.post6243~deb13", "0.1.1.post13",          # Set B's
+                  "1.1.1.post173+welland.0.0.post70~deb13",                           # a patch series'
+                  "43.0.0-3+deb13u1+welland.0.0.post6~deb13",
+                  "5.0.0-1+insecure1", "1.5.1+welland4", "2.93-0+fpgasonline1",       # another tag, no revision
+                  "2.93-0+welland", "2.93-0+welland1~pr4", "2.93-0+welland1~deb13~pr4",
+                  "2.1.0-1~bpo12+1"]:
+            with self.subTest(version=v):
+                self.assertFalse(forms.fullmatch(v))
+        self.assertTrue(apc.version_forms("A", "", "fpgasonline").fullmatch("2.93-0+fpgasonline1"))
+
+    def test_the_other_kinds_are_unchanged(self):
+        for kind, variant, good, bad in [
+            ("B", "", "0.3.post134~deb13", "2.93-0+welland1"),
+            ("B", "patch-series", "1.1.1.post173+welland.0.0.post70~deb13", "0.3.post134"),
+            ("mirror", "", "0.9.2.post126+welland.0.0.post7~deb13", "2.93-0+welland1"),
+            ("A", "backport", "2.1.0-1~bpo12+1", "2.93-0+welland1"),
+        ]:
+            with self.subTest(kind=kind, variant=variant):
+                forms = apc.version_forms(kind, variant, "welland")
+                self.assertTrue(forms.fullmatch(good))
+                self.assertFalse(forms.fullmatch(bad))
+        self.assertIsNone(apc.version_forms("aggregate", "", "welland"))
+
+
 class Shared(unittest.TestCase):
     def shared(self, j, local_ver=False, nfpm_build=False, variant=""):
         return apc.shared_build(j, ACTION, local_ver, nfpm_build, variant)
+
+    def test_set_a_asks_for_the_set_a_version(self):
+        # A Set A repository on the shared build without --upstream-branch
+        # would be stamped with the Set B form.
+        def shared(text, **kw):
+            return apc.shared_build(jobs(text), ACTION, False, False, "", set_a=True, **kw)
+        without = "the reusable build-deb.yml; no `--upstream-branch` in version-args, so the version would be Set B's"
+        self.assertEqual(shared(REUSABLE), (False, without))
+        asked = REUSABLE.replace("build-deb.yml@main", "build-deb.yml@main\n    with:\n"
+                                 "      version-args: --owner-tag welland --upstream-branch upstream")
+        self.assertIn("version-args", asked)
+        self.assertEqual(shared(asked), (True, "the reusable build-deb.yml"))
+        self.assertEqual(shared(asked.replace("--upstream-branch upstream", "--epoch 1")), (False, without))
+        # Not Set A: nothing asked of it.
+        self.assertEqual(self.shared(jobs(REUSABLE)), (True, "the reusable build-deb.yml"))
+        # Its own script still present: that is the failure, as before.
+        self.assertEqual(apc.shared_build(jobs(REUSABLE), ACTION, True, False, "", set_a=True),
+                         (False, "the reusable build-deb.yml; local deb-version.py"))
+        # The build-deb action in the repository's own job; one use of it
+        # only prepares an install test and passes nothing.
+        action = """
+jobs:
+  build-deb:
+    steps:
+      - name: Build
+        uses: someone/apt-repo-action/build-deb@main
+        with:
+          suite: trixie
+          VERSION_ARGS
+  install-test:
+    steps:
+      - uses: someone/apt-repo-action/build-deb@main
+        with:
+          build: "false"
+"""
+        self.assertEqual(shared(action.replace("VERSION_ARGS", "arch: all")),
+                         (False, "the build-deb action; no `--upstream-branch` in version-args, so the "
+                                 "version would be Set B's"))
+        self.assertEqual(shared(action.replace(
+            "VERSION_ARGS", "version-args: --owner-tag welland --upstream-branch upstream")),
+            (True, "the build-deb action"))
+        # A local reusable workflow passing its own input on can't be read.
+        self.assertEqual(shared(action.replace("VERSION_ARGS", "version-args: ${{ inputs.version-args }}")),
+                         (True, "the build-deb action"))
 
     def test_reusable_workflow(self):
         self.assertEqual(self.shared(jobs(REUSABLE)), (True, "the reusable build-deb.yml"))
