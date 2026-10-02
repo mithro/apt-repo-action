@@ -56,8 +56,11 @@ jobs:
         env:
           SUITES: ${{ inputs.suites }}
           GH_TOKEN: ${{ github.token }}
+        # bash, for pipefail: a failing check must fail the step, not be
+        # hidden by tee and read as "nothing is stale".
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           site=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .html_url)
           python3 .apt-repo-action/scripts/bundle-depends.py stale --suites "$SUITES" --site "$site" \
             | tee -a "$GITHUB_STEP_SUMMARY"

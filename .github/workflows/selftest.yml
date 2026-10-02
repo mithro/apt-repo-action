@@ -529,8 +529,9 @@ jobs:
       - name: A Rust crate Raspbian hasn't rebuilt yet
         id: pick
         if: startsWith(matrix.case, 'rebuild')
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           python3 tests/pick-stale-raspbian.py forky | tee -a "$GITHUB_OUTPUT"
           if ! grep -q '^source=' "$GITHUB_OUTPUT"; then
             echo "::warning title=Raspbian rebuild::no rebuildable Rust crate in raspbian forky or forky-staging is older than its source today, so the automatic rebuild goes untested; rebuild-input still rebuilds rust-schemars-derive by name"
