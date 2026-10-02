@@ -92,12 +92,17 @@ def packages_in(suite_dir: pathlib.Path) -> list[tuple[str, str, str, str]]:
         origin = field("Bundled-From")
         if not name:
             continue
-        # Several versions accumulate; show the newest by dpkg ordering, which
-        # for the git-describe scheme is plain string order on the .postN tail.
+        # Several versions accumulate; show the newest by dpkg ordering.
+        # String order isn't it: "welland9" > "welland10", ".post9" > ".post10".
         key = (name, arch)
-        if key not in found or version > found[key][1]:
+        if key not in found or newer(version, found[key][1]):
             found[key] = (name, version, arch, origin)
     return sorted(found.values())
+
+
+def newer(a: str, b: str) -> bool:
+    """Whether version a is greater than b, in dpkg's own ordering."""
+    return subprocess.run(["dpkg", "--compare-versions", a, "gt", b]).returncode == 0
 
 
 def origin_html(origin: str) -> str:
