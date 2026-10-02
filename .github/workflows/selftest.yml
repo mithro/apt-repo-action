@@ -26,7 +26,7 @@ jobs:
     # Build a throwaway source tree with THIS checkout of build-deb and check
     # the version it stamped. On a pull request every build is a preview, so
     # ~pr<P> is expected there.
-    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }}${{ matrix.patch-series && ' patch-series' || '' }})
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }}${{ matrix.legacy && ' legacy' || '' }}${{ matrix.no-changelog && ' no-changelog' || '' }}${{ matrix.patch-series && ' patch-series' || '' }}${{ matrix.set-a && ' set-a' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -45,6 +45,11 @@ jobs:
           # A patch series builds in the fetched project's tree, versioned
           # from both (docs/packaging.md, "Versions"), with an epoch.
           - {suite: bookworm, arch: all, patch-series: true, want: "2:1.1.1.post2+selftest.0.3.post1~deb12"}
+          # Set A: upstream's history on the `upstream` branch, ours on top.
+          # One upstream commit after its v2.93, two commits of ours;
+          # @UPSTREAM@ is the upstream commit's id, which the fixture makes
+          # afresh each run.
+          - {suite: trixie, arch: all, set-a: true, want: "2.93+git1.g@UPSTREAM@-0+selftest2~deb13"}
     steps:
       - uses: actions/checkout@v5
 
@@ -54,6 +59,7 @@ jobs:
           ${{ matrix.legacy && '--legacy' || '' }}
           ${{ matrix.no-changelog && '--no-changelog' || '' }}
           ${{ matrix.patch-series && '--patch-series fixture-upstream' || '' }}
+          ${{ matrix.set-a && '--set-a' || '' }}
 
       - name: Build with this checkout of build-deb
         id: build
@@ -63,7 +69,7 @@ jobs:
           arch: ${{ matrix.arch }}
           source-dir: ${{ matrix.patch-series && 'fixture-upstream' || 'fixture-src' }}
           version-tree: ${{ matrix.patch-series && 'fixture-src' || '' }}
-          version-args: ${{ matrix.patch-series && '--owner-tag selftest --upstream-dir . --epoch 2' || '' }}
+          version-args: ${{ matrix.patch-series && '--owner-tag selftest --upstream-dir . --epoch 2' || matrix.set-a && '--owner-tag selftest --upstream-branch upstream' || '' }}
 
       - name: No declaration, so no dependency repositories
         env:
@@ -90,8 +96,13 @@ jobs:
           LEGACY: ${{ matrix.legacy }}
           NO_CHANGELOG: ${{ matrix.no-changelog }}
           PATCH_SERIES: ${{ matrix.patch-series }}
+          SET_A: ${{ matrix.set-a }}
         run: |
           set -eu
+          if [ "$SET_A" = true ]; then
+            upstream=$(git -C fixture-src rev-parse upstream | cut -c1-7)
+            WANT=${WANT/@UPSTREAM@/$upstream}
+          fi
           if [ -n "$PR" ] && [ "$LEGACY" != true ]; then WANT="$WANT~pr$PR"; fi
           ls built-debs/
           got=$(dpkg-deb -f built-debs/apt-repo-selftest-src_*.deb Version)
@@ -806,12 +817,22 @@ jobs:
           - {case: patch-series, suite: forky,
              args: "--owner-tag fpgasonline --upstream-version 20260914",
              want: "20260914+fpgasonline.0.3.post1~deb14"}
+          # Set A, for a build with its own job (@UPSTREAM@ as in build-deb).
+          - {case: set-a, suite: forky, fixture: "--set-a",
+             args: "--owner-tag welland --upstream-branch upstream",
+             want: "2.93+git1.g@UPSTREAM@-0+welland2~deb14"}
+          # An upstream without usable tags, whose declaration names its
+          # release commits instead ([version] release-subject), as
+          # smartmontools' does.
+          - {case: set-a, suite: sid, fixture: "--set-a --release-subject",
+             args: "--owner-tag welland --upstream-branch upstream",
+             want: "2.93+git1.g@UPSTREAM@-0+welland2"}
     env:
       NFPM_VERSION: 2.47.0
       NFPM_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
     steps:
       - uses: actions/checkout@v5
-      - run: python3 tests/make-source-fixture.py fixture-src
+      - run: python3 tests/make-source-fixture.py fixture-src ${{ matrix.fixture }}
       - name: The version, with this checkout of deb-version
         id: version
         uses: ./deb-version
@@ -823,9 +844,14 @@ jobs:
         env:
           GOT: ${{ steps.version.outputs.version }}
           WANT: ${{ matrix.want }}
+          CASE: ${{ matrix.case }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -eu
+          if [ "$CASE" = set-a ]; then
+            upstream=$(git -C fixture-src rev-parse upstream | cut -c1-7)
+            WANT=${WANT/@UPSTREAM@/$upstream}
+          fi
           if [ -n "$PR" ]; then WANT="$WANT~pr$PR"; fi
           echo "version: $GOT (want $WANT)"
           test "$GOT" = "$WANT"
