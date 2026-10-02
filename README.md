@@ -183,8 +183,9 @@ So: share the publish half everywhere, and the build half for every
 artifacts itself and calls the publish workflow unchanged.
 
 `build-deb` stamps the version with the shared
-[`scripts/deb-version.py`](scripts/deb-version.py) (Set B and its patch series
-form, with the `~deb<R>` and `~pr<P>` suffixes of
+[`scripts/deb-version.py`](scripts/deb-version.py) (Set B, its patch series
+form, and Set A with `version-args: --owner-tag <owner-tag> --upstream-branch
+upstream`, each with the `~deb<R>` and `~pr<P>` suffixes of
 [docs/packaging.md](docs/packaging.md#versions)). A
 repository that still carries its own `packaging/deb-version.py` keeps using
 it, with a warning, until it is migrated: see

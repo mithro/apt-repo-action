@@ -121,7 +121,8 @@ RULES = [
     ("PKG-SHARED", "Workflow", "builds with the shared build at `@main` (build-deb.yml, build-deb, or deb-version for nfpm "
      "and a patch series' own job); no local `deb-version.py`",
      "Build with <action-repo>/.github/workflows/build-deb.yml@main (or the build-deb action, or deb-version for an nfpm "
-     "build) and drop packaging/deb-version.py."),
+     "build) and drop packaging/deb-version.py; Set A passes `version-args: --owner-tag <owner-tag> --upstream-branch "
+     "upstream`."),
     ("PKG-INSTALL-TEST", "Workflow", "an `Install test` step installs the packages in a clean container",
      "Add an `Install test` step."),
     ("PKG-SUITES", "Packages", "the default suites, or the declared ones with a reason",
@@ -570,6 +571,7 @@ def target(f: dict, owner_tag: str | None) -> dict:
     t["exceptions"] = dict(decl.get("exceptions", {}))
     t["upstream"] = decl.get("upstream")
     t["mirror"], t["mirror_problems"] = mirror_declaration(decl) if t["kind"] == "mirror" else ({}, [])
+    t["version_problems"] = version_declaration(decl, t["kind"], t["variant"])
     raw = decl.get("depends", [])
     try:
         if not isinstance(raw, list) or not all(isinstance(d, dict) for d in raw):
@@ -747,6 +749,54 @@ def mirror_declaration(decl: dict) -> tuple[dict, list[str]]:
     if extra:
         problems.append(f"[mirror] has unknown keys {', '.join(extra)}")
     return {"build": build, "ours": ours, "tags": tags, "patches": patches}, problems
+
+
+def version_forms(kind: str, variant: str, owner_tag: str | None) -> re.Pattern | None:
+    """PKG-VERSION: the form a published version has, for its kind
+    (docs/packaging.md, "Versions"). None for an aggregate, whose versions
+    are each package's own repository's."""
+    tag = re.escape(owner_tag) if owner_tag else "[a-z]+"
+    suffix = r"(~deb\d+)?"
+    if kind == "aggregate":
+        return None
+    if variant == "backport":
+        return re.compile(r".+~bpo\d+\+\d+")
+    if kind == "A":
+        # <base>+<owner-tag><M>: the base ends in a revision, which is
+        # Debian's own when debian/ came from Debian, with whatever Debian
+        # put in it (2.93-4+deb13u1, 2.93-4+b1, 2.0-1~bpo12+1).
+        return re.compile(rf"(\d+:)?[^:]+-[^-]*\+{tag}\d+{suffix}")
+    if variant == "patch-series" or kind == "mirror":
+        return re.compile(rf"(\d+:)?.+\+{tag}\.\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
+    return re.compile(rf"(\d+:)?\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
+
+
+def version_declaration(decl: dict, kind: str, variant: str) -> list[str]:
+    """A Set A repository's optional `[version]` table (docs/packaging.md,
+    "The declaration"): `release-subject`, the pattern upstream's release
+    commits' subjects match, which scripts/deb-version.py reads when
+    upstream's release tags aren't in the built branch's history."""
+    v = decl.get("version")
+    if v is None:
+        return []
+    if not isinstance(v, dict):
+        return ["[version] must be a table"]
+    problems = []
+    if kind != "A" or variant == "backport":
+        problems.append("[version] is for Set A: no other kind's version reads it")
+    if "release-subject" in v:
+        subject = v["release-subject"]
+        try:
+            if not isinstance(subject, str) or not subject:
+                raise re.error("not a regular expression")
+            if re.compile(subject).groups > 1:
+                raise re.error("at most one group, around the release")
+        except re.error as e:
+            problems.append(f"[version] release-subject {subject!r}: {e}")
+    extra = sorted(set(v) - {"release-subject"})
+    if extra:
+        problems.append(f"[version] has unknown keys {', '.join(extra)}")
+    return problems
 
 
 GITHUB_ACTIONS_APP = 15368  # the app a workflow's GITHUB_TOKEN acts as
@@ -967,7 +1017,7 @@ def install_test(jobs: dict, action_repo: str, workflows: dict | None = None) ->
 
 
 def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, variant: str,
-                 workflows: dict | None = None) -> tuple[bool, str]:
+                 workflows: dict | None = None, set_a: bool = False) -> tuple[bool, str]:
     """PKG-SHARED (docs/packaging.md, "The shared actions"): the build is the
     shared one, at `@main`, and the repository carries no deb-version.py.
 
@@ -977,19 +1027,25 @@ def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, vari
     nfpm build or a patch series' own job. A job calling a local reusable
     workflow is read through, as PKG-INSTALL-TEST does. Every use of any of
     them must be at `@main`, the release job's included, since each
-    repository runs exactly what's on apt-repo-action's main."""
+    repository runs exactly what's on apt-repo-action's main.
+
+    A Set A repository (`set_a`) must also ask the shared script for the
+    Set A version, `--upstream-branch` in a shared use's `version-args`:
+    without it the script makes the Set B form from our own tags
+    (0.0.post6243~deb13), which sorts below everything published."""
     repo = action_repo.lower()
     workflow, action, version = (f"{repo}/.github/workflows/build-deb.yml", f"{repo}/build-deb",
                                  f"{repo}/deb-version")
     uses = []
     for _, _, j in read_through(jobs, workflows):
-        uses.append(str(j.get("uses", "")))
-        uses += [str(s.get("uses", "")) for s in (j.get("steps") or []) if isinstance(s, dict)]
-    found = {}
-    for u in uses:
+        uses.append((str(j.get("uses", "")), j.get("with")))
+        uses += [(str(s.get("uses", "")), s.get("with")) for s in (j.get("steps") or []) if isinstance(s, dict)]
+    found, version_args = {}, []
+    for u, w in uses:
         path, _, ref = u.partition("@")
         if path.lower() in (workflow, action, version):
             found.setdefault(path.lower(), set()).add(ref)
+            version_args.append(str(w.get("version-args", "")) if isinstance(w, dict) else "")
     off_main = [f"{path.rpartition('/')[2]}@{ref} (want @main)"
                 for path, refs in sorted(found.items()) for ref in sorted(refs) if ref != "main"]
     if workflow in found:
@@ -1006,7 +1062,14 @@ def shared_build(jobs: dict, action_repo: str, local_ver: bool, nfpm: bool, vari
     detail = "; ".join(off_main) if off_main else what or "own build steps"
     if local_ver:
         detail += "; local deb-version.py"
-    return bool(what) and not off_main and not local_ver, detail
+    # An expression (a local reusable workflow passing its own input on)
+    # can't be read here; the script itself refuses the Set B form for a
+    # repository declared Set A.
+    no_set_a = (set_a and bool(what) and not local_ver
+                and not any("--upstream-branch" in a or "${{" in a for a in version_args))
+    if no_set_a:
+        detail += "; no `--upstream-branch` in version-args, so the version would be Set B's"
+    return bool(what) and not off_main and not local_ver and not no_set_a, detail
 
 
 def key_fingerprints(data: bytes) -> list[str]:
@@ -1279,8 +1342,9 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     # --- Repository
     if t.get("declaration_error"):
         put("PKG-DECLARED", False, f"{DECLARATION} doesn't parse: {t['declaration_error']}")
-    elif t["declared"] and (t["matrix_problems"] or t.get("mirror_problems")):
-        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(t["matrix_problems"] + t.get("mirror_problems", [])))
+    elif t["declared"] and (t["matrix_problems"] or t.get("mirror_problems") or t.get("version_problems")):
+        put("PKG-DECLARED", False, f"{DECLARATION}: " + "; ".join(
+            t["matrix_problems"] + t.get("mirror_problems", []) + t.get("version_problems", [])))
     else:
         put("PKG-DECLARED", t["declared"], f"kind {kind}" + (f" ({variant})" if variant else "")
             + ("" if t["declared"] else " — inferred"))
@@ -1408,7 +1472,8 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
         put("PKG-SHARED", None, "nothing to build")
     else:
         put("PKG-SHARED", *shared_build(jobs, args.action_repo, "packaging/deb-version.py" in f["files"],
-                                        t["nfpm"], "patch-series" if kind == "mirror" else variant, parsed))
+                                        t["nfpm"], "patch-series" if kind == "mirror" else variant, parsed,
+                                        set_a=kind == "A" and variant != "backport"))
     if kind == "aggregate":
         put("PKG-INSTALL-TEST", None, "nothing to build")
     else:
@@ -1443,18 +1508,7 @@ def check(f: dict, t: dict, args, owner_tag: str | None, packaging: frozenset[st
     dated = [v for v in flat if DATE.search(v)]
     put("PKG-NODATES", None if kind == "aggregate" and not dated else not dated,
         ("date-based: " + ", ".join(dated[:2])) if dated else "count-based")
-    tag = re.escape(owner_tag) if owner_tag else "[a-z]+"
-    suffix = r"(~deb\d+)?"
-    if kind == "aggregate":
-        forms = None
-    elif variant == "backport":
-        forms = re.compile(r".+~bpo\d+\+\d+")
-    elif kind == "A":
-        forms = re.compile(rf"(\d+:)?[^:]+-[^-+]*\+{tag}\d+{suffix}")
-    elif variant == "patch-series" or kind == "mirror":
-        forms = re.compile(rf"(\d+:)?.+\+{tag}\.\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
-    else:
-        forms = re.compile(rf"(\d+:)?\d+\.\d+(\.\d+)?(\.post\d+)?{suffix}")
+    forms = version_forms(kind, variant, owner_tag)
     if forms is None:
         put("PKG-VERSION", None, "versions come from each package's own repository")
     else:

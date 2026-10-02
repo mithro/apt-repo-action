@@ -6,7 +6,9 @@ description: >-
 
 # docs/packaging.md, "The shared actions". Set B:
 #   <X.Y[.Z]>[.post<N>][~deb<R>][~pr<P>]
-# and with version-args, the patch series form and an epoch.
+# and with version-args, the patch series form, the Set A form
+#   <base>+<owner-tag><M>[~deb<R>][~pr<P>]
+# and an epoch.
 
 inputs:
   suite:
@@ -22,7 +24,8 @@ inputs:
     description: >-
       Extra arguments for scripts/deb-version.py, space-separated: a patch
       series' "--owner-tag fpgasonline --upstream-version 1.1.1" or
-      "--upstream-dir <path>" (relative to source-dir), and "--epoch N"
+      "--upstream-dir <path>" (relative to source-dir), Set A's
+      "--owner-tag welland --upstream-branch upstream", and "--epoch N"
       under a declared exception.
     required: false
     default: ""

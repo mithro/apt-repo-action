@@ -24,12 +24,22 @@ debian/ files written into it uncommitted, as a patch series renders them
 (docs/packaging.md, "Versions"). Built there with <dir> as the version tree
 and --owner-tag selftest, the version is 1.1.1.post2+selftest.0.3.post1.
 
+--set-a makes a Set A repository instead (docs/packaging.md, "Set A"): an
+`upstream` branch with upstream's history, tagged v2.93 one commit back, and
+`packaging` (checked out), which is that plus the fixture and one more commit
+of ours. With --owner-tag selftest --upstream-branch upstream the version is
+2.93+git1.g<sha7>-0+selftest2, <sha7> being upstream's tip. With
+--release-subject upstream has no tag, as when its release tags aren't on
+the branch it is built from: the release is its "Release 2.93 RELEASE_2_93"
+commit, which the declaration's `[version] release-subject` names.
+
 --any adds an architecture-dependent package from tests/fixtures/hello/,
 apt-repo-selftest-hello: a C command that prints its version for `apt-repo-selftest-hello --version` and,
 for `--cpu-arch`, the ARM architecture it was compiled for (__ARM_ARCH), so
 a test can tell a Raspbian ARMv6 build from a Debian ARMv7 one.
 
-Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog | --patch-series <dir>]
+Usage: tests/make-source-fixture.py <dir> [--legacy | --no-changelog | --patch-series <dir> |
+                                          --set-a [--release-subject]]
            [--depends <url> --depends-key <url> [--declare-only | --bundle]] [--any]
 """
 import argparse
@@ -90,6 +100,16 @@ reason = "apt-repo-selftest-dep is not in Debian"
 """
 
 
+SET_A = """\
+kind = "A"
+upstream = "https://example.org/upstream"
+architectures = "all"
+
+[version]
+release-subject = '^Release (\\d+(?:\\.\\d+)+) RELEASE_\\d+(?:_\\d+)+$'
+"""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", type=Path)
@@ -99,6 +119,10 @@ def main() -> None:
     how.add_argument("--no-changelog", action="store_true")
     how.add_argument("--patch-series", metavar="UPSTREAM_DIR", type=Path,
                      help="also make a fetched upstream tree there, holding the debian/ files")
+    how.add_argument("--set-a", action="store_true",
+                     help="a Set A repository: an upstream branch, and packaging on top of it")
+    ap.add_argument("--release-subject", action="store_true",
+                    help="with --set-a: no upstream tag; the declaration names the release commit")
     ap.add_argument("--depends", metavar="URL", help="the dependency repository's site")
     ap.add_argument("--depends-key", metavar="URL", help="its key")
     ap.add_argument("--declare-only", action="store_true", help="declare it, but don't build-depend on it")
@@ -111,7 +135,11 @@ def main() -> None:
     args = ap.parse_args()
     if bool(args.depends) != bool(args.depends_key):
         ap.error("--depends and --depends-key go together")
+    if args.release_subject and not args.set_a:
+        ap.error("--release-subject goes with --set-a")
     files = dict(FILES)
+    if args.release_subject:
+        files[".github/apt-packaging.toml"] = SET_A
     if args.depends:
         if not args.declare_only:
             files["debian/control"] = files["debian/control"].replace(
@@ -152,6 +180,17 @@ def main() -> None:
     def git(*a: str) -> None:
         subprocess.run(["git", "-C", str(args.dir), *a], check=True, env=env)
 
+    if args.set_a:
+        git("init", "-q", "-b", "upstream")
+        git("commit", "-q", "--allow-empty", "-m", "Release 2.93 RELEASE_2_93")
+        if not args.release_subject:
+            git("tag", "-a", "v2.93", "-m", "v2.93")
+        git("commit", "-q", "--allow-empty", "-m", "upstream, one after")
+        git("checkout", "-q", "-b", "packaging")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        git("commit", "-q", "--allow-empty", "-m", "one more of ours")
+        return
     git("init", "-q", "-b", "main")
     git("add", "-A")
     git("commit", "-q", "-m", "fixture")

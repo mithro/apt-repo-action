@@ -74,8 +74,10 @@ on:
       version-args:
         description: >-
           build-deb's version-args: extra arguments for the shared
-          scripts/deb-version.py, such as "--epoch 2" under a declared
-          exception.
+          scripts/deb-version.py. A Set A repository passes
+          "--owner-tag <owner-tag> --upstream-branch upstream" (the Set A
+          version, docs/packaging.md, "Versions"); "--epoch 2" under a
+          declared exception.
         required: false
         default: ""
         type: string
@@ -155,7 +157,9 @@ jobs:
       - uses: actions/checkout@v5
         with:
           path: source
-          fetch-depth: 0  # full history and tags: the version is git describe's
+          # Full history, every branch and tag: the version is git
+          # describe's, and Set A's also reads the upstream branch.
+          fetch-depth: 0
       - name: Check out apt-repo-action, at this workflow's commit
         uses: actions/checkout@v5
         with:
