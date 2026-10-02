@@ -31,11 +31,14 @@ the suite and preview suffixes:
      upstream has no tags.
   The release is the nearest tag (``git describe --tags``, or only those
   matching ``--upstream-tag-match``), normalised: a leading v or
-  project-name prefix goes, ``-`` and ``_`` become ``.`` (``v2.93``,
-  ``netplan-1.1.2``, ``RELEASE_7_5``). An upstream whose release tags aren't
-  in the built branch's history (smartmontools: imported from svn) names its
-  releases by commit subject instead: ``--upstream-release-subject``, or
-  ``[version] release-subject`` in the declaration.
+  project-name prefix goes, ``_`` becomes ``.`` (``v2.93``,
+  ``netplan-1.1.2``, ``RELEASE_7_5``), and a pre-release gets a ``~``, so it
+  sorts below its release (``3.8-rc3`` is ``3.8~rc3``, ``2.94rc1`` is
+  ``2.94~rc1``). An upstream whose release tags aren't in the built branch's
+  history (smartmontools: imported from svn) names its releases by commit
+  subject instead: ``--upstream-release-subject``, or ``[version]
+  release-subject`` in the declaration; the release is then the nearest
+  such commit on the branch's own line (its first parents).
 - ``<E>:`` only with ``--epoch``, which a repository uses only under a
   declared PKG-VERSION exception (rpi-qemu's epoch 2).
 - ``~deb<R>`` is the suite's Debian release number; sid has none.
@@ -85,10 +88,19 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
+def warn(message: str) -> None:
+    """To stderr: stdout is the version. Under GitHub Actions also as a
+    warning annotation, which the runner reads from either stream."""
+    print(f"deb-version.py: warning: {message}", file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=deb-version.py::{message}", file=sys.stderr)
+
+
 def git(src: Path, *args: str) -> str:
     try:
+        # errors=replace: an old commit's subject needn't be UTF-8 (an svn import).
         return subprocess.run(["git", "-C", str(src), *args], capture_output=True,
-                              text=True, check=True).stdout.strip()
+                              text=True, errors="replace", check=True).stdout.strip()
     except FileNotFoundError:
         fail("git is not installed")
     except subprocess.CalledProcessError as e:
@@ -118,8 +130,46 @@ def base_version(src: Path) -> str:
     return f"0.0.post{git(src, 'rev-list', '--count', 'HEAD')}"
 
 
-# A leading v, or a project-name prefix (netplan-1.1.2, RELEASE_7_5).
-TAG_PREFIX = r"^(?:[vV]|[A-Za-z][A-Za-z0-9.+]*?[-_])(?=\d)"
+# A leading v, or a project-name prefix, which may itself hold - or _
+# (netplan-1.1.2, RELEASE_7_5, my-project-1.2): up to the first - or _ that
+# a digit follows.
+TAG_PREFIX = r"^(?:[vV]|[A-Za-z][A-Za-z0-9.+_-]*?[-_])(?=\d)"
+# A pre-release word straight after a digit, or after a dot (2.94rc1, 1.0.rc1).
+PRERELEASE = re.compile(r"(?<=\d)\.?(?=(?:alpha|beta|pre|rc|test))", re.IGNORECASE)
+
+
+def parse_describe(describe: str) -> tuple[str, int]:
+    """``git describe --tags --long``'s tag and the commits since it."""
+    m = re.fullmatch(r"(.+)-(\d+)-g[0-9a-f]+", describe)
+    if not m:
+        fail(f"can't read upstream's git describe {describe!r}")
+    return m.group(1), int(m.group(2))
+
+
+def tag_version(tag: str, what: str, hint: str = "", strip_prefix: bool = False,
+                release: bool = False) -> str:
+    """An upstream tag as a Debian upstream version.
+
+    A leading v goes, and with `strip_prefix` a project-name prefix too
+    (``netplan-1.1.2`` is ``1.1.2``); ``_`` becomes ``.``; ``-`` becomes
+    ``~``, so a release candidate sorts below its release (``v11.0.0-rc2``
+    is ``11.0.0~rc2``).
+
+    With `release` (Set A, whose version must also sort against Debian's),
+    a pre-release word written without the hyphen gets the ``~`` as well
+    (``2.94rc1`` is ``2.94~rc1``, ``2.94test1`` is ``2.94~test1``), and a
+    hyphen before a digit is refused: ``release-2024-01-15`` or ``1.2-3``
+    would become ``2024~01~15`` or ``1.2~3``, which sort below ``2024`` and
+    ``1.2``."""
+    v = re.sub(TAG_PREFIX if strip_prefix else r"^[vV](?=\d)", "", tag).replace("_", ".")
+    if release:
+        if re.search(r"-\d", v):
+            fail(f"{what} has a hyphen before a digit ({v!r}), which can't be told from a "
+                 f"pre-release's and would sort below the version before it.{hint}")
+        v = PRERELEASE.sub("~", v)
+    v = v.replace("-", "~")
+    check_upstream(v, what, hint)
+    return v
 
 
 def upstream_from_describe(describe: str, strip_prefix: bool = False) -> str:
@@ -132,13 +182,9 @@ def upstream_from_describe(describe: str, strip_prefix: bool = False) -> str:
     chosen by --upstream-tag-match), a project-name prefix goes too:
     ``netplan-1.1.2`` is ``1.1.2``.
     """
-    m = re.fullmatch(r"(.+)-(\d+)-g[0-9a-f]+", describe)
-    if not m:
-        fail(f"can't read upstream's git describe {describe!r}")
-    tag, n = m.group(1), int(m.group(2))
-    prefix = TAG_PREFIX if strip_prefix else r"^[vV](?=\d)"
-    v = re.sub(prefix, "", tag).replace("_", ".").replace("-", "~")
-    check_upstream(v, f"upstream's tag {tag!r}", " Pass --upstream-version instead.")
+    tag, n = parse_describe(describe)
+    v = tag_version(tag, f"upstream's tag {tag!r}", " Pass --upstream-version instead.",
+                    strip_prefix)
     return v if n == 0 else f"{v}.post{n}"
 
 
@@ -242,12 +288,10 @@ def with_epoch(version: str, epoch: int | None) -> str:
 
 def release_version(tag: str, hint: str = "") -> str:
     """An upstream release tag as a Debian upstream version, the way Set A
-    normalises it (docs/packaging.md, "Set A"): a leading v or project-name
-    prefix goes, and ``-`` and ``_`` become ``.``: ``v2.93`` is ``2.93``,
-    ``netplan-1.1.2`` is ``1.1.2``, ``RELEASE_7_5`` is ``7.5``."""
-    v = re.sub(TAG_PREFIX, "", tag).replace("_", ".").replace("-", ".")
-    check_upstream(v, f"upstream's release {tag!r}", hint)
-    return v
+    normalises it (docs/packaging.md, "Set A"): ``v2.93`` is ``2.93``,
+    ``netplan-1.1.2`` is ``1.1.2``, ``RELEASE_7_5`` is ``7.5``, ``3.8-rc3``
+    is ``3.8~rc3`` and ``v2.94rc1`` is ``2.94~rc1``."""
+    return tag_version(tag, f"upstream's release {tag!r}", hint, strip_prefix=True, release=True)
 
 
 def set_a_base(release: str | None, n: int, sha: str, debian: str | None = None) -> str:
@@ -286,13 +330,17 @@ def release_subject(tree: Path, given: str | None) -> re.Pattern | None:
     """The pattern upstream's release commits' subjects match, for an
     upstream whose release tags aren't in the built branch's history:
     --upstream-release-subject, else the declaration's `[version]
-    release-subject`. None (the usual case): the releases are the tags."""
+    release-subject`. None (the usual case): the releases are the tags.
+    The declaration is checked either way, as PKG-DECLARED checks it."""
+    path, decl = declaration(tree)
+    table = decl.get("version", {})
+    if not isinstance(table, dict):
+        fail(f"{path}: [version] must be a table")
+    extra = sorted(set(table) - {"release-subject"})
+    if extra:
+        fail(f"{path}: [version] has unknown keys {', '.join(extra)}")
     what = "--upstream-release-subject"
     if given is None:
-        path, decl = declaration(tree)
-        table = decl.get("version", {})
-        if not isinstance(table, dict):
-            fail(f"{path}: [version] must be a table")
         given, what = table.get("release-subject"), f"{path}: [version] release-subject"
         if given is None:
             return None
@@ -309,24 +357,29 @@ def release_subject(tree: Path, given: str | None) -> re.Pattern | None:
 
 def last_release(tree: Path, commit: str, match: str | None,
                  subject: re.Pattern | None) -> tuple[str | None, int]:
-    """The newest upstream release in `commit`'s history, as a version, and
-    the upstream commits since it. (None, every commit) when upstream has no
-    tags at all."""
+    """The upstream release `commit` follows, as a version, and the upstream
+    commits since it. (None, every commit) when upstream has no tags at all."""
     if subject is not None:
-        # Python's regular expressions, not git's --grep; old subjects needn't
-        # be UTF-8 (an svn import).
-        log = subprocess.run(["git", "-C", str(tree), "log", "--format=%H %s", commit],
-                             capture_output=True, text=True, errors="replace", check=True)
-        for line in log.stdout.splitlines():
+        # The nearest release commit on the branch's own line (its first
+        # parents), not the newest by date in everything merged into it: a
+        # maintenance release merged in later (7.4.1, after 7.5) is not what
+        # the branch follows. The commits since it are all of them, merged
+        # ones too, as git describe counts. Python's regular expressions,
+        # not git's --grep.
+        for line in git(tree, "log", "--first-parent", "--format=%H %s", commit).split("\n"):
             sha, _, text = line.partition(" ")
             m = subject.search(text)
-            if m:
-                release = release_version(m.group(1) if subject.groups else m.group(0),
-                                          f" It is what the release pattern {subject.pattern!r} "
-                                          f"matched in {sha[:7]}'s subject.")
-                return release, int(git(tree, "rev-list", "--count", f"{sha}..{commit}"))
-        fail(f"no commit in upstream's history ({commit[:7]}) has a subject matching the "
-             f"release pattern {subject.pattern!r}")
+            if not m:
+                continue
+            found = m.group(1) if subject.groups else m.group(0)
+            if found is None:
+                fail(f"the release pattern {subject.pattern!r} matches {sha[:7]}'s subject "
+                     f"{text!r} without its group: the group must hold the release")
+            release = release_version(found, f" It is what the release pattern "
+                                      f"{subject.pattern!r} matched in {sha[:7]}'s subject.")
+            return release, int(git(tree, "rev-list", "--count", f"{sha}..{commit}"))
+        fail(f"no commit on upstream's own line (the first parents of {commit[:7]}) has a "
+             f"subject matching the release pattern {subject.pattern!r}")
     r = subprocess.run(["git", "-C", str(tree), "describe", "--tags", "--long",
                         *(["--match", match] if match else []), commit],
                        capture_output=True, text=True)
@@ -336,37 +389,66 @@ def last_release(tree: Path, commit: str, match: str | None,
                  f"({commit[:7]}). If upstream's release tags aren't on the branch it is "
                  "built from, name its release commits instead: [version] release-subject "
                  "(docs/packaging.md, \"Set A\").")
-        return None, int(git(tree, "rev-list", "--count", commit))
-    m = re.fullmatch(r"(.+)-(\d+)-g[0-9a-f]+", r.stdout.strip())
-    if not m:
-        fail(f"can't read upstream's git describe {r.stdout.strip()!r}")
-    return (release_version(m.group(1), " Pass --upstream-tag-match with a glob only the "
-                            "release tags match."), int(m.group(2)))
+        n = int(git(tree, "rev-list", "--count", commit))
+        # The document's base 4, but also what a checkout without tags, or an
+        # upstream whose tags are off the built branch, looks like: say so.
+        warn(f"no upstream release tag in the history of {commit[:7]}, so the version starts "
+             f"0.0+git{n}. If upstream has releases, this sorts below them: check the "
+             "checkout has upstream's tags (`fetch-depth: 0`), or, if its release tags "
+             "aren't on the branch it is built from, declare its release commits' subject, "
+             "[version] release-subject (docs/packaging.md, \"Set A\").")
+        return None, n
+    tag, n = parse_describe(r.stdout.strip())
+    return (release_version(tag, " Pass --upstream-tag-match with a glob only the release "
+                            "tags match."), n)
 
 
-def debian_version(src: Path, release: str, owner_tag: str, epoch: int | None) -> str | None:
-    """Debian's version, when debian/ came from Debian and is for `release`:
-    the committed debian/changelog's top version (``1.1.2-7``), if its
-    upstream part is the release (or the release repacked, ``2.93+dfsg``).
-    Ours then extends Debian's revision, so it sorts above Debian's build of
-    the same release. None when the changelog is for another version (the
-    upstream commit is a newer release than Debian packaged), is ours, or
-    there is none."""
+def committed_debian(src: Path, owner_tag: str, epoch: int | None) -> str | None:
+    """The committed debian/changelog's top version, as Debian's: without its
+    epoch, and without our own `+<owner-tag>...` when the top entry is one of
+    ours on Debian's (``1.1.2-7+welland1`` is ``1.1.2-7``). None without a
+    committed changelog. A version with an epoch needs the same --epoch,
+    whatever the base turns out to be: without it every build sorts below
+    Debian's."""
     committed = subprocess.run(["git", "-C", str(src), "show", "HEAD:./debian/changelog"],
                                capture_output=True, text=True, errors="replace")
     m = re.match(r"\S+ \(([^)\s]+)\)", committed.stdout) if committed.returncode == 0 else None
     if not m:
         return None
     theirs, _, version = m.group(1).rpartition(":")
-    upstream, dash, revision = version.rpartition("-")
-    if not dash or f"+{owner_tag}" in revision:
-        return None
-    if upstream != release and not upstream.startswith(release + "+"):
-        return None
     if theirs and theirs != str(epoch):
-        fail(f"Debian's version {m.group(1)} has an epoch, so every version without it sorts "
-             f"below Debian's: pass --epoch {theirs} (a declared PKG-VERSION exception)")
-    return version
+        fail(f"the committed debian/changelog's version {m.group(1)} has an epoch, so every "
+             f"version without it sorts below that one: pass --epoch {theirs} (a declared "
+             "PKG-VERSION exception)")
+    return re.split(rf"\+{owner_tag}(?=[0-9.])", version, maxsplit=1)[0]
+
+
+def debian_base(debian: str | None, release: str, n: int) -> str | None:
+    """Debian's version as Set A's base: `debian` (committed_debian's) when it
+    is ``<release>-<revision>`` for the very release the upstream commit is
+    (n = 0), so ours extends Debian's revision and sorts above Debian's build
+    of that release. Debian's repack of the release counts as the release
+    when it is marked ``+dfsg...`` or ``+ds...`` (``2.93+dfsg-1``): those
+    sort below the ``+git<N>`` of the commits after it.
+
+    None when it is for another version, has no Debian revision, or the
+    upstream commit is past the release. Any other suffix on the release
+    (``2.0+repack-1``, ``2.0+really1.9-1``, ``2.0.ds1-1``) is refused: it
+    sorts above ``2.0+git<N>``, so Debian's package would replace ours, or
+    ours would go backwards at the next upstream commit."""
+    if debian is None:
+        return None
+    upstream, dash, _ = debian.rpartition("-")
+    if not dash or not upstream.startswith(release):
+        return None
+    rest = upstream[len(release):]
+    if rest and not re.match(r"\+(?:dfsg|ds)", rest):
+        if rest[0] == "+" or re.match(r"\.(?:dfsg|ds)", rest):
+            fail(f"the committed debian/changelog's version {debian} is release {release} with "
+                 f"{rest!r}, which sorts above {release}+git<N>: only Debian's +dfsg and +ds "
+                 "repack suffixes are supported (docs/packaging.md, \"Set A\")")
+        return None   # another version: 2.93 is not 2.9, 3.5a not 3.5, 2.0~rc1 not 2.0
+    return debian if n == 0 else None
 
 
 def set_a_version(tree: Path, src: Path, branch: str, match: str | None, subject: str | None,
@@ -376,9 +458,22 @@ def set_a_version(tree: Path, src: Path, branch: str, match: str | None, subject
     check_not_shallow(tree)
     ref, commit = upstream_commit(tree, branch)
     release, n = last_release(tree, commit, match, release_subject(tree, subject))
-    debian = debian_version(src, release, owner_tag, epoch) if release and n == 0 else None
+    debian = committed_debian(src, owner_tag, epoch)
+    debian = debian_base(debian, release, n) if release else None
     ours = git(tree, "rev-list", "--count", f"{ref}..HEAD")
     return with_epoch(f"{set_a_base(release, n, commit, debian)}+{owner_tag}{ours}", epoch)
+
+
+def refuse_set_b_for_set_a(tree: Path) -> None:
+    """A repository declared Set A never gets the Set B form: made from our
+    own vX.Y tags, which a Set A repository doesn't have, it would be
+    0.0.post<N>, below everything published. (A backport's form is still to
+    come, so a backport is left as it was.)"""
+    path, decl = declaration(tree)
+    if decl.get("kind") == "A" and decl.get("variant") != "backport":
+        fail(f"{path} says kind = \"A\", so the version is Set A's: pass --owner-tag "
+             "<owner-tag> --upstream-branch upstream (the build's version-args; "
+             "docs/packaging.md, \"Set A\")")
 
 
 def with_suffixes(base: str, suite: str, pr: int | None) -> str:
@@ -503,10 +598,12 @@ def main() -> None:
                          "--upstream-branch: only tags matching GLOB are releases")
     ap.add_argument("--upstream-release-subject", default=None, metavar="REGEX",
                     help="with --upstream-branch, for an upstream whose release tags aren't in "
-                         "the branch's history: a release is the newest commit whose subject "
-                         "matches REGEX, and its one group (the whole match without one) is "
-                         "the release, normalised as a tag is. Default: [version] "
-                         "release-subject in .github/apt-packaging.toml; without either, the tags")
+                         "the branch's history: a release is the nearest commit on the "
+                         "branch's own line (first parents) whose subject matches REGEX, and "
+                         "its one group (the whole match without one) is the release, "
+                         "normalised as a tag is. Default: [version] release-subject in "
+                         ".github/apt-packaging.toml, which is where a pattern with a space "
+                         "must go (version-args is split at spaces); without either, the tags")
     ap.add_argument("--owner-tag", default=None,
                     help="patch series: the owner's tag between the two versions (fpgasonline); "
                          "Set A: the one before <M> (welland)")
@@ -530,14 +627,16 @@ def main() -> None:
         fail("--upstream-tag-match needs --upstream-dir or --upstream-branch")
     if args.upstream_release_subject is not None and not set_a:
         fail("--upstream-release-subject needs --upstream-branch")
-    match = args.upstream_tag_match or mirror_tag_match(tree)
-    upstream = (upstream_version(args.upstream_dir, match) if args.upstream_dir is not None
-                else args.upstream_debian_version if debian_source
-                else args.upstream_version)
     if set_a:
         base = set_a_version(tree, args.source_dir, args.upstream_branch, args.upstream_tag_match,
                              args.upstream_release_subject, args.owner_tag, args.epoch)
     else:
+        if not patch_series:
+            refuse_set_b_for_set_a(tree)
+        match = args.upstream_tag_match or mirror_tag_match(tree)
+        upstream = (upstream_version(args.upstream_dir, match) if args.upstream_dir is not None
+                    else args.upstream_debian_version if debian_source
+                    else args.upstream_version)
         base = package_version(base_version(tree), upstream, args.owner_tag, args.epoch,
                                debian_source)
     version = with_suffixes(base, args.suite, args.pr)

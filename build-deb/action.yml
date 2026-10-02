@@ -476,7 +476,9 @@ runs:
             read -ra version_args <<< "$VERSION_ARGS"
             if [ -d /work/version-tree ]; then version_args+=(--version-tree /work/version-tree); fi
             case "$VERSION_MODE" in
-              shared) python3 /work/apt-repo-action/scripts/deb-version.py \
+              # GITHUB_ACTIONS for the script alone, so its warnings become
+              # annotations; the package build does not see it.
+              shared) GITHUB_ACTIONS=true python3 /work/apt-repo-action/scripts/deb-version.py \
                         --suite "$SUITE" ${PR:+--pr "$PR"} "${version_args[@]}" --write-changelog ;;
               script) python3 "$VERSION_SCRIPT" --write-changelog ;;
             esac
