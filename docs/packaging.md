@@ -745,9 +745,26 @@ version scheme, and is declared as a `PKG-VERSION` exception (rpi-qemu).
 | `<owner-tag>` | `welland` for `mithro/*`, `fpgasonline` for `fpgas-online/*` |
 | `<M>` | commits on `packaging` that aren't on `upstream`: `git rev-list --count upstream..packaging` |
 
-Upstream tags are normalised to a Debian upstream version: drop a leading
-`v` or project-name prefix, and turn `-` and `_` into `.` (`v2.93` → `2.93`,
-`netplan-1.1.2` → `1.1.2`, `RELEASE_7_5` → `7.5`).
+Upstream tags are normalised to a Debian upstream version:
+- a leading `v` or project-name prefix goes (`v2.93` → `2.93`,
+  `netplan-1.1.2` → `1.1.2`, `my-project-1.2` → `1.2`);
+- `_` becomes `.` (`RELEASE_7_5` → `7.5`);
+- a pre-release gets a `~`, so it sorts below its release, as
+  [a mirror's](#mirrors) does: a `-` becomes `~` (`3.8-rc3` → `3.8~rc3`), and
+  `rc`, `test`, `alpha`, `beta` or `pre` (in any case) straight after a digit
+  or a dot gets one put before it (`v2.94rc1` → `2.94~rc1`, `v2.94test1` →
+  `2.94~test1`, `1.0.rc1` → `1.0~rc1`). Other suffixes are left as they are:
+  tmux's `3.5a` is a later release than `3.5`;
+- a `-` before a digit fails the build: a date (`release-2024-01-15`) or a
+  revision (`1.2-3`) can't be told from a pre-release, and as `2024~01~15`
+  it would sort below `2024`. So does a tag that still isn't a Debian
+  upstream version (`debian/2.90-1`). `--upstream-tag-match` picks the tags
+  that are releases.
+
+Between two pre-release words the order is dpkg's, the alphabet's: `alpha`,
+`beta`, `pre`, `rc`, `test`. An upstream that makes its `test` releases
+before its release candidates (dnsmasq) therefore sorts wrongly between
+them until the release itself.
 
 The shared script makes it, given the owner's tag and the branch that holds
 upstream's history: `scripts/deb-version.py --owner-tag <owner-tag>
@@ -771,18 +788,31 @@ upstream's history: `scripts/deb-version.py --owner-tag <owner-tag>
   (in `version-args`) limits the tags to upstream's releases, when it has
   others (`debian/2.90-1`). A tag that doesn't normalise to a Debian
   upstream version fails the build.
+- **No tag at all** gives base 4, with a warning: it is also what a checkout
+  without upstream's tags looks like, and `0.0+git<N>` sorts below every
+  release.
 - **`M`** counts from the build commit (`upstream..HEAD`), so a pull
   request's count is the one its merge commit will have.
 - **Debian's version** (1) is the top of the committed `debian/changelog`,
   and is the base only while it says what is built: `upstream` is exactly at
   a release (`N` = 0), and that changelog's version is `<release>-<revision>`
-  for the same release (or Debian's repack of it, `2.93+dfsg-1`). Ours then
-  extends Debian's revision, and sorts above Debian's build of that release.
-  Once upstream is merged past the release, the base is (3), which sorts
-  above every Debian revision of the release and below Debian's next
-  upstream version. smartmontools' `debian/` is Debian's 7.5-2, and it
-  builds upstream's `main`: `7.5+git583.g06489e0-0+welland10~deb13`. A Debian
-  version with an epoch needs the same `--epoch`, or the build fails.
+  for the same release. Ours then extends Debian's revision, and sorts above
+  Debian's build of that release. Once upstream is merged past the release,
+  the base is (3), which sorts above every Debian revision of the release
+  and below Debian's next upstream version. smartmontools' `debian/` is
+  Debian's 7.5-2, and it builds upstream's `main`:
+  `7.5+git583.g06489e0-0+welland10~deb13`.
+  - A top entry of ours on Debian's (`1.1.2-7+welland1`, committed) is read
+    as Debian's `1.1.2-7`.
+  - Debian's repack of the release counts as the release when it is marked
+    `+dfsg…` or `+ds…` (`2.93+dfsg-1`), which sort below the `+git<N>` that
+    follows. Any other suffix on the release (`2.0+repack-1`,
+    `2.0+really1.9-1`, `2.0.ds1-1`, `2.0+git20240101-1`) sorts above
+    `2.0+git<N>`, so Debian's package would replace ours: the build fails,
+    at the release and after it.
+  - A committed version with an epoch needs the same `--epoch` (a declared
+    `PKG-VERSION` exception), whatever the base, or the build fails:
+    without it every build sorts below Debian's.
 - **An upstream whose release tags aren't on the branch we build** has its
   releases named by commit subject instead. smartmontools' history came from
   svn: its `RELEASE_7_5` tag is on a commit off `main`, where `git describe`
@@ -794,14 +824,24 @@ upstream's history: `scripts/deb-version.py --owner-tag <owner-tag>
   release-subject = '^Release (\d+(?:\.\d+)+) RELEASE_\d+(?:_\d+)+$'
   ```
 
-  The release is then the newest commit in the upstream commit's history
-  whose subject matches (a Python regular expression, searched for anywhere
-  in the subject unless anchored), `N` the commits since it, and the
-  pattern's one group (everything it matched, without a group) is the
-  release, normalised as a tag is: `7.5`, or `RELEASE_7_5`. With a pattern,
-  tags aren't read, and a pattern that matches no commit fails the build:
-  it never falls back to `0.0`. `--upstream-release-subject` gives the
-  pattern on the command line instead.
+  The release is then the nearest commit on upstream's own line (the first
+  parents of the upstream commit) whose subject matches: a Python regular
+  expression, searched for anywhere in the subject unless anchored. A
+  maintenance release merged into the branch later (7.4.1, after 7.5) is
+  not on that line, so it never takes the version back; nor is
+  smartmontools' second `Release 7.5 RELEASE_7_5` commit, the one its svn
+  tag was made from. `N` is every commit since the release, merged ones too,
+  and the pattern's one group (everything it matched, without a group) is
+  the release, normalised as a tag is: `7.5`, or `RELEASE_7_5`. With a
+  pattern, tags aren't read, and a pattern that matches no commit fails the
+  build: it never falls back to `0.0`. `--upstream-release-subject` gives
+  the pattern on the command line instead, but not through `version-args`
+  when it has a space, since those are split at spaces: the declaration is
+  the place for it.
+- **A repository declared `kind = "A"` never gets the Set B form.** Without
+  `--upstream-branch` the script fails, instead of making `0.0.post<N>`
+  from our own tags, which a Set A repository doesn't have. `PKG-SHARED`
+  checks the workflow for it too.
 
 The `+<owner-tag>` sorts after Debian's own suffixes (`+deb13u1`, `+b1`),
 because `w` and `f` both come after `d` and `b`. So our build stays newer
@@ -987,7 +1027,8 @@ that sorts wrongly. Each one is a recorded exception.
 - **The shared version script implements Set B, its patch series form,
   Set A and the epoch.** Set A is asked for with `version-args`
   (`--owner-tag <owner-tag> --upstream-branch upstream`, see
-  [Set A](#set-a)); without them the version is Set B's. The backport form
+  [Set A](#set-a)); without them the version is Set B's, which the script
+  refuses to make for a repository declared `kind = "A"`. The backport form
   is still to come (compliance-plan.md, section 3). A repository that still
   has its own `packaging/deb-version.py` keeps it until it is moved, and
   `build-deb` runs it, with a warning. A Set A or Set B repository deletes
@@ -1035,8 +1076,9 @@ purpose: tmux's and scanbd's accept only `--write-changelog`, and would fail.
 **A Set A repository** adds `version-args: --owner-tag <owner-tag>
 --upstream-branch upstream` in that same commit (and `[version]
 release-subject` to its declaration, if upstream's release tags aren't on the
-built branch). Without them the shared script gives the Set B version, from
-our own `vX.Y` tags. Before merging, compare the pull request's preview
+built branch). Without them the build fails: the shared script doesn't make
+the Set B version, from our own `vX.Y` tags, for a repository declared
+Set A. Before merging, compare the pull request's preview
 version with what the suite publishes (`dpkg --compare-versions`): a
 repository whose own script made versions another way (a date, a hand-set
 `+welland<M>`) may need the new version to be raised, by an epoch under a

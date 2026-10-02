@@ -108,7 +108,7 @@ repository's issue in section 4), and everything as JSON.
 | PKG-PREVIEW | pull requests build, never publish | YAML + the publish job's `if:` |
 | PKG-CONCURRENCY | `deb-${{ github.ref }}`, cancelling pull requests only | parse YAML |
 | PKG-PUBLISHER | `publish-apt.yml@main` | parse YAML |
-| PKG-SHARED | shared build at `@main`: the reusable `build-deb.yml`, the `build-deb` action, or the `deb-version` action for an nfpm build or a patch series' own job; every use at `@main`; no local `deb-version.py` | YAML + tree |
+| PKG-SHARED | shared build at `@main`: the reusable `build-deb.yml`, the `build-deb` action, or the `deb-version` action for an nfpm build or a patch series' own job; every use at `@main`; no local `deb-version.py`; Set A asks for its version (`--upstream-branch` in a shared use's `version-args`) | YAML + tree |
 | PKG-INSTALL-TEST | an `Install test` step that runs something, in the job that builds (or the shared `build-deb.yml`) | YAML |
 | PKG-SUITES | default suites, or declared with a reason | live site, against the declaration read as `build-deb.yml` plans its builds |
 | PKG-ARCH | default architectures per suite, or declared with a reason; nothing advertised without packages | live site, against the declaration read as `build-deb.yml` plans its builds |
